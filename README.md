@@ -21,6 +21,7 @@ The CLI exists to:
 
 The CLI currently includes namespaces for:
 
+- health
 - search
 - embeddings
 - ingest
@@ -34,7 +35,7 @@ The CLI currently includes namespaces for:
 - export
 - usage
 
-It now covers the major current public `/v1` surface, including tenant export and backup/restore validation paths.
+It now covers the major current public `/v1` surface, including `health`, tenant export, embedding export, token-usage export, and backup/restore validation paths.
 
 ## Current Honest Caveats
 
@@ -45,6 +46,7 @@ The CLI should be described carefully:
 - human output is still fairly raw
 - streaming behavior is still thinner than an ideal interactive CLI experience
 - some unsupported/error classification logic remains heuristic rather than perfectly typed
+- config/profile/auth ergonomics still need productization work
 
 So the honest positioning is:
 

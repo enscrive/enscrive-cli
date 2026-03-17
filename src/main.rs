@@ -39,6 +39,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Check stack health through /health
+    Health,
+
     /// Search collections through /v1/search
     Search(SearchArgs),
 
@@ -623,11 +626,11 @@ enum ExportSubcommand {
     /// Export tenant data from the public portability endpoint
     Tenant(ExportTenantArgs),
 
-    /// Export raw embedding records (not public on /v1)
-    Embeddings,
+    /// Export raw embedding records from the public admin surface
+    Embeddings(ExportEmbeddingsArgs),
 
-    /// Export token-usage records (not public on /v1)
-    TokenUsage,
+    /// Export granular token-usage records from the public admin surface
+    TokenUsage(ExportTokenUsageArgs),
 }
 
 #[derive(Args)]
@@ -643,6 +646,59 @@ struct ExportTenantArgs {
 
     #[arg(long)]
     layer: Option<String>,
+}
+
+#[derive(Args)]
+struct ExportEmbeddingsArgs {
+    #[arg(long)]
+    user_id: Option<String>,
+
+    #[arg(long = "document-id")]
+    document_id: Option<String>,
+
+    #[arg(long)]
+    layer: Option<String>,
+
+    #[arg(long = "conversation-id")]
+    conversation_id: Option<String>,
+
+    /// Restrict export to specific paragraph IDs. Pass multiple times as needed.
+    #[arg(long = "paragraph-id")]
+    paragraph_ids: Vec<String>,
+
+    #[arg(long)]
+    limit: Option<u32>,
+
+    #[arg(long = "page-token")]
+    page_token: Option<String>,
+
+    #[arg(long, default_value_t = false)]
+    include_vectors: bool,
+}
+
+#[derive(Args)]
+struct ExportTokenUsageArgs {
+    #[arg(long)]
+    user_id: Option<String>,
+
+    #[arg(long = "document-id")]
+    document_id: Option<String>,
+
+    #[arg(long)]
+    layer: Option<String>,
+
+    #[arg(long = "conversation-id")]
+    conversation_id: Option<String>,
+
+    /// Restrict export to specific paragraph IDs. Pass multiple times as needed.
+    #[arg(long = "paragraph-id")]
+    paragraph_ids: Vec<String>,
+
+    #[arg(long)]
+    limit: Option<u32>,
+
+    #[arg(long = "page-token")]
+    page_token: Option<String>,
 }
 
 #[derive(Args)]
@@ -1084,6 +1140,61 @@ fn build_export_tenant_query(args: &ExportTenantArgs) -> Vec<(&'static str, Stri
     query
 }
 
+fn build_export_embeddings_query(args: &ExportEmbeddingsArgs) -> Vec<(&'static str, String)> {
+    let mut query = Vec::new();
+    if let Some(value) = &args.user_id {
+        query.push(("user_id", value.clone()));
+    }
+    if let Some(value) = &args.document_id {
+        query.push(("document_id", value.clone()));
+    }
+    if let Some(value) = &args.layer {
+        query.push(("layer", value.clone()));
+    }
+    if let Some(value) = &args.conversation_id {
+        query.push(("conversation_id", value.clone()));
+    }
+    for value in &args.paragraph_ids {
+        query.push(("paragraph_ids", value.clone()));
+    }
+    if let Some(value) = args.limit {
+        query.push(("limit", value.to_string()));
+    }
+    if let Some(value) = &args.page_token {
+        query.push(("page_token", value.clone()));
+    }
+    if args.include_vectors {
+        query.push(("include_vectors", "true".to_string()));
+    }
+    query
+}
+
+fn build_export_token_usage_query(args: &ExportTokenUsageArgs) -> Vec<(&'static str, String)> {
+    let mut query = Vec::new();
+    if let Some(value) = &args.user_id {
+        query.push(("user_id", value.clone()));
+    }
+    if let Some(value) = &args.document_id {
+        query.push(("document_id", value.clone()));
+    }
+    if let Some(value) = &args.layer {
+        query.push(("layer", value.clone()));
+    }
+    if let Some(value) = &args.conversation_id {
+        query.push(("conversation_id", value.clone()));
+    }
+    for value in &args.paragraph_ids {
+        query.push(("paragraph_ids", value.clone()));
+    }
+    if let Some(value) = args.limit {
+        query.push(("limit", value.to_string()));
+    }
+    if let Some(value) = &args.page_token {
+        query.push(("page_token", value.clone()));
+    }
+    query
+}
+
 fn build_log_stream_query(args: &LogStreamArgs) -> Vec<(&'static str, String)> {
     let mut query = Vec::new();
 
@@ -1127,19 +1238,24 @@ async fn main() {
     let cli = Cli::parse();
     let fmt = cli.output;
     let api_key = match &cli.command {
+        Commands::Health => None,
         Commands::Collections {
             sub: CollectionsSubcommand::Get { .. },
-        }
-        | Commands::Export {
-            sub: ExportSubcommand::Embeddings,
-        }
-        | Commands::Export {
-            sub: ExportSubcommand::TokenUsage,
         } => None,
         _ => Some(require_api_key(&cli)),
     };
 
     match &cli.command {
+        Commands::Health => {
+            let client = client::EnscribeClient::new(
+                cli.endpoint.clone(),
+                cli.api_key.clone().unwrap_or_default(),
+            );
+            match client.get_json("/health").await {
+                Ok(data) => CliResponse::success("health", data).emit(fmt),
+                Err(e) => request_failure("health", e).emit(fmt),
+            }
+        }
         Commands::Search(args) => {
             let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
             match build_search_body(args) {
@@ -1669,19 +1785,27 @@ async fn main() {
                     Err(e) => request_failure("export tenant", e).emit(fmt),
                 }
             }
-            ExportSubcommand::Embeddings => {
-                CliResponse::unsupported(
-                    "export embeddings",
-                    "embedding export is not available on public /v1; only /v1/admin/export is public today",
-                )
-                .emit(fmt);
+            ExportSubcommand::Embeddings(args) => {
+                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let query = build_export_embeddings_query(args);
+                match client
+                    .get_json_with_query("/v1/admin/export/embeddings", &query)
+                    .await
+                {
+                    Ok(data) => CliResponse::success("export embeddings", data).emit(fmt),
+                    Err(e) => request_failure("export embeddings", e).emit(fmt),
+                }
             }
-            ExportSubcommand::TokenUsage => {
-                CliResponse::unsupported(
-                    "export token-usage",
-                    "token-usage export is not available on public /v1; only /v1/admin/export is public today",
-                )
-                .emit(fmt);
+            ExportSubcommand::TokenUsage(args) => {
+                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let query = build_export_token_usage_query(args);
+                match client
+                    .get_json_with_query("/v1/admin/export/token-usage", &query)
+                    .await
+                {
+                    Ok(data) => CliResponse::success("export token-usage", data).emit(fmt),
+                    Err(e) => request_failure("export token-usage", e).emit(fmt),
+                }
             }
         },
         Commands::Logs { sub } => {
@@ -1735,6 +1859,15 @@ async fn main() {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn parse_health_command() {
+        let args = Cli::parse_from(["enscribe", "health"]);
+        match args.command {
+            Commands::Health => {}
+            _ => panic!("expected health"),
+        }
+    }
 
     #[test]
     fn parse_search_command() {
@@ -2627,6 +2760,162 @@ mod tests {
                 ("include_vectors", "true".to_string()),
                 ("document_id", "doc-1".to_string()),
                 ("layer", "baseline".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_export_embeddings_command() {
+        let args = Cli::parse_from([
+            "enscribe",
+            "--api-key",
+            "test-key",
+            "export",
+            "embeddings",
+            "--user-id",
+            "user-1",
+            "--document-id",
+            "doc-1",
+            "--layer",
+            "baseline",
+            "--conversation-id",
+            "conv-1",
+            "--paragraph-id",
+            "p-1",
+            "--paragraph-id",
+            "p-2",
+            "--limit",
+            "25",
+            "--page-token",
+            "cursor-1",
+            "--include-vectors",
+        ]);
+        match args.command {
+            Commands::Export {
+                sub:
+                    ExportSubcommand::Embeddings(ExportEmbeddingsArgs {
+                        user_id,
+                        document_id,
+                        layer,
+                        conversation_id,
+                        paragraph_ids,
+                        limit,
+                        page_token,
+                        include_vectors,
+                    }),
+            } => {
+                assert_eq!(user_id.as_deref(), Some("user-1"));
+                assert_eq!(document_id.as_deref(), Some("doc-1"));
+                assert_eq!(layer.as_deref(), Some("baseline"));
+                assert_eq!(conversation_id.as_deref(), Some("conv-1"));
+                assert_eq!(paragraph_ids, vec!["p-1".to_string(), "p-2".to_string()]);
+                assert_eq!(limit, Some(25));
+                assert_eq!(page_token.as_deref(), Some("cursor-1"));
+                assert!(include_vectors);
+            }
+            _ => panic!("expected export embeddings"),
+        }
+    }
+
+    #[test]
+    fn build_export_embeddings_query_includes_requested_filters() {
+        let query = build_export_embeddings_query(&ExportEmbeddingsArgs {
+            user_id: Some("user-1".to_string()),
+            document_id: Some("doc-1".to_string()),
+            layer: Some("baseline".to_string()),
+            conversation_id: Some("conv-1".to_string()),
+            paragraph_ids: vec!["p-1".to_string(), "p-2".to_string()],
+            limit: Some(25),
+            page_token: Some("cursor-1".to_string()),
+            include_vectors: true,
+        });
+
+        assert_eq!(
+            query,
+            vec![
+                ("user_id", "user-1".to_string()),
+                ("document_id", "doc-1".to_string()),
+                ("layer", "baseline".to_string()),
+                ("conversation_id", "conv-1".to_string()),
+                ("paragraph_ids", "p-1".to_string()),
+                ("paragraph_ids", "p-2".to_string()),
+                ("limit", "25".to_string()),
+                ("page_token", "cursor-1".to_string()),
+                ("include_vectors", "true".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_export_token_usage_command() {
+        let args = Cli::parse_from([
+            "enscribe",
+            "--api-key",
+            "test-key",
+            "export",
+            "token-usage",
+            "--user-id",
+            "user-1",
+            "--document-id",
+            "doc-1",
+            "--layer",
+            "baseline",
+            "--conversation-id",
+            "conv-1",
+            "--paragraph-id",
+            "p-1",
+            "--limit",
+            "10",
+            "--page-token",
+            "cursor-2",
+        ]);
+        match args.command {
+            Commands::Export {
+                sub:
+                    ExportSubcommand::TokenUsage(ExportTokenUsageArgs {
+                        user_id,
+                        document_id,
+                        layer,
+                        conversation_id,
+                        paragraph_ids,
+                        limit,
+                        page_token,
+                    }),
+            } => {
+                assert_eq!(user_id.as_deref(), Some("user-1"));
+                assert_eq!(document_id.as_deref(), Some("doc-1"));
+                assert_eq!(layer.as_deref(), Some("baseline"));
+                assert_eq!(conversation_id.as_deref(), Some("conv-1"));
+                assert_eq!(paragraph_ids, vec!["p-1".to_string()]);
+                assert_eq!(limit, Some(10));
+                assert_eq!(page_token.as_deref(), Some("cursor-2"));
+            }
+            _ => panic!("expected export token-usage"),
+        }
+    }
+
+    #[test]
+    fn build_export_token_usage_query_includes_requested_filters() {
+        let query = build_export_token_usage_query(&ExportTokenUsageArgs {
+            user_id: Some("user-1".to_string()),
+            document_id: Some("doc-1".to_string()),
+            layer: Some("baseline".to_string()),
+            conversation_id: Some("conv-1".to_string()),
+            paragraph_ids: vec!["p-1".to_string()],
+            limit: Some(10),
+            page_token: Some("cursor-2".to_string()),
+        });
+
+        assert_eq!(
+            query,
+            vec![
+                ("user_id", "user-1".to_string()),
+                ("document_id", "doc-1".to_string()),
+                ("layer", "baseline".to_string()),
+                ("conversation_id", "conv-1".to_string()),
+                ("paragraph_ids", "p-1".to_string()),
+                ("limit", "10".to_string()),
+                ("page_token", "cursor-2".to_string()),
             ]
         );
     }
