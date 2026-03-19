@@ -75,4 +75,20 @@ Manifest runner:
 python3 scripts/run_manifests.py --help
 ```
 
+The manifest runner supports both JSON and YAML manifests, suite metadata
+(`current-truth`, `current-honesty`, `end-state`), and richer threshold/check
+assertions for dataset-oriented validation.
+
+Current-truth fixture bootstrap:
+
+```bash
+python3 scripts/bootstrap_current_truth_fixture.py --help
+```
+
+Live validation orchestrator:
+
+```bash
+python3 scripts/run_live_validation.py --help
+```
+
 This README is the companion current-state entry point for the CLI repo. The top-level `ENSCRIBE-IO` docs remain canonical for platform truth.
