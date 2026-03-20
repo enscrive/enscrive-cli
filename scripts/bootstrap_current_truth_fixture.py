@@ -56,6 +56,21 @@ def append_exports(out_path: Path | None, values: dict[str, str]):
     print(text, end="")
 
 
+def default_dimensions_for_model(model: str) -> int | None:
+    return {
+        "text-embedding-3-small": 1536,
+        "text-embedding-3-large": 3072,
+        "text-embedding-ada-002": 1536,
+        "voyage-3": 1024,
+        "voyage-3-lite": 512,
+        "voyage-code-3": 1024,
+        "bge-large-en-v1.5": 1024,
+        "bge-small-en-v1.5": 384,
+        "bge-base-en-v1.5": 768,
+        "bge-m3": 1024,
+    }.get(model)
+
+
 def request(base_url: str, api_key: str, method: str, path: str, body=None):
     payload = None
     headers = {
@@ -141,6 +156,21 @@ def main():
         help="Append shell exports to this file",
     )
     parser.add_argument(
+        "--embedding-model",
+        default=os.environ.get(
+            "ENSCRIBE_FIXTURE_EMBEDDING_MODEL", "text-embedding-3-small"
+        ),
+    )
+    parser.add_argument(
+        "--dimensions",
+        type=int,
+        default=(
+            int(os.environ["ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS"])
+            if os.environ.get("ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS")
+            else None
+        ),
+    )
+    parser.add_argument(
         "--search-timeout-secs",
         type=int,
         default=20,
@@ -149,6 +179,13 @@ def main():
 
     if not args.api_key:
         raise RuntimeError("missing ENSCRIBE_API_KEY or --api-key")
+
+    if args.dimensions is None:
+        args.dimensions = default_dimensions_for_model(args.embedding_model)
+    if args.dimensions is None:
+        raise RuntimeError(
+            f"unknown dimensions for embedding model '{args.embedding_model}'; pass --dimensions"
+        )
 
     os.environ.setdefault("ENSCRIBE_REPO_ROOT", str(REPO_ROOT))
     args.base_url = canonicalize_loopback_base_url(args.base_url)
@@ -169,8 +206,8 @@ def main():
         {
             "name": collection_name,
             "description": "Codex live validation current-truth fixture",
-            "embedding_model": "bge-small-en-v1.5",
-            "dimensions": 384,
+            "embedding_model": args.embedding_model,
+            "dimensions": args.dimensions,
             "default_voice_id": None,
         },
     )
@@ -237,6 +274,8 @@ def main():
             "ENSCRIBE_REPO_ROOT": os.environ["ENSCRIBE_REPO_ROOT"],
             "ENSCRIBE_COLLECTION_ID": collection_id,
             "ENSCRIBE_COLLECTION_NAME": collection_name,
+            "ENSCRIBE_COLLECTION_EMBEDDING_MODEL": args.embedding_model,
+            "ENSCRIBE_COLLECTION_EMBEDDING_DIMENSIONS": str(args.dimensions),
             "ENSCRIBE_EXPECT_DOCUMENT_ID": document_id,
             "ENSCRIBE_SEARCH_QUERY": search_query,
             "ENSCRIBE_METADATA_KEY": metadata_key,

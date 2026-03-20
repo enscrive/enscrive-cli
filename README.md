@@ -91,4 +91,21 @@ Live validation orchestrator:
 python3 scripts/run_live_validation.py --help
 ```
 
+The orchestrator supports provider-specific suite presets. For example, the
+default `current-truth-core` lane uses an OpenAI-backed fixture collection,
+while `bge-capability` mints a BGE-backed fixture collection and exercises the
+same public `/v1` surface against that provider. The canonical local BGE lane
+is now `bge-large-en-v1.5`; use overrides only when you are intentionally
+comparing alternate BGE models:
+
+```bash
+python3 scripts/run_live_validation.py --suite bge-capability
+```
+
+For a protected self-hosted BGE deployment, `embed-svc` must be started with
+`BGE_ENDPOINT` and, if required by the upstream service, `BGE_API_KEY`.
+For single-model BGE endpoints, set `BGE_MODEL_NAME` as well so the stack
+fails cleanly on model mismatch instead of pretending the endpoint supports the
+entire `bge-*` family.
+
 This README is the companion current-state entry point for the CLI repo. The top-level `ENSCRIBE-IO` docs remain canonical for platform truth.

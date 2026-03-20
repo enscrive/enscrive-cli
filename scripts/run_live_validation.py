@@ -20,26 +20,50 @@ BOOTSTRAP_V1 = REPO_ROOT / "enscribe-developer" / "e2e-tests" / "scripts" / "boo
 BOOTSTRAP_CURRENT_TRUTH = CLI_ROOT / "scripts" / "bootstrap_current_truth_fixture.py"
 START_CURRENT_SERVER = REPO_ROOT / "enscribe-developer" / "scripts" / "start-current-server.sh"
 
+MODEL_DIMENSIONS = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+    "voyage-3": 1024,
+    "voyage-3-lite": 512,
+    "voyage-code-3": 1024,
+    "bge-large-en-v1.5": 1024,
+    "bge-small-en-v1.5": 384,
+    "bge-base-en-v1.5": 768,
+    "bge-m3": 1024,
+}
+
+CORE_MANIFESTS = [
+    ".enscribe/health/live.json",
+    ".enscribe/v1/collections/list/live-fixture.json",
+    ".enscribe/v1/collections/stats/live-fixture.json",
+    ".enscribe/v1/query-embeddings/collection-model/live-bge-cpu.json",
+    ".enscribe/v1/query-embeddings/invalid-voice/live-bge-cpu.json",
+    ".enscribe/v1/ingest-prepared/live-bge-cpu.json",
+    ".enscribe/v1/collections/documents/live-bge-cpu.json",
+    ".enscribe/v1/collections/chunks/live-bge-cpu.json",
+    ".enscribe/v1/search/basic/live-fixture.json",
+    ".enscribe/v1/search/metadata-filter/live-fixture.json",
+    ".enscribe/v1/search/invalid-collection/live.json",
+    ".enscribe/v1/usage/live-bge-cpu.json",
+    ".enscribe/v1/logs/search/live-observe.json",
+    ".enscribe/v1/logs/metrics/live-observe.json",
+    ".enscribe/v1/logs/stream/live-observe.json",
+    ".enscribe/v1/admin/export-embeddings/live-bge-cpu.json",
+    ".enscribe/v1/admin/export-token-usage/live-bge-cpu.json",
+]
+
 SUITES = {
-    "current-truth-core": [
-        ".enscribe/health/live.json",
-        ".enscribe/v1/collections/list/live-fixture.json",
-        ".enscribe/v1/collections/stats/live-fixture.json",
-        ".enscribe/v1/query-embeddings/collection-model/live-bge-cpu.json",
-        ".enscribe/v1/query-embeddings/invalid-voice/live-bge-cpu.json",
-        ".enscribe/v1/ingest-prepared/live-bge-cpu.json",
-        ".enscribe/v1/collections/documents/live-bge-cpu.json",
-        ".enscribe/v1/collections/chunks/live-bge-cpu.json",
-        ".enscribe/v1/search/basic/live-fixture.json",
-        ".enscribe/v1/search/metadata-filter/live-fixture.json",
-        ".enscribe/v1/search/invalid-collection/live.json",
-        ".enscribe/v1/usage/live-bge-cpu.json",
-        ".enscribe/v1/logs/search/live-observe.json",
-        ".enscribe/v1/logs/metrics/live-observe.json",
-        ".enscribe/v1/logs/stream/live-observe.json",
-        ".enscribe/v1/admin/export-embeddings/live-bge-cpu.json",
-        ".enscribe/v1/admin/export-token-usage/live-bge-cpu.json",
-    ],
+    "current-truth-core": {
+        "manifests": CORE_MANIFESTS,
+        "embedding_model": "text-embedding-3-small",
+        "dimensions": 1536,
+    },
+    "bge-capability": {
+        "manifests": CORE_MANIFESTS,
+        "embedding_model": "bge-large-en-v1.5",
+        "dimensions": 1024,
+    },
 }
 
 
@@ -141,9 +165,44 @@ def run_command(command, cwd: Path, env: dict[str, str]):
 def resolve_manifest_paths(suites: list[str], extra_paths: list[str]):
     paths = []
     for suite in suites:
-        paths.extend(str((REPO_ROOT / rel_path).resolve()) for rel_path in SUITES[suite])
+        paths.extend(
+            str((REPO_ROOT / rel_path).resolve())
+            for rel_path in SUITES[suite]["manifests"]
+        )
     paths.extend(extra_paths)
     return paths
+
+
+def resolve_fixture_config(
+    suites: list[str], override_model: str | None, override_dimensions: int | None
+):
+    suite_configs = [SUITES[suite] for suite in suites]
+    models = {config["embedding_model"] for config in suite_configs}
+    dimensions = {config["dimensions"] for config in suite_configs}
+
+    suite_includes_bge = "bge-capability" in suites
+    default_model = (
+        os.environ.get("BGE_MODEL_NAME")
+        if suite_includes_bge and os.environ.get("BGE_MODEL_NAME")
+        else next(iter(models))
+    )
+    embedding_model = override_model or default_model
+    embedding_dimensions = override_dimensions or MODEL_DIMENSIONS.get(
+        embedding_model, next(iter(dimensions))
+    )
+
+    if override_model is None and len(models) > 1:
+        raise RuntimeError(
+            "selected suites require different fixture embedding models; "
+            "pass --fixture-embedding-model explicitly"
+        )
+    if override_dimensions is None and len(dimensions) > 1:
+        raise RuntimeError(
+            "selected suites require different fixture embedding dimensions; "
+            "pass --fixture-dimensions explicitly"
+        )
+
+    return embedding_model, embedding_dimensions
 
 
 def main():
@@ -176,6 +235,21 @@ def main():
         default=os.environ.get("ENSCRIBE_FIXTURE_PREFIX", "codex-v1"),
     )
     parser.add_argument(
+        "--fixture-embedding-model",
+        default=os.environ.get("ENSCRIBE_FIXTURE_EMBEDDING_MODEL"),
+        help="Override the fixture collection embedding model",
+    )
+    parser.add_argument(
+        "--fixture-dimensions",
+        type=int,
+        default=(
+            int(os.environ["ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS"])
+            if os.environ.get("ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS")
+            else None
+        ),
+        help="Override the fixture collection embedding dimensions",
+    )
+    parser.add_argument(
         "--health-timeout-secs",
         type=int,
         default=45,
@@ -199,6 +273,9 @@ def main():
 
     args.base_url = canonicalize_loopback_base_url(args.base_url)
     suites = args.suite or ["current-truth-core"]
+    fixture_embedding_model, fixture_dimensions = resolve_fixture_config(
+        suites, args.fixture_embedding_model, args.fixture_dimensions
+    )
     artifact_dir = Path(args.artifact_dir) if args.artifact_dir else REPO_ROOT / ".artifacts" / "live-validation" / timestamp()
     artifact_dir.mkdir(parents=True, exist_ok=True)
     env_file = artifact_dir / "fixture.env"
@@ -209,6 +286,8 @@ def main():
     env.setdefault("ENSCRIBE_REPO_ROOT", str(REPO_ROOT))
     env["ENSCRIBE_BASE_URL"] = args.base_url
     env["ENSCRIBE_FIXTURE_PREFIX"] = args.prefix
+    env["ENSCRIBE_FIXTURE_EMBEDDING_MODEL"] = fixture_embedding_model
+    env["ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS"] = str(fixture_dimensions)
     parsed_base_url = urlparse(args.base_url)
     if parsed_base_url.port:
         env.setdefault("DEVELOPER_PORT", str(parsed_base_url.port))
@@ -245,6 +324,10 @@ def main():
                     str(env_file),
                     "--prefix",
                     args.prefix,
+                    "--embedding-model",
+                    fixture_embedding_model,
+                    "--dimensions",
+                    str(fixture_dimensions),
                 ],
                 CLI_ROOT,
                 fixture_env,

@@ -53,10 +53,20 @@ def load_env_file(path: Path):
 
 def resolve_env(value):
     if isinstance(value, dict):
-        return {k: resolve_env(v) for k, v in value.items()}
+        return {resolve_env(k): resolve_env(v) for k, v in value.items()}
     if isinstance(value, list):
         return [resolve_env(v) for v in value]
     if isinstance(value, str):
+        full_match = ENV_PATTERN.fullmatch(value)
+        if full_match:
+            name = full_match.group(1)
+            env_value = os.environ.get(name)
+            if env_value is None:
+                raise RuntimeError(f"missing required environment variable: {name}")
+            try:
+                return json.loads(env_value)
+            except json.JSONDecodeError:
+                return env_value
 
         def replace(match):
             name = match.group(1)
@@ -286,6 +296,8 @@ def assert_expectations(label: str, payload, spec: dict):
     if not spec:
         return
 
+    body_text = payload if isinstance(payload, str) else json.dumps(payload, sort_keys=True)
+
     if not isinstance(payload, str):
         for path, expected in spec.get("json_equals", {}).items():
             actual = json_path_get(payload, path)
@@ -326,15 +338,15 @@ def assert_expectations(label: str, payload, spec: dict):
             assert_json_check(label, payload, check)
 
     for needle in spec.get("body_contains", []):
-        if needle not in payload:
+        if needle not in body_text:
             raise AssertionError(f"{label}: expected body to contain {needle!r}")
 
     for needle in spec.get("body_not_contains", []):
-        if needle in payload:
+        if needle in body_text:
             raise AssertionError(f"{label}: expected body to not contain {needle!r}")
 
     for pattern in spec.get("body_regex", []):
-        if not re.search(pattern, payload):
+        if not re.search(pattern, body_text):
             raise AssertionError(f"{label}: expected body to match /{pattern}/")
 
 
