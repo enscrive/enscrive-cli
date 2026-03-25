@@ -108,4 +108,10 @@ For single-model BGE endpoints, set `BGE_MODEL_NAME` as well so the stack
 fails cleanly on model mismatch instead of pretending the endpoint supports the
 entire `bge-*` family.
 
+Eval campaign commands also expose campaign-level match semantics. For
+segmented content, use `--match-mode document_prefix` so any matching chunk of
+the expected document can satisfy relevance during scoring. Dataset-backed
+campaigns can now omit `--queries-json` / `--queries-file`; the CLI will send
+`queries: []` and let the stored dataset drive execution.
+
 This README is the companion current-state entry point for the CLI repo. The top-level `ENSCRIBE-IO` docs remain canonical for platform truth.

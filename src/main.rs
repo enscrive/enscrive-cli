@@ -781,6 +781,10 @@ struct RunEvalCampaignArgs {
     /// Path to a JSON file containing an array of EvalQueryItem objects
     #[arg(long, conflicts_with = "queries_json")]
     queries_file: Option<String>,
+
+    /// Campaign-level default match mode: exact or document_prefix
+    #[arg(long = "match-mode")]
+    match_mode: Option<String>,
 }
 
 #[derive(Args)]
@@ -965,6 +969,9 @@ fn parse_eval_queries_source(
     queries_json: &Option<String>,
     queries_file: &Option<String>,
 ) -> Result<Value, String> {
+    if queries_json.is_none() && queries_file.is_none() {
+        return Ok(Value::Array(Vec::new()));
+    }
     let value = parse_json_source(queries_json, queries_file, "queries")?;
     match value {
         Value::Array(_) => Ok(value),
@@ -972,14 +979,28 @@ fn parse_eval_queries_source(
     }
 }
 
+fn parse_eval_match_mode(raw: &Option<String>) -> Result<Option<String>, String> {
+    match raw.as_deref() {
+        None => Ok(None),
+        Some("exact") => Ok(Some("exact".to_string())),
+        Some("document_prefix") => Ok(Some("document_prefix".to_string())),
+        Some(other) => Err(format!(
+            "invalid --match-mode '{}': expected exact or document_prefix",
+            other
+        )),
+    }
+}
+
 fn build_eval_campaign_body(args: &RunEvalCampaignArgs) -> Result<Value, String> {
     let queries = parse_eval_queries_source(&args.queries_json, &args.queries_file)?;
+    let match_mode = parse_eval_match_mode(&args.match_mode)?;
     Ok(json!({
         "name": args.name,
         "voice_id": args.voice_id,
         "dataset_id": args.dataset_id,
         "metrics": args.metrics,
         "queries": queries,
+        "match_mode": match_mode,
     }))
 }
 
@@ -2642,9 +2663,94 @@ mod tests {
                 assert_eq!(run.metrics, vec!["ndcg@10", "recall@10"]);
                 assert_eq!(run.queries_file.as_deref(), Some("queries.json"));
                 assert!(run.queries_json.is_none());
+                assert!(run.match_mode.is_none());
             }
             _ => panic!("expected evals run-campaign"),
         }
+    }
+
+    #[test]
+    fn parse_evals_run_campaign_with_match_mode() {
+        let args = Cli::parse_from([
+            "enscribe",
+            "evals",
+            "run-campaign",
+            "--name",
+            "campaign-1",
+            "--voice-id",
+            "voice-1",
+            "--dataset-id",
+            "dataset-1",
+            "--metric",
+            "ndcg@10",
+            "--queries-file",
+            "queries.json",
+            "--match-mode",
+            "document_prefix",
+        ]);
+        match args.command {
+            Commands::Evals {
+                sub: EvalsSubcommand::RunCampaign(run),
+            } => {
+                assert_eq!(run.match_mode.as_deref(), Some("document_prefix"));
+            }
+            _ => panic!("expected evals run-campaign"),
+        }
+    }
+
+    #[test]
+    fn build_eval_campaign_body_includes_match_mode() {
+        let args = RunEvalCampaignArgs {
+            name: "campaign-1".to_string(),
+            voice_id: "voice-1".to_string(),
+            dataset_id: "dataset-1".to_string(),
+            metrics: vec!["ndcg@10".to_string()],
+            queries_json: Some(
+                r#"[{"query_id":"q1","query_text":"hello","relevant_doc_ids":["doc-1"],"relevance_scores":{"doc-1":1}}]"#
+                    .to_string(),
+            ),
+            queries_file: None,
+            match_mode: Some("document_prefix".to_string()),
+        };
+
+        let body = build_eval_campaign_body(&args).unwrap();
+        assert_eq!(body["match_mode"], "document_prefix");
+    }
+
+    #[test]
+    fn build_eval_campaign_body_rejects_invalid_match_mode() {
+        let args = RunEvalCampaignArgs {
+            name: "campaign-1".to_string(),
+            voice_id: "voice-1".to_string(),
+            dataset_id: "dataset-1".to_string(),
+            metrics: vec!["ndcg@10".to_string()],
+            queries_json: Some(
+                r#"[{"query_id":"q1","query_text":"hello","relevant_doc_ids":["doc-1"],"relevance_scores":{"doc-1":1}}]"#
+                    .to_string(),
+            ),
+            queries_file: None,
+            match_mode: Some("prefix".to_string()),
+        };
+
+        let err = build_eval_campaign_body(&args).unwrap_err();
+        assert!(err.contains("invalid --match-mode"));
+    }
+
+    #[test]
+    fn build_eval_campaign_body_allows_dataset_backed_runs_without_queries_source() {
+        let args = RunEvalCampaignArgs {
+            name: "campaign-1".to_string(),
+            voice_id: "voice-1".to_string(),
+            dataset_id: "dataset-1".to_string(),
+            metrics: vec!["ndcg@10".to_string()],
+            queries_json: None,
+            queries_file: None,
+            match_mode: Some("document_prefix".to_string()),
+        };
+
+        let body = build_eval_campaign_body(&args).unwrap();
+        assert_eq!(body["queries"], Value::Array(Vec::new()));
+        assert_eq!(body["match_mode"], "document_prefix");
     }
 
     #[test]
