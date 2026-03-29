@@ -1,9 +1,13 @@
 mod client;
+mod local;
 mod output;
 
 use std::fs;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
+use local::{
+    InitMode, ManagedInitOptions, SelfManagedInitOptions, StartOptions, StatusOptions, StopOptions,
+};
 use output::{
     CliResponse, EXIT_CONFIG, EXIT_FAILURE, EXIT_UNSUPPORTED, FailureClass, OutputFormat,
 };
@@ -11,23 +15,22 @@ use serde_json::{Map, Value, json};
 
 #[derive(Parser)]
 #[command(
-    name = "enscribe",
+    name = "enscrive",
     version,
-    about = "Enscribe CLI — thin client over enscribe-developer /v1"
+    about = "Enscrive CLI — thin client over enscrive-developer /v1"
 )]
 struct Cli {
-    /// API key (or set ENSCRIBE_API_KEY)
-    #[arg(long = "api-key", env = "ENSCRIBE_API_KEY", global = true)]
+    /// API key (or set ENSCRIVE_API_KEY)
+    #[arg(long = "api-key", env = "ENSCRIVE_API_KEY", global = true)]
     api_key: Option<String>,
 
-    /// Base URL of enscribe-developer (or set ENSCRIBE_BASE_URL)
-    #[arg(
-        long = "endpoint",
-        env = "ENSCRIBE_BASE_URL",
-        default_value = "http://localhost:3000",
-        global = true
-    )]
-    endpoint: String,
+    /// Base URL of enscrive-developer (or set ENSCRIVE_BASE_URL)
+    #[arg(long = "endpoint", env = "ENSCRIVE_BASE_URL", global = true)]
+    endpoint: Option<String>,
+
+    /// Named CLI profile from ~/.config/enscrive/profiles.toml
+    #[arg(long = "profile", env = "ENSCRIVE_PROFILE", global = true)]
+    profile: Option<String>,
 
     /// Output format
     #[arg(long, value_enum, default_value_t = OutputFormat::Human, global = true)]
@@ -39,6 +42,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize a managed or self-managed Enscrive profile
+    Init(InitArgs),
+
+    /// Start the local self-managed stack for the selected profile
+    Start(StartArgs),
+
+    /// Stop the local self-managed stack for the selected profile
+    Stop(StopArgs),
+
+    /// Show resolved profile and local stack status
+    Status(StatusArgs),
+
     /// Check stack health through /health
     Health,
 
@@ -108,6 +123,74 @@ enum Commands {
     /// Usage and metering commands
     Usage(UsageArgs),
 }
+
+#[derive(Args)]
+struct InitArgs {
+    /// Initialization mode: managed or self-managed
+    #[arg(long, value_enum)]
+    mode: Option<InitMode>,
+
+    /// Profile name to create or update
+    #[arg(long = "profile-name")]
+    profile_name: Option<String>,
+
+    /// Enable Grafana in the local stack
+    #[arg(long, default_value_t = false)]
+    with_grafana: bool,
+
+    /// Path to enscrive-developer binary for self-managed mode
+    #[arg(long = "developer-bin")]
+    developer_bin: Option<String>,
+
+    /// Path to enscrive-observe binary for self-managed mode
+    #[arg(long = "observe-bin")]
+    observe_bin: Option<String>,
+
+    /// Path to enscrive-embed binary for self-managed mode
+    #[arg(long = "embed-bin")]
+    embed_bin: Option<String>,
+
+    /// Bring-your-own OpenAI key for local chunking and embeddings
+    #[arg(long = "openai-api-key")]
+    openai_api_key: Option<String>,
+
+    /// Bring-your-own Anthropic key for local chunking
+    #[arg(long = "anthropic-api-key")]
+    anthropic_api_key: Option<String>,
+
+    /// Bring-your-own Voyage key for local embeddings
+    #[arg(long = "voyage-api-key")]
+    voyage_api_key: Option<String>,
+
+    /// Optional BGE endpoint for local or LAN-hosted BGE
+    #[arg(long = "bge-endpoint")]
+    bge_endpoint: Option<String>,
+
+    /// Optional bearer token for the BGE endpoint
+    #[arg(long = "bge-api-key")]
+    bge_api_key: Option<String>,
+
+    /// Pinned BGE model name for the endpoint
+    #[arg(long = "bge-model-name")]
+    bge_model_name: Option<String>,
+
+    /// Set this profile as the default CLI profile
+    #[arg(long, default_value_t = false)]
+    set_default: bool,
+}
+
+#[derive(Args)]
+struct StartArgs {}
+
+#[derive(Args)]
+struct StopArgs {
+    /// Remove local infrastructure containers instead of only stopping them
+    #[arg(long, default_value_t = false)]
+    remove_infra: bool,
+}
+
+#[derive(Args)]
+struct StatusArgs {}
 
 #[derive(Args)]
 struct SearchArgs {
@@ -312,9 +395,6 @@ struct CreateCollectionArgs {
 
     #[arg(long)]
     dimensions: Option<u32>,
-
-    #[arg(long)]
-    default_voice_id: Option<String>,
 }
 
 #[derive(Args)]
@@ -857,17 +937,17 @@ struct UsageArgs {
     page_token: Option<String>,
 }
 
-fn require_api_key(cli: &Cli) -> String {
-    match &cli.api_key {
-        Some(key) if !key.is_empty() => key.clone(),
+fn require_api_key(api_key: Option<String>, fmt: OutputFormat) -> String {
+    match api_key {
+        Some(key) if !key.is_empty() => key,
         _ => {
             CliResponse::fail(
                 "",
-                "API key required: set ENSCRIBE_API_KEY or pass --api-key".to_string(),
+                "API key required: set ENSCRIVE_API_KEY or pass --api-key".to_string(),
                 FailureClass::Bug,
                 EXIT_CONFIG,
             )
-            .emit(cli.output);
+            .emit(fmt);
         }
     }
 }
@@ -1254,31 +1334,140 @@ fn build_log_metrics_body(args: &LogMetricsArgs) -> Value {
     })
 }
 
+fn local_prompt_mode() -> Result<InitMode, String> {
+    use std::io::{self, Write};
+
+    print!("Initialize in managed or self-managed mode? [managed/self-managed]: ");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("flush stdout: {e}"))?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("read input: {e}"))?;
+    match input.trim() {
+        "managed" => Ok(InitMode::Managed),
+        "self-managed" | "self_managed" | "local" => Ok(InitMode::SelfManaged),
+        other => Err(format!(
+            "invalid mode '{}': expected managed or self-managed",
+            other
+        )),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
     let fmt = cli.output;
-    let api_key = match &cli.command {
+    let api_context = match &cli.command {
+        Commands::Init(_) | Commands::Start(_) | Commands::Stop(_) | Commands::Status(_) => None,
         Commands::Health => None,
         Commands::Collections {
             sub: CollectionsSubcommand::Get { .. },
         } => None,
-        _ => Some(require_api_key(&cli)),
+        _ => match local::resolve_api_context(
+            cli.profile.as_deref(),
+            cli.endpoint.clone(),
+            cli.api_key.clone(),
+        ) {
+            Ok(ctx) => Some(ctx),
+            Err(e) => CliResponse::fail("", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt),
+        },
     };
 
     match &cli.command {
+        Commands::Init(args) => {
+            let mode = match args.mode {
+                Some(mode) => mode,
+                None => {
+                    let raw = match local_prompt_mode() {
+                        Ok(mode) => mode,
+                        Err(e) => {
+                            CliResponse::fail("init", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt)
+                        }
+                    };
+                    raw
+                }
+            };
+
+            let result = match mode {
+                InitMode::Managed => {
+                    local::init_managed(ManagedInitOptions {
+                        profile_name: args.profile_name.clone(),
+                        endpoint: cli.endpoint.clone(),
+                        api_key: cli.api_key.clone(),
+                        set_default: args.set_default,
+                    })
+                    .await
+                }
+                InitMode::SelfManaged => {
+                    local::init_self_managed(SelfManagedInitOptions {
+                        profile_name: args.profile_name.clone(),
+                        with_grafana: args.with_grafana,
+                        developer_bin: args.developer_bin.clone(),
+                        observe_bin: args.observe_bin.clone(),
+                        embed_bin: args.embed_bin.clone(),
+                        openai_api_key: args.openai_api_key.clone(),
+                        anthropic_api_key: args.anthropic_api_key.clone(),
+                        voyage_api_key: args.voyage_api_key.clone(),
+                        bge_endpoint: args.bge_endpoint.clone(),
+                        bge_api_key: args.bge_api_key.clone(),
+                        bge_model_name: args.bge_model_name.clone(),
+                        set_default: args.set_default,
+                    })
+                    .await
+                }
+            };
+
+            match result {
+                Ok(data) => CliResponse::success("init", data).emit(fmt),
+                Err(e) => CliResponse::fail("init", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt),
+            }
+        }
+        Commands::Start(_) => match local::start(StartOptions {
+            profile_name: cli.profile.clone(),
+        })
+        .await
+        {
+            Ok(data) => CliResponse::success("start", data).emit(fmt),
+            Err(e) => CliResponse::fail("start", e, FailureClass::Bug, EXIT_FAILURE).emit(fmt),
+        },
+        Commands::Stop(args) => match local::stop(StopOptions {
+            profile_name: cli.profile.clone(),
+            remove_infra: args.remove_infra,
+        })
+        .await
+        {
+            Ok(data) => CliResponse::success("stop", data).emit(fmt),
+            Err(e) => CliResponse::fail("stop", e, FailureClass::Bug, EXIT_FAILURE).emit(fmt),
+        },
+        Commands::Status(_) => match local::status(StatusOptions {
+            profile_name: cli.profile.clone(),
+        })
+        .await
+        {
+            Ok(data) => CliResponse::success("status", data).emit(fmt),
+            Err(e) => CliResponse::fail("status", e, FailureClass::Bug, EXIT_FAILURE).emit(fmt),
+        },
         Commands::Health => {
-            let client = client::EnscribeClient::new(
+            let endpoint = local::resolve_api_context(
+                cli.profile.as_deref(),
                 cli.endpoint.clone(),
-                cli.api_key.clone().unwrap_or_default(),
-            );
+                cli.api_key.clone(),
+            )
+            .map(|ctx| ctx.endpoint)
+            .unwrap_or_else(|_| "http://localhost:3000".to_string());
+            let client =
+                client::EnscriveClient::new(endpoint, cli.api_key.clone().unwrap_or_default());
             match client.get_json("/health").await {
                 Ok(data) => CliResponse::success("health", data).emit(fmt),
                 Err(e) => request_failure("health", e).emit(fmt),
             }
         }
         Commands::Search(args) => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match build_search_body(args) {
                 Ok(body) => match client.post_json("/v1/search", body).await {
                     Ok(data) => CliResponse::success("search", data).emit(fmt),
@@ -1288,7 +1477,9 @@ async fn main() {
             }
         }
         Commands::Embeddings { sub } => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
                 EmbeddingsSubcommand::Query(args) => {
                     let body = json!({
@@ -1304,7 +1495,9 @@ async fn main() {
             }
         }
         Commands::Ingest { sub } => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
                 IngestSubcommand::Prepared(args) => match parse_segments_source(args) {
                     Ok(segments) => {
@@ -1327,7 +1520,9 @@ async fn main() {
             }
         }
         Commands::Segment { sub } => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
                 SegmentSubcommand::Document(args) => match parse_content_source(args) {
                     Ok(content) => {
@@ -1354,7 +1549,9 @@ async fn main() {
             }
         }
         Commands::Analyze { sub } => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
                 AnalyzeSubcommand::Content(args) => match parse_analysis_source(args) {
                     Ok(text) => {
@@ -1372,7 +1569,9 @@ async fn main() {
             }
         }
         Commands::Collections { sub } => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
                 CollectionsSubcommand::List => match client.get_json("/v1/collections").await {
                     Ok(data) => CliResponse::success("collections list", data).emit(fmt),
@@ -1384,7 +1583,6 @@ async fn main() {
                         "embedding_model": args.embedding_model,
                         "description": args.description,
                         "dimensions": args.dimensions,
-                        "default_voice_id": args.default_voice_id,
                     });
                     match client.post_json("/v1/collections", body).await {
                         Ok(data) => CliResponse::success("collections create", data).emit(fmt),
@@ -1448,7 +1646,9 @@ async fn main() {
             }
         }
         Commands::Voices { sub } => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
                 VoicesSubcommand::List => match client.get_json("/v1/voices").await {
                     Ok(data) => CliResponse::success("voices list", data).emit(fmt),
@@ -1549,14 +1749,18 @@ async fn main() {
         }
         Commands::Evals { sub } => match sub {
             EvalsSubcommand::BeirDatasets => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 match client.get_json("/v1/evals/beir-datasets").await {
                     Ok(data) => CliResponse::success("evals beir-datasets", data).emit(fmt),
                     Err(e) => request_failure("evals beir-datasets", e).emit(fmt),
                 }
             }
             EvalsSubcommand::Campaigns { sub } => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 match sub {
                     EvalCampaignsSubcommand::List => {
                         match client.get_json("/v1/evals/campaigns").await {
@@ -1576,7 +1780,9 @@ async fn main() {
                 }
             }
             EvalsSubcommand::RunCampaign(args) => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 match build_eval_campaign_body(args) {
                     Ok(body) => match client.post_json("/v1/evals/run-campaign", body).await {
                         Ok(data) => CliResponse::success("evals run-campaign", data).emit(fmt),
@@ -1589,7 +1795,9 @@ async fn main() {
                 }
             }
             EvalsSubcommand::RunCampaignStream(args) => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 match build_eval_campaign_body(args) {
                     Ok(body) => match client
                         .post_text("/v1/evals/run-campaign-stream", body, "text/event-stream")
@@ -1611,7 +1819,9 @@ async fn main() {
                 }
             }
             EvalsSubcommand::RunBeir(args) => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 let body = build_beir_body(args);
                 match client.post_json("/v1/evals/run-beir", body).await {
                     Ok(data) => CliResponse::success("evals run-beir", data).emit(fmt),
@@ -1619,7 +1829,9 @@ async fn main() {
                 }
             }
             EvalsSubcommand::RunBeirStream(args) => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 let body = build_beir_body(args);
                 match client
                     .post_text("/v1/evals/run-beir-stream", body, "text/event-stream")
@@ -1636,7 +1848,9 @@ async fn main() {
                 }
             }
             EvalsSubcommand::Datasets { sub } => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 match sub {
                     EvalDatasetsSubcommand::List => {
                         match client.get_json("/v1/evals/datasets").await {
@@ -1708,7 +1922,9 @@ async fn main() {
                 }
             }
             EvalsSubcommand::VoiceStatus { voice_id } => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 let path = format!("/v1/evals/voice-status/{}", voice_id);
                 match client.get_json(&path).await {
                     Ok(data) => CliResponse::success("evals voice-status", data).emit(fmt),
@@ -1717,7 +1933,9 @@ async fn main() {
             }
         },
         Commands::Backup { sub } => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
                 BackupSubcommand::Create => {
                     match client.post_json("/v1/admin/backups", json!({})).await {
@@ -1775,7 +1993,9 @@ async fn main() {
         }
         Commands::Export { sub } => match sub {
             ExportSubcommand::Tenant(args) => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 let query = build_export_tenant_query(args);
                 match client
                     .get_bytes_with_query("/v1/admin/export", &query, "application/octet-stream")
@@ -1807,7 +2027,9 @@ async fn main() {
                 }
             }
             ExportSubcommand::Embeddings(args) => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 let query = build_export_embeddings_query(args);
                 match client
                     .get_json_with_query("/v1/admin/export/embeddings", &query)
@@ -1818,7 +2040,9 @@ async fn main() {
                 }
             }
             ExportSubcommand::TokenUsage(args) => {
-                let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+                let ctx = api_context.clone().unwrap();
+                let client =
+                    client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
                 let query = build_export_token_usage_query(args);
                 match client
                     .get_json_with_query("/v1/admin/export/token-usage", &query)
@@ -1830,7 +2054,9 @@ async fn main() {
             }
         },
         Commands::Logs { sub } => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
                 LogsSubcommand::Stream(args) => {
                     let query = build_log_stream_query(args);
@@ -1866,7 +2092,9 @@ async fn main() {
             }
         }
         Commands::Usage(args) => {
-            let client = client::EnscribeClient::new(cli.endpoint.clone(), api_key.unwrap());
+            let ctx = api_context.clone().unwrap();
+            let client =
+                client::EnscriveClient::new(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             let query = build_usage_query(args);
             match client.get_json_with_query("/v1/usage", &query).await {
                 Ok(data) => CliResponse::success("usage", data).emit(fmt),
@@ -1883,7 +2111,7 @@ mod tests {
 
     #[test]
     fn parse_health_command() {
-        let args = Cli::parse_from(["enscribe", "health"]);
+        let args = Cli::parse_from(["enscrive", "health"]);
         match args.command {
             Commands::Health => {}
             _ => panic!("expected health"),
@@ -1893,7 +2121,7 @@ mod tests {
     #[test]
     fn parse_search_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "search",
@@ -1922,7 +2150,7 @@ mod tests {
     #[test]
     fn parse_logs_stream_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "logs",
@@ -1956,7 +2184,7 @@ mod tests {
     #[test]
     fn parse_logs_search_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "logs",
@@ -1994,7 +2222,7 @@ mod tests {
     #[test]
     fn parse_logs_metrics_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "logs",
@@ -2028,7 +2256,7 @@ mod tests {
     #[test]
     fn parse_analyze_content_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "analyze",
@@ -2055,7 +2283,7 @@ mod tests {
     #[test]
     fn parse_ingest_prepared_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "ingest",
@@ -2089,7 +2317,7 @@ mod tests {
     #[test]
     fn parse_segment_document_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "segment",
@@ -2119,7 +2347,7 @@ mod tests {
     #[test]
     fn parse_eval_dataset_create_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "evals",
@@ -2153,7 +2381,7 @@ mod tests {
     #[test]
     fn parse_usage_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "usage",
@@ -2286,7 +2514,7 @@ mod tests {
     #[test]
     fn parse_embeddings_query_with_voice_id() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "k",
             "embeddings",
@@ -2320,7 +2548,7 @@ mod tests {
     #[test]
     fn parse_collections_create() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "k",
             "collections",
@@ -2353,7 +2581,7 @@ mod tests {
     #[test]
     fn parse_voices_create_with_config_file() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "k",
             "voices",
@@ -2383,7 +2611,7 @@ mod tests {
     #[test]
     fn parse_voice_compare_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "k",
             "voices",
@@ -2422,7 +2650,7 @@ mod tests {
     #[test]
     fn parse_voice_promote_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "k",
             "voices",
@@ -2450,7 +2678,7 @@ mod tests {
     #[test]
     fn parse_voice_gates_list_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "k",
             "voices",
@@ -2473,7 +2701,7 @@ mod tests {
     #[test]
     fn parse_voice_gates_set_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "k",
             "voices",
@@ -2513,7 +2741,7 @@ mod tests {
     #[test]
     fn parse_voice_gates_delete_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "k",
             "voices",
@@ -2592,7 +2820,7 @@ mod tests {
     #[test]
     fn parse_evals_run_beir() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "evals",
@@ -2622,7 +2850,7 @@ mod tests {
 
     #[test]
     fn parse_evals_campaigns_get() {
-        let args = Cli::parse_from(["enscribe", "evals", "campaigns", "get", "--id", "camp-1"]);
+        let args = Cli::parse_from(["enscrive", "evals", "campaigns", "get", "--id", "camp-1"]);
         match args.command {
             Commands::Evals {
                 sub:
@@ -2637,7 +2865,7 @@ mod tests {
     #[test]
     fn parse_evals_run_campaign() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "evals",
             "run-campaign",
             "--name",
@@ -2672,7 +2900,7 @@ mod tests {
     #[test]
     fn parse_evals_run_campaign_with_match_mode() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "evals",
             "run-campaign",
             "--name",
@@ -2756,7 +2984,7 @@ mod tests {
     #[test]
     fn parse_evals_run_beir_stream() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "evals",
             "run-beir-stream",
             "--voice-id",
@@ -2780,7 +3008,7 @@ mod tests {
 
     #[test]
     fn parse_backup_create_command() {
-        let args = Cli::parse_from(["enscribe", "--api-key", "test-key", "backup", "create"]);
+        let args = Cli::parse_from(["enscrive", "--api-key", "test-key", "backup", "create"]);
         match args.command {
             Commands::Backup {
                 sub: BackupSubcommand::Create,
@@ -2792,7 +3020,7 @@ mod tests {
     #[test]
     fn parse_backup_restore_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "backup",
@@ -2819,7 +3047,7 @@ mod tests {
     #[test]
     fn parse_export_tenant_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "export",
@@ -2873,7 +3101,7 @@ mod tests {
     #[test]
     fn parse_export_embeddings_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "export",
@@ -2955,7 +3183,7 @@ mod tests {
     #[test]
     fn parse_export_token_usage_command() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "--api-key",
             "test-key",
             "export",
@@ -3028,7 +3256,7 @@ mod tests {
 
     #[test]
     fn parse_collections_documents() {
-        let args = Cli::parse_from(["enscribe", "collections", "documents", "--id", "col-1"]);
+        let args = Cli::parse_from(["enscrive", "collections", "documents", "--id", "col-1"]);
         match args.command {
             Commands::Collections {
                 sub: CollectionsSubcommand::Documents { id },
@@ -3040,7 +3268,7 @@ mod tests {
     #[test]
     fn parse_collections_chunks() {
         let args = Cli::parse_from([
-            "enscribe",
+            "enscrive",
             "collections",
             "chunks",
             "--collection-id",
