@@ -16,14 +16,15 @@ SCRIPT_PATH = Path(__file__).resolve()
 CLI_ROOT = SCRIPT_PATH.parents[1]
 REPO_ROOT = SCRIPT_PATH.parents[2]
 RUN_MANIFESTS = CLI_ROOT / "scripts" / "run_manifests.py"
-BOOTSTRAP_V1 = REPO_ROOT / "enscribe-developer" / "e2e-tests" / "scripts" / "bootstrap_v1_fixture.mjs"
+BOOTSTRAP_V1 = REPO_ROOT / "enscrive-developer" / "e2e-tests" / "scripts" / "bootstrap_v1_fixture.mjs"
 BOOTSTRAP_CURRENT_TRUTH = CLI_ROOT / "scripts" / "bootstrap_current_truth_fixture.py"
-START_CURRENT_SERVER = REPO_ROOT / "enscribe-developer" / "scripts" / "start-current-server.sh"
+START_CURRENT_SERVER = REPO_ROOT / "enscrive-developer" / "scripts" / "start-current-server.sh"
 
 MODEL_DIMENSIONS = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
+    "bge-en-icl": 1024,
     "voyage-3": 1024,
     "voyage-3-lite": 512,
     "voyage-code-3": 1024,
@@ -34,23 +35,23 @@ MODEL_DIMENSIONS = {
 }
 
 CORE_MANIFESTS = [
-    ".enscribe/health/live.json",
-    ".enscribe/v1/collections/list/live-fixture.json",
-    ".enscribe/v1/collections/stats/live-fixture.json",
-    ".enscribe/v1/query-embeddings/collection-model/live-bge-cpu.json",
-    ".enscribe/v1/query-embeddings/invalid-voice/live-bge-cpu.json",
-    ".enscribe/v1/ingest-prepared/live-bge-cpu.json",
-    ".enscribe/v1/collections/documents/live-bge-cpu.json",
-    ".enscribe/v1/collections/chunks/live-bge-cpu.json",
-    ".enscribe/v1/search/basic/live-fixture.json",
-    ".enscribe/v1/search/metadata-filter/live-fixture.json",
-    ".enscribe/v1/search/invalid-collection/live.json",
-    ".enscribe/v1/usage/live-bge-cpu.json",
-    ".enscribe/v1/logs/search/live-observe.json",
-    ".enscribe/v1/logs/metrics/live-observe.json",
-    ".enscribe/v1/logs/stream/live-observe.json",
-    ".enscribe/v1/admin/export-embeddings/live-bge-cpu.json",
-    ".enscribe/v1/admin/export-token-usage/live-bge-cpu.json",
+    ".enscrive/health/live.json",
+    ".enscrive/v1/collections/list/live-fixture.json",
+    ".enscrive/v1/collections/stats/live-fixture.json",
+    ".enscrive/v1/query-embeddings/collection-model/live-bge-cpu.json",
+    ".enscrive/v1/query-embeddings/invalid-voice/live-bge-cpu.json",
+    ".enscrive/v1/ingest-prepared/live-bge-cpu.json",
+    ".enscrive/v1/collections/documents/live-bge-cpu.json",
+    ".enscrive/v1/collections/chunks/live-bge-cpu.json",
+    ".enscrive/v1/search/basic/live-fixture.json",
+    ".enscrive/v1/search/metadata-filter/live-fixture.json",
+    ".enscrive/v1/search/invalid-collection/live.json",
+    ".enscrive/v1/usage/live-bge-cpu.json",
+    ".enscrive/v1/logs/search/live-observe.json",
+    ".enscrive/v1/logs/metrics/live-observe.json",
+    ".enscrive/v1/logs/stream/live-observe.json",
+    ".enscrive/v1/admin/export-embeddings/live-bge-cpu.json",
+    ".enscrive/v1/admin/export-token-usage/live-bge-cpu.json",
 ]
 
 SUITES = {
@@ -63,6 +64,13 @@ SUITES = {
         "manifests": CORE_MANIFESTS,
         "embedding_model": "bge-large-en-v1.5",
         "dimensions": 1024,
+    },
+    "nebius-byok": {
+        "manifests": CORE_MANIFESTS
+        + [".enscrive/v1/usage/live-nebius-byok.json"],
+        "embedding_model": "bge-en-icl",
+        "dimensions": 1024,
+        "required_env": ["ENSCRIVE_EMBEDDING_PROVIDER_KEY"],
     },
 }
 
@@ -137,7 +145,7 @@ def start_server(log_path: Path, env: dict[str, str]):
     log_file = log_path.open("w")
     proc = subprocess.Popen(
         [str(START_CURRENT_SERVER)],
-        cwd=REPO_ROOT / "enscribe-developer",
+        cwd=REPO_ROOT / "enscrive-developer",
         env=env,
         stdout=log_file,
         stderr=subprocess.STDOUT,
@@ -205,13 +213,25 @@ def resolve_fixture_config(
     return embedding_model, embedding_dimensions
 
 
+def validate_suite_requirements(suites: list[str], env: dict[str, str]):
+    required = []
+    for suite in suites:
+        required.extend(SUITES[suite].get("required_env", []))
+    missing = sorted({name for name in required if not env.get(name)})
+    if missing:
+        joined = ", ".join(missing)
+        raise RuntimeError(
+            f"selected suite(s) require environment variable(s): {joined}"
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Run live public-stack validation against enscribe-developer /v1"
+        description="Run live public-stack validation against enscrive-developer /v1"
     )
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("ENSCRIBE_BASE_URL", "http://localhost:3000"),
+        default=os.environ.get("ENSCRIVE_BASE_URL", "http://localhost:3000"),
     )
     parser.add_argument(
         "--suite",
@@ -232,19 +252,19 @@ def main():
     )
     parser.add_argument(
         "--prefix",
-        default=os.environ.get("ENSCRIBE_FIXTURE_PREFIX", "codex-v1"),
+        default=os.environ.get("ENSCRIVE_FIXTURE_PREFIX", "codex-v1"),
     )
     parser.add_argument(
         "--fixture-embedding-model",
-        default=os.environ.get("ENSCRIBE_FIXTURE_EMBEDDING_MODEL"),
+        default=os.environ.get("ENSCRIVE_FIXTURE_EMBEDDING_MODEL"),
         help="Override the fixture collection embedding model",
     )
     parser.add_argument(
         "--fixture-dimensions",
         type=int,
         default=(
-            int(os.environ["ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS"])
-            if os.environ.get("ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS")
+            int(os.environ["ENSCRIVE_FIXTURE_EMBEDDING_DIMENSIONS"])
+            if os.environ.get("ENSCRIVE_FIXTURE_EMBEDDING_DIMENSIONS")
             else None
         ),
         help="Override the fixture collection embedding dimensions",
@@ -257,7 +277,7 @@ def main():
     parser.add_argument(
         "--start-server",
         action="store_true",
-        help="Launch enscribe-developer via start-current-server.sh before running",
+        help="Launch enscrive-developer via start-current-server.sh before running",
     )
     parser.add_argument(
         "--skip-fresh-fixture",
@@ -283,11 +303,12 @@ def main():
     fixture_screenshot = artifact_dir / "bootstrap-fixture.png"
 
     env = os.environ.copy()
-    env.setdefault("ENSCRIBE_REPO_ROOT", str(REPO_ROOT))
-    env["ENSCRIBE_BASE_URL"] = args.base_url
-    env["ENSCRIBE_FIXTURE_PREFIX"] = args.prefix
-    env["ENSCRIBE_FIXTURE_EMBEDDING_MODEL"] = fixture_embedding_model
-    env["ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS"] = str(fixture_dimensions)
+    env.setdefault("ENSCRIVE_REPO_ROOT", str(REPO_ROOT))
+    env["ENSCRIVE_BASE_URL"] = args.base_url
+    env["ENSCRIVE_FIXTURE_PREFIX"] = args.prefix
+    env["ENSCRIVE_FIXTURE_EMBEDDING_MODEL"] = fixture_embedding_model
+    env["ENSCRIVE_FIXTURE_EMBEDDING_DIMENSIONS"] = str(fixture_dimensions)
+    validate_suite_requirements(suites, env)
     parsed_base_url = urlparse(args.base_url)
     if parsed_base_url.port:
         env.setdefault("DEVELOPER_PORT", str(parsed_base_url.port))
@@ -302,18 +323,18 @@ def main():
 
         if not args.skip_fresh_fixture:
             fresh_env = env.copy()
-            fresh_env["ENSCRIBE_FIXTURE_OUT"] = str(env_file)
-            fresh_env["ENSCRIBE_FIXTURE_SCREENSHOT"] = str(fixture_screenshot)
+            fresh_env["ENSCRIVE_FIXTURE_OUT"] = str(env_file)
+            fresh_env["ENSCRIVE_FIXTURE_SCREENSHOT"] = str(fixture_screenshot)
             run_command(
                 ["node", str(BOOTSTRAP_V1)],
-                REPO_ROOT / "enscribe-developer",
+                REPO_ROOT / "enscrive-developer",
                 fresh_env,
             )
             env.update(load_env_file(env_file))
 
         if not args.skip_current_truth_prepare:
             fixture_env = env.copy()
-            fixture_env["ENSCRIBE_FIXTURE_OUT"] = str(env_file)
+            fixture_env["ENSCRIVE_FIXTURE_OUT"] = str(env_file)
             run_command(
                 [
                     sys.executable,
@@ -334,9 +355,9 @@ def main():
             )
             env.update(load_env_file(env_file))
 
-        if "ENSCRIBE_API_KEY" not in env:
+        if "ENSCRIVE_API_KEY" not in env:
             raise RuntimeError(
-                "ENSCRIBE_API_KEY is missing. Use a fresh fixture or export an existing API key."
+                "ENSCRIVE_API_KEY is missing. Use a fresh fixture or export an existing API key."
             )
 
         manifest_paths = []
@@ -353,7 +374,7 @@ def main():
             "--base-url",
             args.base_url,
             "--api-key",
-            env["ENSCRIBE_API_KEY"],
+            env["ENSCRIVE_API_KEY"],
         ]
         if env_file.exists():
             command.extend(["--env-file", str(env_file)])

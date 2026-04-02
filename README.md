@@ -48,8 +48,7 @@ The CLI should be described carefully:
 - human output is still fairly raw
 - streaming behavior is still thinner than an ideal interactive CLI experience
 - some unsupported/error classification logic remains heuristic rather than perfectly typed
-- local first-tenant/API-key bootstrap is not yet automatic
-- `enscrive-embed` still expects `OPENAI_API_KEY` at startup even when the developer may only want BGE/Voyage
+- live shared-stack Nebius/BYOK proof still depends on a real provider key and stack fixture, even though the harness now supports the canonical BYOK header path
 
 So the honest positioning is:
 
@@ -88,9 +87,26 @@ Self-managed profile:
 ```bash
 enscrive init --mode self-managed \
   --openai-api-key sk-... \
+  --nebius-api-key neb-... \
   --bge-endpoint http://192.168.68.135:8088 \
   --set-default
 ```
+
+Self-managed init now treats providers as two separate capability groups:
+
+- embedding providers: required, one or more of `BGE`, `OpenAI`, `Voyage`, or `Nebius`
+- LLM inference providers: optional, `OpenAI` and/or `Anthropic` for crafted chunking sets
+
+If you do not pass provider flags in an interactive shell, `enscrive init --mode self-managed`
+now walks the missing configuration:
+
+- prompts for one or more embedding providers until the profile is runnable
+- prompts for optional LLM inference providers
+- preserves existing provider config on re-init instead of wiping it
+
+The same OpenAI key can back embeddings, chunking, or both. If no LLM inference providers are
+configured, the local stack still starts, but LLM chunking is disabled honestly. If no embedding
+provider is configured, self-managed local mode is not runnable.
 
 This generates local runtime/config files under:
 
@@ -105,6 +121,38 @@ enscrive status
 enscrive stop
 ```
 
+Self-managed prerequisite:
+
+- `enscrive start` requires Docker and Docker Compose on the local machine
+- on Fedora, install them with `sudo dnf install -y moby-engine docker-compose`
+- then start Docker with `sudo systemctl enable --now docker`
+- add your user to the Docker group with `sudo usermod -aG docker $USER`, then re-login or run `newgrp docker`
+
+Operator deploy profile commands:
+
+```bash
+enscrive deploy init --target stage --secrets-source esm --set-default
+enscrive deploy status
+enscrive deploy bootstrap
+```
+
+`deploy` is the operator-facing path for Enscribe-controlled environments such as
+`DEV`, `STAGE`, `US`, `EU`, and `AP`. It is intentionally separate from customer
+`init` so local/self-managed onboarding does not inherit ESM/operator assumptions.
+
+Signed bootstrap consume:
+
+```bash
+enscrive deploy bootstrap \
+  --profile-name stage \
+  --bundle-secret-key ENSCRIVE_BOOTSTRAP_BUNDLE
+```
+
+For ESM-backed operator profiles, `deploy bootstrap` now tries `esm get --raw`
+for the signed bundle first, then falls back to `<vault-workdir>/bootstrap.bundle.toml`
+if present. The returned `platform_admin` and `operator` keys are persisted into
+the deploy profile for steady-state operator use after first bootstrap.
+
 What the current self-managed slice does:
 
 - generates local config/env/runtime files
@@ -116,7 +164,12 @@ What the current self-managed slice does:
 What it does not yet do:
 
 - install binaries for you from `curl -L https://enscrive.io/install | sh`
-- remove the current `OPENAI_API_KEY` startup assumption from `enscrive-embed`
+
+The first installer/productization scaffold for that future path now lives at:
+
+- `/home/christopher/enscrive-io/installer/install.sh`
+- `/home/christopher/enscrive-io/installer/manifests/`
+- `/home/christopher/enscrive-io/installer/scripts/generate_manifest.py`
 
 For now, the intended flow is:
 
@@ -152,10 +205,14 @@ default `current-truth-core` lane uses an OpenAI-backed fixture collection,
 while `bge-capability` mints a BGE-backed fixture collection and exercises the
 same public `/v1` surface against that provider. The canonical local BGE lane
 is now `bge-large-en-v1.5`; use overrides only when you are intentionally
-comparing alternate BGE models:
+comparing alternate BGE models. For Nebius/BYOK public-stack validation, use
+the `nebius-byok` suite with `ENSCRIVE_EMBEDDING_PROVIDER_KEY` set to the
+provider key you want forwarded as `X-Embedding-Provider-Key`:
 
 ```bash
 python3 scripts/run_live_validation.py --suite bge-capability
+ENSCRIVE_EMBEDDING_PROVIDER_KEY=neb-... \
+  python3 scripts/run_live_validation.py --suite nebius-byok
 ```
 
 For a protected self-hosted BGE deployment, `embed-svc` must be started with

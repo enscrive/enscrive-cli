@@ -4,8 +4,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -14,7 +16,16 @@ use clap::ValueEnum;
 
 const DEFAULT_LOCAL_PROFILE: &str = "local";
 const DEFAULT_MANAGED_PROFILE: &str = "managed";
+const DEFAULT_LEPTOS_OUTPUT_NAME: &str = "enscrive-developer";
+const INSTALLED_DEVELOPER_SITE_SUBDIR: &str = "site/enscrive-developer";
 const PROFILE_VERSION: u32 = 1;
+const FEDORA_DOCKER_HINT: &str = "On Fedora: `sudo dnf install -y moby-engine docker-compose && sudo systemctl enable --now docker && sudo usermod -aG docker $USER`, then re-login or run `newgrp docker` before retrying.";
+const LOCAL_POSTGRES_DATABASES: [&str; 4] = [
+    "enscrive_developer",
+    "enscrive_keycloak",
+    "enscrive_observe",
+    "enscrive_embed_backup",
+];
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +52,7 @@ pub struct SelfManagedInitOptions {
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
     pub voyage_api_key: Option<String>,
+    pub nebius_api_key: Option<String>,
     pub bge_endpoint: Option<String>,
     pub bge_api_key: Option<String>,
     pub bge_model_name: Option<String>,
@@ -109,6 +121,12 @@ struct LocalProfile {
     providers: LocalProviders,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ComposeBinary {
+    DockerPlugin,
+    DockerCompose,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LocalBinaries {
     developer: String,
@@ -165,14 +183,221 @@ struct LocalBootstrap {
     api_key_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 struct LocalProviders {
+    credentials: LocalProviderCredentials,
+    embedding: LocalEmbeddingProviders,
+    llm_inference: LocalLlmInferenceProviders,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct LocalProviderCredentials {
+    #[serde(skip_serializing_if = "Option::is_none")]
     openai_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     anthropic_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     voyage_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nebius_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     bge_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     bge_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     bge_model_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct LocalEmbeddingProviders {
+    #[serde(default)]
+    openai: bool,
+    #[serde(default)]
+    voyage: bool,
+    #[serde(default)]
+    nebius: bool,
+    #[serde(default)]
+    bge: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct LocalLlmInferenceProviders {
+    #[serde(default)]
+    openai: bool,
+    #[serde(default)]
+    anthropic: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+struct LocalProvidersSerde {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credentials: Option<LocalProviderCredentials>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedding: Option<LocalEmbeddingProviders>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    llm_inference: Option<LocalLlmInferenceProviders>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    openai_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anthropic_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voyage_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nebius_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bge_endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bge_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bge_model_name: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for LocalProviders {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = LocalProvidersSerde::deserialize(deserializer)?;
+        Ok(raw.into())
+    }
+}
+
+impl From<LocalProvidersSerde> for LocalProviders {
+    fn from(raw: LocalProvidersSerde) -> Self {
+        let legacy_openai = raw.openai_api_key.is_some();
+        let legacy_anthropic = raw.anthropic_api_key.is_some();
+        let legacy_voyage = raw.voyage_api_key.is_some();
+        let legacy_nebius = raw.nebius_api_key.is_some();
+        let legacy_bge = raw.bge_endpoint.is_some();
+
+        let mut credentials = raw.credentials.unwrap_or_default();
+        credentials.openai_api_key = credentials
+            .openai_api_key
+            .or_else(|| normalize_optional(raw.openai_api_key));
+        credentials.anthropic_api_key = credentials
+            .anthropic_api_key
+            .or_else(|| normalize_optional(raw.anthropic_api_key));
+        credentials.voyage_api_key = credentials
+            .voyage_api_key
+            .or_else(|| normalize_optional(raw.voyage_api_key));
+        credentials.nebius_api_key = credentials
+            .nebius_api_key
+            .or_else(|| normalize_optional(raw.nebius_api_key));
+        credentials.bge_endpoint = credentials
+            .bge_endpoint
+            .or_else(|| normalize_optional(raw.bge_endpoint));
+        credentials.bge_api_key = credentials
+            .bge_api_key
+            .or_else(|| normalize_optional(raw.bge_api_key));
+        credentials.bge_model_name = credentials
+            .bge_model_name
+            .or_else(|| normalize_optional(raw.bge_model_name));
+
+        let mut embedding = raw.embedding.unwrap_or_default();
+        let mut llm_inference = raw.llm_inference.unwrap_or_default();
+
+        if credentials.openai_api_key.is_some() {
+            embedding.openai = embedding.openai || legacy_openai;
+            llm_inference.openai = llm_inference.openai || legacy_openai;
+        }
+        if credentials.anthropic_api_key.is_some() {
+            llm_inference.anthropic = llm_inference.anthropic || legacy_anthropic;
+        }
+        if credentials.voyage_api_key.is_some() {
+            embedding.voyage = embedding.voyage || legacy_voyage;
+        }
+        if credentials.nebius_api_key.is_some() {
+            embedding.nebius = embedding.nebius || legacy_nebius;
+        }
+        if credentials.bge_endpoint.is_some() {
+            embedding.bge = embedding.bge || legacy_bge;
+        }
+
+        Self {
+            credentials,
+            embedding,
+            llm_inference,
+        }
+    }
+}
+
+impl LocalEmbeddingProviders {
+    fn any_enabled(&self) -> bool {
+        self.openai || self.voyage || self.nebius || self.bge
+    }
+}
+
+impl LocalLlmInferenceProviders {
+    fn any_enabled(&self) -> bool {
+        self.openai || self.anthropic
+    }
+}
+
+impl LocalProviders {
+    fn embedding_openai_api_key(&self) -> Option<String> {
+        if self.embedding.openai {
+            self.credentials.openai_api_key.clone()
+        } else {
+            None
+        }
+    }
+
+    fn embedding_voyage_api_key(&self) -> Option<String> {
+        if self.embedding.voyage {
+            self.credentials.voyage_api_key.clone()
+        } else {
+            None
+        }
+    }
+
+    fn embedding_nebius_api_key(&self) -> Option<String> {
+        if self.embedding.nebius {
+            self.credentials.nebius_api_key.clone()
+        } else {
+            None
+        }
+    }
+
+    fn embedding_bge_endpoint(&self) -> Option<String> {
+        if self.embedding.bge {
+            self.credentials.bge_endpoint.clone()
+        } else {
+            None
+        }
+    }
+
+    fn embedding_bge_api_key(&self) -> Option<String> {
+        if self.embedding.bge {
+            self.credentials.bge_api_key.clone()
+        } else {
+            None
+        }
+    }
+
+    fn embedding_bge_model_name(&self) -> Option<String> {
+        if self.embedding.bge {
+            self.credentials.bge_model_name.clone()
+        } else {
+            None
+        }
+    }
+
+    fn llm_inference_openai_api_key(&self) -> Option<String> {
+        if self.llm_inference.openai {
+            self.credentials.openai_api_key.clone()
+        } else {
+            None
+        }
+    }
+
+    fn llm_inference_anthropic_api_key(&self) -> Option<String> {
+        if self.llm_inference.anthropic {
+            self.credentials.anthropic_api_key.clone()
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -292,18 +517,29 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
 
     let profile_name = opts
         .profile_name
+        .clone()
         .unwrap_or_else(|| DEFAULT_LOCAL_PROFILE.to_string());
     let runtime_dir = home.data_root.join("runtime").join(&profile_name);
     let config_dir = home.config_root.join("profiles").join(&profile_name);
     let log_dir = runtime_dir.join("logs");
     let data_dir = runtime_dir.join("data");
     let infra_dir = runtime_dir.join("infra");
+    let infra_env_path = config_dir.join("infra.env");
+    let developer_env_path = config_dir.join("developer.env");
+    let observe_env_path = config_dir.join("observe.env");
+    let embed_env_path = config_dir.join("embed.env");
+    let existing_local = profiles
+        .profiles
+        .get(&profile_name)
+        .and_then(|profile| profile.local.as_ref())
+        .cloned();
 
     fs::create_dir_all(&runtime_dir).map_err(|e| format!("create runtime dir: {e}"))?;
     fs::create_dir_all(&config_dir).map_err(|e| format!("create profile config dir: {e}"))?;
     fs::create_dir_all(&log_dir).map_err(|e| format!("create log dir: {e}"))?;
     fs::create_dir_all(&data_dir).map_err(|e| format!("create data dir: {e}"))?;
     fs::create_dir_all(&infra_dir).map_err(|e| format!("create infra dir: {e}"))?;
+    prepare_local_data_dirs(&data_dir)?;
 
     let ports = LocalPorts {
         developer: 3000,
@@ -320,6 +556,8 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         grafana: opts.with_grafana.then_some(3003),
     };
 
+    let providers = resolve_local_provider_config(existing_local.as_ref(), &opts)?;
+
     let binaries = LocalBinaries {
         developer: opts.developer_bin.unwrap_or_else(|| {
             discover_binary("enscrive-developer")
@@ -333,42 +571,51 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         }),
     };
 
-    let lab_secret = generate_secret(48);
-    let local_bootstrap_secret = generate_secret(48);
-    let hmac_pepper = generate_secret(48);
-    let aes_key = generate_secret(48);
-    let qdrant_api_key = generate_secret(48);
-    let postgres_password = generate_secret(24);
+    let lab_secret = read_env_value(&observe_env_path, "LAB_SERVICE_SECRET")
+        .or_else(|| read_env_value(&embed_env_path, "LAB_SERVICE_SECRET"))
+        .unwrap_or_else(|| generate_secret(48));
+    let local_bootstrap_secret = existing_local
+        .as_ref()
+        .map(|local| local.bootstrap.secret.clone())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| read_env_value(&developer_env_path, "LOCAL_BOOTSTRAP_SECRET"))
+        .unwrap_or_else(|| generate_secret(48));
+    let hmac_pepper =
+        read_env_value(&developer_env_path, "HMAC_PEPPER").unwrap_or_else(|| generate_secret(48));
+    let aes_key = read_env_value(&developer_env_path, "AES_KEY")
+        .filter(|value| is_valid_aes_key(value))
+        .unwrap_or_else(|| generate_hex_secret(32));
+    let qdrant_api_key = read_env_value(&infra_env_path, "QDRANT_API_KEY")
+        .or_else(|| read_env_value(&embed_env_path, "QDRANT_API_KEY"))
+        .unwrap_or_else(|| generate_secret(48));
+    let postgres_password = read_env_value(&infra_env_path, "POSTGRES_PASSWORD")
+        .or_else(|| database_url_password(&developer_env_path))
+        .or_else(|| database_url_password(&observe_env_path))
+        .unwrap_or_else(|| generate_secret(24));
     let docker_project = format!("enscrive-local-{}", sanitize_name(&profile_name));
 
-    let keycloak = LocalKeycloak {
-        realm: "enscrive".to_string(),
-        client_id: "enscrive-developer".to_string(),
-        client_secret: generate_secret(32),
-        admin_username: "admin".to_string(),
-        admin_password: generate_secret(24),
-        developer_username: "developer".to_string(),
-        developer_password: generate_secret(24),
-    };
-
-    let providers = LocalProviders {
-        openai_api_key: normalize_optional(opts.openai_api_key),
-        anthropic_api_key: normalize_optional(opts.anthropic_api_key),
-        voyage_api_key: normalize_optional(opts.voyage_api_key),
-        bge_endpoint: normalize_optional(opts.bge_endpoint),
-        bge_api_key: normalize_optional(opts.bge_api_key),
-        bge_model_name: normalize_optional(opts.bge_model_name),
-    };
+    let keycloak = existing_local
+        .as_ref()
+        .map(|local| local.keycloak.clone())
+        .unwrap_or_else(|| LocalKeycloak {
+            realm: "enscrive".to_string(),
+            client_id: "enscrive-developer".to_string(),
+            client_secret: generate_secret(32),
+            admin_username: "admin".to_string(),
+            admin_password: generate_secret(24),
+            developer_username: "developer".to_string(),
+            developer_password: generate_secret(24),
+        });
 
     let local = LocalProfile {
         deployment_mode: "local".to_string(),
         runtime_dir: runtime_dir.display().to_string(),
         config_dir: config_dir.display().to_string(),
         compose_file: config_dir.join("docker-compose.yml").display().to_string(),
-        infra_env_file: config_dir.join("infra.env").display().to_string(),
-        developer_env_file: config_dir.join("developer.env").display().to_string(),
-        observe_env_file: config_dir.join("observe.env").display().to_string(),
-        embed_env_file: config_dir.join("embed.env").display().to_string(),
+        infra_env_file: infra_env_path.display().to_string(),
+        developer_env_file: developer_env_path.display().to_string(),
+        observe_env_file: observe_env_path.display().to_string(),
+        embed_env_file: embed_env_path.display().to_string(),
         log_dir: log_dir.display().to_string(),
         docker_project,
         binaries,
@@ -378,19 +625,32 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
             local_bge_management: false,
         },
         keycloak,
-        bootstrap: LocalBootstrap {
-            secret: local_bootstrap_secret,
-            developer_email: "developer@local.enscrive".to_string(),
-            developer_name: "Local Developer".to_string(),
-            tenant_name: "Local Developer".to_string(),
-            environment_name: "development".to_string(),
-            api_key_label: "local-cli".to_string(),
-            tenant_id: None,
-            environment_id: None,
-            api_key_id: None,
-        },
+        bootstrap: existing_local
+            .as_ref()
+            .map(|local| {
+                let mut bootstrap = local.bootstrap.clone();
+                bootstrap.secret = local_bootstrap_secret.clone();
+                bootstrap
+            })
+            .unwrap_or(LocalBootstrap {
+                secret: local_bootstrap_secret,
+                developer_email: "developer@local.enscrive".to_string(),
+                developer_name: "Local Developer".to_string(),
+                tenant_name: "Local Developer".to_string(),
+                environment_name: "development".to_string(),
+                api_key_label: "local-cli".to_string(),
+                tenant_id: None,
+                environment_id: None,
+                api_key_id: None,
+            }),
         providers,
     };
+
+    let developer_site_root = discover_developer_site_root(&home, &local.binaries);
+    let leptos_output_name = developer_site_root
+        .as_deref()
+        .and_then(infer_leptos_output_name)
+        .unwrap_or_else(|| DEFAULT_LEPTOS_OUTPUT_NAME.to_string());
 
     write_text(
         &config_dir.join("docker-compose.yml"),
@@ -419,6 +679,8 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
             &lab_secret,
             &hmac_pepper,
             &aes_key,
+            developer_site_root.as_deref(),
+            &leptos_output_name,
         ),
     )?;
     write_text(
@@ -457,12 +719,7 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
             "enscrive-observe": local.binaries.observe,
             "enscrive-embed": local.binaries.embed,
         },
-        "provider_configured": {
-            "openai": local.providers.openai_api_key.is_some(),
-            "anthropic": local.providers.anthropic_api_key.is_some(),
-            "voyage": local.providers.voyage_api_key.is_some(),
-            "bge_endpoint": local.providers.bge_endpoint,
-        },
+        "provider_configured": provider_configured_json(&local.providers),
         "login": {
             "url": format!("http://127.0.0.1:{}/auth/login", local.ports.developer),
             "username": local.keycloak.developer_username,
@@ -481,6 +738,9 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         .clone()
         .ok_or_else(|| format!("profile '{}' is not self-managed", profile_name))?;
 
+    ensure_local_embedding_provider(&local)?;
+    ensure_valid_developer_env(Path::new(&local.developer_env_file))?;
+    prepare_local_data_dirs(&Path::new(&local.runtime_dir).join("data"))?;
     ensure_docker_available()?;
     compose_cmd(&local)?
         .arg("up")
@@ -490,13 +750,15 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         .and_then(require_success("start local infra"))?;
 
     wait_for_tcp("127.0.0.1", local.ports.postgres, Duration::from_secs(60))?;
+    wait_for_local_postgres(&local, Duration::from_secs(90))?;
+    ensure_local_postgres_databases(&local)?;
     wait_for_tcp("127.0.0.1", local.ports.keycloak, Duration::from_secs(60))?;
     wait_for_tcp(
         "127.0.0.1",
         local.ports.qdrant_http,
         Duration::from_secs(60),
     )?;
-    wait_for_tcp("127.0.0.1", local.ports.loki, Duration::from_secs(60))?;
+    let loki_ready = wait_for_tcp("127.0.0.1", local.ports.loki, Duration::from_secs(60)).is_ok();
 
     let keycloak_user = bootstrap_keycloak(&local).await?;
 
@@ -519,7 +781,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         Path::new(&local.log_dir),
     )?;
     wait_for_http(
-        &format!("http://127.0.0.1:{}/ready", local.ports.observe_rest),
+        &format!("http://127.0.0.1:{}/health", local.ports.observe_rest),
         Duration::from_secs(60),
     )
     .await?;
@@ -552,7 +814,9 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
     if let Some(api_key) = bootstrap.api_key.clone() {
         profile.api_key = Some(api_key);
     }
-    profiles.profiles.insert(profile_name.clone(), profile.clone());
+    profiles
+        .profiles
+        .insert(profile_name.clone(), profile.clone());
     save_profiles(&profiles)?;
 
     Ok(json!({
@@ -562,6 +826,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         "infra": {
             "docker_project": local.docker_project,
             "compose_file": local.compose_file,
+            "loki_ready": loki_ready,
         },
         "services": {
             "enscrive-embed": started_embed,
@@ -649,12 +914,7 @@ pub async fn status(opts: StatusOptions) -> Result<Value, String> {
                 "api_key_label": local.bootstrap.api_key_label,
                 "api_key_id": local.bootstrap.api_key_id,
             },
-            "provider_configured": {
-                "openai": local.providers.openai_api_key.is_some(),
-                "anthropic": local.providers.anthropic_api_key.is_some(),
-                "voyage": local.providers.voyage_api_key.is_some(),
-                "bge_endpoint": local.providers.bge_endpoint,
-            },
+            "provider_configured": provider_configured_json(&local.providers),
             "api_key_configured": profile.api_key.is_some(),
         })
     });
@@ -790,6 +1050,9 @@ server:
 common:
   path_prefix: /loki
   replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
 schema_config:
   configs:
     - from: 2024-01-01
@@ -851,8 +1114,8 @@ services:
       POSTGRES_PASSWORD: {postgres_password}
       POSTGRES_DB: postgres
     volumes:
-      - "{postgres_data}:/var/lib/postgresql/data"
-      - "{initdb_sql}:/docker-entrypoint-initdb.d/01-init.sql:ro"
+      - "{postgres_data}:/var/lib/postgresql/data:Z"
+      - "{initdb_sql}:/docker-entrypoint-initdb.d/01-init.sql:ro,Z"
 
   keycloak:
     image: quay.io/keycloak/keycloak:25.0.6
@@ -881,7 +1144,7 @@ services:
     environment:
       QDRANT__SERVICE__API_KEY: {qdrant_api_key}
     volumes:
-      - "{qdrant_data}:/qdrant/storage"
+      - "{qdrant_data}:/qdrant/storage:Z"
 
   loki:
     image: grafana/loki:2.9.4
@@ -890,8 +1153,8 @@ services:
     ports:
       - "{loki_port}:3100"
     volumes:
-      - "{loki_config}:/etc/loki/config.yaml:ro"
-      - "{loki_data}:/loki"
+      - "{loki_config}:/etc/loki/config.yaml:ro,Z"
+      - "{loki_data}:/loki:Z"
 {grafana_service}
 "#,
         postgres_port = local.ports.postgres,
@@ -930,9 +1193,14 @@ fn render_developer_env(
     lab_secret: &str,
     hmac_pepper: &str,
     aes_key: &str,
+    leptos_site_root: Option<&Path>,
+    leptos_output_name: &str,
 ) -> String {
+    let leptos_site_root_line = leptos_site_root
+        .map(|path| format!("LEPTOS_SITE_ROOT={}\n", path.display()))
+        .unwrap_or_default();
     format!(
-        "ENSCRIVE_ENVIRONMENT=development\nDEPLOYMENT_MODE=local\nDATABASE_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_developer\nDEVELOPER_PORT={developer_port}\nKEYCLOAK_ISSUER=http://127.0.0.1:{keycloak_port}/realms/{realm}\nKEYCLOAK_CLIENT_ID={client_id}\nKEYCLOAK_CLIENT_SECRET={client_secret}\nPORTAL_OIDC_REDIRECT_URI=http://127.0.0.1:{developer_port}/auth/callback\nHMAC_PEPPER={hmac_pepper}\nAES_KEY={aes_key}\nOBSERVE_GRPC_ADDR=http://127.0.0.1:{observe_grpc_port}\nLAB_SERVICE_SECRET={lab_secret}\nLOCAL_BOOTSTRAP_SECRET={local_bootstrap_secret}\nOPENAI_API_KEY={openai}\nANTHROPIC_API_KEY={anthropic}\nALLOW_MULTI_ENVIRONMENT=false\nALLOW_VOICE_PROMOTION=false\nALLOW_PROMOTION_GATES=false\nALLOW_MANAGED_BACKUPS=false\nALLOW_COMPLIANCE_EXPORTS=false\nALLOW_OPERATOR_OBSERVABILITY=false\nALLOW_BYOK_LLM_INFERENCE=true\nALLOW_LLM_CHUNKING_SETS=true\n",
+        "ENSCRIVE_ENVIRONMENT=development\nDEPLOYMENT_MODE=local\nDATABASE_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_developer\nDEVELOPER_PORT={developer_port}\nKEYCLOAK_ISSUER=http://127.0.0.1:{keycloak_port}/realms/{realm}\nKEYCLOAK_CLIENT_ID={client_id}\nKEYCLOAK_CLIENT_SECRET={client_secret}\nPORTAL_OIDC_REDIRECT_URI=http://127.0.0.1:{developer_port}/auth/callback\nHMAC_PEPPER={hmac_pepper}\nAES_KEY={aes_key}\nOBSERVE_GRPC_ADDR=http://127.0.0.1:{observe_grpc_port}\nLAB_SERVICE_SECRET={lab_secret}\nLOCAL_BOOTSTRAP_SECRET={local_bootstrap_secret}\nOPENAI_API_KEY={openai}\nANTHROPIC_API_KEY={anthropic}\nLEPTOS_OUTPUT_NAME={leptos_output_name}\nLEPTOS_SITE_PKG_DIR=pkg\n{leptos_site_root_line}ALLOW_MULTI_ENVIRONMENT=false\nALLOW_VOICE_PROMOTION=false\nALLOW_PROMOTION_GATES=false\nALLOW_MANAGED_BACKUPS=false\nALLOW_COMPLIANCE_EXPORTS=false\nALLOW_OPERATOR_OBSERVABILITY=false\nALLOW_BYOK_LLM_INFERENCE=true\nALLOW_LLM_CHUNKING_SETS=true\n",
         postgres_password = postgres_password,
         postgres_port = local.ports.postgres,
         developer_port = local.ports.developer,
@@ -945,13 +1213,81 @@ fn render_developer_env(
         observe_grpc_port = local.ports.observe_grpc,
         lab_secret = lab_secret,
         local_bootstrap_secret = local.bootstrap.secret,
-        openai = local.providers.openai_api_key.clone().unwrap_or_default(),
+        openai = local
+            .providers
+            .llm_inference_openai_api_key()
+            .unwrap_or_default(),
         anthropic = local
             .providers
-            .anthropic_api_key
+            .llm_inference_anthropic_api_key()
             .clone()
             .unwrap_or_default(),
+        leptos_output_name = leptos_output_name,
+        leptos_site_root_line = leptos_site_root_line,
     )
+}
+
+fn installed_developer_site_root(home: &CliHome) -> PathBuf {
+    home.data_root.join(INSTALLED_DEVELOPER_SITE_SUBDIR)
+}
+
+fn discover_developer_site_root(home: &CliHome, binaries: &LocalBinaries) -> Option<PathBuf> {
+    let installed = installed_developer_site_root(home);
+    if installed.join("pkg").is_dir() {
+        return Some(installed);
+    }
+
+    let binary_path = Path::new(&binaries.developer);
+    for ancestor in binary_path.ancestors() {
+        if ancestor.join("Cargo.toml").is_file() {
+            let site_root = ancestor.join("target").join("site");
+            if site_root.join("pkg").is_dir() {
+                return Some(site_root);
+            }
+        }
+    }
+
+    None
+}
+
+fn infer_leptos_output_name(site_root: &Path) -> Option<String> {
+    let pkg_dir = site_root.join("pkg");
+    if !pkg_dir.is_dir() {
+        return None;
+    }
+
+    let mut css_candidates = Vec::new();
+    let mut js_candidates = Vec::new();
+
+    for entry in fs::read_dir(&pkg_dir).ok()? {
+        let entry = entry.ok()?;
+        if !entry.file_type().ok()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+
+        if let Some(stem) = file_name.strip_suffix(".css") {
+            css_candidates.push(stem.to_string());
+            continue;
+        }
+
+        if let Some(stem) = file_name.strip_suffix(".js") {
+            js_candidates.push(stem.to_string());
+        }
+    }
+
+    css_candidates.sort();
+    css_candidates.dedup();
+    if let Some(candidate) = css_candidates.into_iter().next() {
+        return Some(candidate);
+    }
+
+    js_candidates.sort();
+    js_candidates.dedup();
+    js_candidates.into_iter().next()
 }
 
 fn render_observe_env(local: &LocalProfile, postgres_password: &str, lab_secret: &str) -> String {
@@ -968,24 +1304,64 @@ fn render_observe_env(local: &LocalProfile, postgres_password: &str, lab_secret:
 
 fn render_embed_env(local: &LocalProfile, qdrant_api_key: &str, lab_secret: &str) -> String {
     format!(
-        "QDRANT_URL=http://127.0.0.1:{qdrant_http}\nQDRANT_GRPC_URL=http://127.0.0.1:{qdrant_grpc}\nQDRANT_GRPC=127.0.0.1:{qdrant_grpc}\nQDRANT_API_KEY={qdrant_api_key}\nCOLLECTION_NAME=embeddings\nSERVER_ADDR=127.0.0.1:{embed_grpc_port}\nREST_ADDR=127.0.0.1:{embed_rest_port}\nMETRICS_PORT={embed_metrics_port}\nOPENAI_API_KEY={openai}\nVOYAGE_API_KEY={voyage}\nANTHROPIC_API_KEY={anthropic}\nBGE_ENDPOINT={bge_endpoint}\nBGE_API_KEY={bge_api_key}\nBGE_MODEL_NAME={bge_model_name}\nLAB_SERVICE_SECRET={lab_secret}\nBACKUP_SCHEDULER_ENABLED=false\n",
+        "QDRANT_URL=http://127.0.0.1:{qdrant_http}\nQDRANT_GRPC_URL=http://127.0.0.1:{qdrant_grpc}\nQDRANT_GRPC=127.0.0.1:{qdrant_grpc}\nQDRANT_API_KEY={qdrant_api_key}\nCOLLECTION_NAME=embeddings\nSERVER_ADDR=127.0.0.1:{embed_grpc_port}\nREST_ADDR=127.0.0.1:{embed_rest_port}\nMETRICS_PORT={embed_metrics_port}\nOPENAI_API_KEY={openai}\nNEBIUS_API_KEY={nebius}\nVOYAGE_API_KEY={voyage}\nANTHROPIC_API_KEY={anthropic}\nBGE_ENDPOINT={bge_endpoint}\nBGE_API_KEY={bge_api_key}\nBGE_MODEL_NAME={bge_model_name}\nLAB_SERVICE_SECRET={lab_secret}\nBACKUP_SCHEDULER_ENABLED=false\n",
         qdrant_http = local.ports.qdrant_http,
         qdrant_grpc = local.ports.qdrant_grpc,
         qdrant_api_key = qdrant_api_key,
         embed_grpc_port = local.ports.embed_grpc,
         embed_rest_port = local.ports.embed_rest,
         embed_metrics_port = local.ports.embed_metrics,
-        openai = local.providers.openai_api_key.clone().unwrap_or_default(),
-        voyage = local.providers.voyage_api_key.clone().unwrap_or_default(),
-        anthropic = local
+        openai = local
             .providers
-            .anthropic_api_key
-            .clone()
+            .embedding_openai_api_key()
             .unwrap_or_default(),
-        bge_endpoint = local.providers.bge_endpoint.clone().unwrap_or_default(),
-        bge_api_key = local.providers.bge_api_key.clone().unwrap_or_default(),
-        bge_model_name = local.providers.bge_model_name.clone().unwrap_or_default(),
+        nebius = local
+            .providers
+            .embedding_nebius_api_key()
+            .unwrap_or_default(),
+        voyage = local
+            .providers
+            .embedding_voyage_api_key()
+            .unwrap_or_default(),
+        anthropic = String::new(),
+        bge_endpoint = local.providers.embedding_bge_endpoint().unwrap_or_default(),
+        bge_api_key = local.providers.embedding_bge_api_key().unwrap_or_default(),
+        bge_model_name = local
+            .providers
+            .embedding_bge_model_name()
+            .unwrap_or_default(),
         lab_secret = lab_secret,
+    )
+}
+
+fn local_has_embedding_provider(local: &LocalProfile) -> bool {
+    local.providers.embedding.any_enabled()
+}
+
+fn provider_configured_json(providers: &LocalProviders) -> Value {
+    json!({
+        "embedding": {
+            "openai": providers.embedding.openai,
+            "voyage": providers.embedding.voyage,
+            "nebius": providers.embedding.nebius,
+            "bge": providers.embedding.bge,
+            "bge_endpoint": providers.embedding_bge_endpoint(),
+            "bge_model_name": providers.embedding_bge_model_name(),
+        },
+        "llm_inference": {
+            "openai": providers.llm_inference.openai,
+            "anthropic": providers.llm_inference.anthropic,
+        }
+    })
+}
+
+fn ensure_local_embedding_provider(local: &LocalProfile) -> Result<(), String> {
+    if local_has_embedding_provider(local) {
+        return Ok(());
+    }
+
+    Err(
+        "self-managed local mode requires at least one embedding provider. Re-run `enscrive init --mode self-managed` with `--bge-endpoint`, `--openai-api-key`, `--nebius-api-key`, or `--voyage-api-key`.".to_string(),
     )
 }
 
@@ -1012,12 +1388,248 @@ fn prompt_line(label: &str, default: Option<&str>) -> Result<String, String> {
     }
 }
 
+fn prompt_secret_line(label: &str) -> Result<String, String> {
+    print!("{label}: ");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("flush stdout: {e}"))?;
+    rpassword::read_password()
+        .map(|value| value.trim().to_string())
+        .map_err(|e| format!("read secret input: {e}"))
+}
+
+fn interactive_prompts_available() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+fn resolve_local_provider_config(
+    existing_local: Option<&LocalProfile>,
+    opts: &SelfManagedInitOptions,
+) -> Result<LocalProviders, String> {
+    let mut providers = existing_local
+        .map(|local| local.providers.clone())
+        .unwrap_or_default();
+
+    if let Some(openai_api_key) = normalize_optional(opts.openai_api_key.clone()) {
+        providers.credentials.openai_api_key = Some(openai_api_key);
+        providers.embedding.openai = true;
+        providers.llm_inference.openai = true;
+    }
+    if let Some(anthropic_api_key) = normalize_optional(opts.anthropic_api_key.clone()) {
+        providers.credentials.anthropic_api_key = Some(anthropic_api_key);
+        providers.llm_inference.anthropic = true;
+    }
+    if let Some(voyage_api_key) = normalize_optional(opts.voyage_api_key.clone()) {
+        providers.credentials.voyage_api_key = Some(voyage_api_key);
+        providers.embedding.voyage = true;
+    }
+    if let Some(nebius_api_key) = normalize_optional(opts.nebius_api_key.clone()) {
+        providers.credentials.nebius_api_key = Some(nebius_api_key);
+        providers.embedding.nebius = true;
+    }
+    if let Some(bge_endpoint) = normalize_optional(opts.bge_endpoint.clone()) {
+        providers.credentials.bge_endpoint = Some(bge_endpoint);
+        providers.embedding.bge = true;
+    }
+    if let Some(bge_api_key) = normalize_optional(opts.bge_api_key.clone()) {
+        providers.credentials.bge_api_key = Some(bge_api_key);
+    }
+    if let Some(bge_model_name) = normalize_optional(opts.bge_model_name.clone()) {
+        providers.credentials.bge_model_name = Some(bge_model_name);
+    }
+
+    sync_local_provider_capabilities(&mut providers);
+
+    let explicit_embedding_provider = opts.openai_api_key.is_some()
+        || opts.voyage_api_key.is_some()
+        || opts.nebius_api_key.is_some()
+        || opts.bge_endpoint.is_some();
+    let explicit_llm_provider = opts.openai_api_key.is_some() || opts.anthropic_api_key.is_some();
+
+    if interactive_prompts_available() {
+        if !providers.embedding.any_enabled() && !explicit_embedding_provider {
+            prompt_for_embedding_providers(&mut providers)?;
+        }
+        if !providers.llm_inference.any_enabled() && !explicit_llm_provider {
+            prompt_for_llm_inference_providers(&mut providers)?;
+        }
+    }
+
+    sync_local_provider_capabilities(&mut providers);
+
+    if !providers.embedding.any_enabled() {
+        return Err(
+            "self-managed local mode requires at least one embedding provider. Configure BGE, OpenAI, Voyage, or Nebius before starting the local stack."
+                .to_string(),
+        );
+    }
+
+    Ok(providers)
+}
+
+fn sync_local_provider_capabilities(providers: &mut LocalProviders) {
+    if providers.credentials.openai_api_key.is_none() {
+        providers.embedding.openai = false;
+        providers.llm_inference.openai = false;
+    }
+    if providers.credentials.anthropic_api_key.is_none() {
+        providers.llm_inference.anthropic = false;
+    }
+    if providers.credentials.voyage_api_key.is_none() {
+        providers.embedding.voyage = false;
+    }
+    if providers.credentials.nebius_api_key.is_none() {
+        providers.embedding.nebius = false;
+    }
+    if providers.credentials.bge_endpoint.is_none() {
+        providers.embedding.bge = false;
+    }
+}
+
+fn prompt_for_embedding_providers(providers: &mut LocalProviders) -> Result<(), String> {
+    println!(
+        "Configure embedding providers. At least one is required to run self-managed local mode."
+    );
+    println!(
+        "For BGE, point Enscrive at a reachable local or LAN-hosted embeddings endpoint. Nebius Token Factory uses a Nebius API key instead of a BGE endpoint."
+    );
+
+    let bge_endpoint = prompt_line(
+        "BGE endpoint for a local or LAN-hosted service (optional)",
+        Some(""),
+    )?;
+    if !bge_endpoint.trim().is_empty() {
+        providers.credentials.bge_endpoint = Some(bge_endpoint);
+        providers.embedding.bge = true;
+
+        let bge_api_key = prompt_secret_line("BGE bearer token for secured endpoints (optional)")?;
+        providers.credentials.bge_api_key = normalize_optional(Some(bge_api_key));
+
+        let bge_model_name = prompt_line(
+            "BGE model name for single-model endpoints (optional)",
+            Some(""),
+        )?;
+        providers.credentials.bge_model_name = normalize_optional(Some(bge_model_name));
+    }
+
+    let openai_api_key = prompt_secret_line("OpenAI API key for embeddings (optional)")?;
+    if !openai_api_key.is_empty() {
+        providers.credentials.openai_api_key = Some(openai_api_key);
+        providers.embedding.openai = true;
+    }
+
+    let voyage_api_key = prompt_secret_line("Voyage API key for embeddings (optional)")?;
+    if !voyage_api_key.is_empty() {
+        providers.credentials.voyage_api_key = Some(voyage_api_key);
+        providers.embedding.voyage = true;
+    }
+
+    let nebius_api_key =
+        prompt_secret_line("Nebius API key for Token Factory embeddings (optional)")?;
+    if !nebius_api_key.is_empty() {
+        providers.credentials.nebius_api_key = Some(nebius_api_key);
+        providers.embedding.nebius = true;
+    }
+
+    Ok(())
+}
+
+fn prompt_for_llm_inference_providers(providers: &mut LocalProviders) -> Result<(), String> {
+    println!(
+        "Configure optional LLM inference providers for crafted chunking sets. Leave values blank to disable LLM chunking."
+    );
+
+    if providers.credentials.openai_api_key.is_some() {
+        providers.llm_inference.openai = prompt_yes_no(
+            "Reuse the configured OpenAI API key for crafted chunking sets",
+            false,
+        )?;
+    } else {
+        let openai_api_key =
+            prompt_secret_line("OpenAI API key for crafted chunking sets (optional)")?;
+        if !openai_api_key.is_empty() {
+            providers.credentials.openai_api_key = Some(openai_api_key);
+            providers.llm_inference.openai = true;
+        }
+    }
+
+    let anthropic_api_key =
+        prompt_secret_line("Anthropic API key for crafted chunking sets (optional)")?;
+    if !anthropic_api_key.is_empty() {
+        providers.credentials.anthropic_api_key = Some(anthropic_api_key);
+        providers.llm_inference.anthropic = true;
+    }
+
+    Ok(())
+}
+
+fn prompt_yes_no(label: &str, default: bool) -> Result<bool, String> {
+    let default_value = if default { "yes" } else { "no" };
+    let response = prompt_line(&format!("{label} (yes/no)"), Some(default_value))?;
+    match response.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(default),
+        "y" | "yes" => Ok(true),
+        "n" | "no" => Ok(false),
+        other => Err(format!("invalid selection '{}': expected yes or no", other)),
+    }
+}
+
 fn generate_secret(len: usize) -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(len)
         .map(char::from)
         .collect()
+}
+
+fn generate_hex_secret(num_bytes: usize) -> String {
+    let mut bytes = vec![0u8; num_bytes];
+    rand::thread_rng().fill(bytes.as_mut_slice());
+
+    let mut secret = String::with_capacity(num_bytes * 2);
+    for byte in bytes {
+        secret.push(char::from_digit((byte >> 4) as u32, 16).expect("high nibble is valid hex"));
+        secret.push(char::from_digit((byte & 0x0f) as u32, 16).expect("low nibble is valid hex"));
+    }
+    secret
+}
+
+fn is_valid_aes_key(value: &str) -> bool {
+    value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn ensure_valid_developer_env(env_file: &Path) -> Result<(), String> {
+    let mut envs = parse_env_file(env_file)?;
+    let mut found_aes_key = false;
+    let mut rewrote_aes_key = false;
+
+    for (key, value) in envs.iter_mut() {
+        if key == "AES_KEY" {
+            found_aes_key = true;
+            if !is_valid_aes_key(value.trim()) {
+                *value = generate_hex_secret(32);
+                rewrote_aes_key = true;
+            }
+        }
+    }
+
+    if !found_aes_key {
+        return Err(format!(
+            "developer env '{}' is missing AES_KEY",
+            env_file.display()
+        ));
+    }
+
+    if rewrote_aes_key {
+        let content = envs
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        write_text(env_file, &(content + "\n"))?;
+    }
+
+    Ok(())
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
@@ -1076,21 +1688,46 @@ fn which_in_path(binary_name: &str) -> Option<PathBuf> {
 }
 
 fn ensure_docker_available() -> Result<(), String> {
-    let mut cmd = Command::new("docker");
-    cmd.arg("compose").arg("version");
-    cmd.status()
-        .map_err(|e| format!("docker compose unavailable: {e}"))
-        .and_then(require_success("docker compose version"))
+    resolve_compose_binary().map(|_| ())
 }
 
 fn compose_cmd(local: &LocalProfile) -> Result<Command, String> {
-    let mut cmd = Command::new("docker");
-    cmd.arg("compose")
-        .arg("-p")
+    let mut cmd = match resolve_compose_binary()? {
+        ComposeBinary::DockerPlugin => {
+            let mut cmd = Command::new("docker");
+            cmd.arg("compose");
+            cmd
+        }
+        ComposeBinary::DockerCompose => Command::new("docker-compose"),
+    };
+    cmd.arg("-p")
         .arg(&local.docker_project)
         .arg("-f")
         .arg(&local.compose_file);
     Ok(cmd)
+}
+
+fn resolve_compose_binary() -> Result<ComposeBinary, String> {
+    if command_succeeds("docker", &["compose", "version"]) {
+        return Ok(ComposeBinary::DockerPlugin);
+    }
+
+    if command_succeeds("docker-compose", &["version"]) {
+        return Ok(ComposeBinary::DockerCompose);
+    }
+
+    Err(format!(
+        "self-managed local mode requires Docker and Docker Compose. {}",
+        FEDORA_DOCKER_HINT
+    ))
+}
+
+fn command_succeeds(program: &str, args: &[&str]) -> bool {
+    match Command::new(program).args(args).output() {
+        Ok(output) => output.status.success(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+        Err(_) => false,
+    }
 }
 
 fn require_success<'a>(
@@ -1102,6 +1739,168 @@ fn require_success<'a>(
         } else {
             Err(format!("{} failed with status {}", label, status))
         }
+    }
+}
+
+fn ensure_local_postgres_databases(local: &LocalProfile) -> Result<(), String> {
+    for database in LOCAL_POSTGRES_DATABASES {
+        let exists = retry_local_postgres_admin(
+            &format!("check postgres database '{}'", database),
+            Duration::from_secs(90),
+            || local_postgres_database_exists(local, database),
+        )?;
+        if !exists {
+            retry_local_postgres_admin(
+                &format!("create postgres database '{}'", database),
+                Duration::from_secs(90),
+                || create_local_postgres_database(local, database),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn wait_for_local_postgres(local: &LocalProfile, timeout: Duration) -> Result<(), String> {
+    let started = Instant::now();
+    let mut last_error = "postgres readiness check did not run".to_string();
+
+    while started.elapsed() < timeout {
+        let output = compose_cmd(local)?
+            .arg("exec")
+            .arg("-T")
+            .arg("postgres")
+            .arg("pg_isready")
+            .arg("-U")
+            .arg("enscrive")
+            .arg("-d")
+            .arg("postgres")
+            .output()
+            .map_err(|e| format!("check postgres readiness: {e}"))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = stderr_string(&output);
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        last_error = if stderr == "unknown error" && !stdout.is_empty() {
+            stdout
+        } else {
+            stderr
+        };
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    Err(format!(
+        "postgres did not become ready after {}s: {}",
+        timeout.as_secs(),
+        last_error
+    ))
+}
+
+fn local_postgres_database_exists(local: &LocalProfile, database: &str) -> Result<bool, String> {
+    let output = compose_cmd(local)?
+        .arg("exec")
+        .arg("-T")
+        .arg("postgres")
+        .arg("psql")
+        .arg("-U")
+        .arg("enscrive")
+        .arg("-d")
+        .arg("postgres")
+        .arg("-tAc")
+        .arg(format!(
+            "SELECT 1 FROM pg_database WHERE datname = '{}'",
+            database
+        ))
+        .output()
+        .map_err(|e| format!("check postgres database '{}': {e}", database))?;
+    if !output.status.success() {
+        return Err(format!(
+            "check postgres database '{}' failed: {}",
+            database,
+            stderr_string(&output)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim() == "1")
+}
+
+fn create_local_postgres_database(local: &LocalProfile, database: &str) -> Result<(), String> {
+    let output = compose_cmd(local)?
+        .arg("exec")
+        .arg("-T")
+        .arg("postgres")
+        .arg("psql")
+        .arg("-U")
+        .arg("enscrive")
+        .arg("-d")
+        .arg("postgres")
+        .arg("-v")
+        .arg("ON_ERROR_STOP=1")
+        .arg("-c")
+        .arg(format!("CREATE DATABASE {};", database))
+        .output()
+        .map_err(|e| format!("create postgres database '{}': {e}", database))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = stderr_string(&output);
+    if stderr.to_lowercase().contains("already exists") {
+        return Ok(());
+    }
+    Err(format!(
+        "create postgres database '{}' failed: {}",
+        database, stderr
+    ))
+}
+
+fn retry_local_postgres_admin<T, F>(
+    operation: &str,
+    timeout: Duration,
+    mut action: F,
+) -> Result<T, String>
+where
+    F: FnMut() -> Result<T, String>,
+{
+    let started = Instant::now();
+    let mut last_error = None;
+
+    while started.elapsed() < timeout {
+        match action() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_transient_local_postgres_error(&error) => {
+                last_error = Some(error);
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(format!(
+        "{} did not become stable after {}s: {}",
+        operation,
+        timeout.as_secs(),
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    ))
+}
+
+fn is_transient_local_postgres_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("the database system is shutting down")
+        || lower.contains("the database system is starting up")
+        || lower.contains("server closed the connection unexpectedly")
+        || lower.contains("terminating connection due to administrator command")
+        || lower.contains("connection refused")
+        || lower.contains("could not connect to server")
+        || lower.contains("no such file or directory")
+}
+
+fn stderr_string(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        "unknown error".to_string()
+    } else {
+        stderr
     }
 }
 
@@ -1246,6 +2045,52 @@ fn parse_env_file(path: &Path) -> Result<Vec<(String, String)>, String> {
     Ok(envs)
 }
 
+fn read_env_value(path: &Path, key: &str) -> Option<String> {
+    parse_env_file(path)
+        .ok()?
+        .into_iter()
+        .find_map(
+            |(candidate, value)| {
+                if candidate == key { Some(value) } else { None }
+            },
+        )
+}
+
+fn database_url_password(path: &Path) -> Option<String> {
+    let database_url = read_env_value(path, "DATABASE_URL")?;
+    let (_, rest) = database_url.split_once("://")?;
+    let credentials = rest.split('@').next()?;
+    let (_, password) = credentials.split_once(':')?;
+    Some(password.to_string())
+}
+
+fn prepare_local_data_dirs(data_dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(data_dir.join("postgres"))
+        .map_err(|e| format!("create postgres data dir '{}': {e}", data_dir.display()))?;
+    fs::create_dir_all(data_dir.join("qdrant"))
+        .map_err(|e| format!("create qdrant data dir '{}': {e}", data_dir.display()))?;
+    let loki_dir = data_dir.join("loki");
+    fs::create_dir_all(&loki_dir)
+        .map_err(|e| format!("create loki data dir '{}': {e}", loki_dir.display()))?;
+    set_dir_mode(&loki_dir, 0o777)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_dir_mode(path: &Path, mode: u32) -> Result<(), String> {
+    let metadata =
+        fs::metadata(path).map_err(|e| format!("stat directory '{}': {e}", path.display()))?;
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(mode);
+    fs::set_permissions(path, permissions)
+        .map_err(|e| format!("set permissions on '{}': {e}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_dir_mode(_path: &Path, _mode: u32) -> Result<(), String> {
+    Ok(())
+}
+
 fn wait_for_tcp(host: &str, port: u16, timeout: Duration) -> Result<(), String> {
     let started = Instant::now();
     while started.elapsed() < timeout {
@@ -1297,7 +2142,10 @@ async fn bootstrap_local_stack(
         .map_err(|e| format!("build local bootstrap client: {e}"))?;
 
     let response = client
-        .post(format!("{}/local/bootstrap", endpoint.trim_end_matches('/')))
+        .post(format!(
+            "{}/local/bootstrap",
+            endpoint.trim_end_matches('/')
+        ))
         .json(&LocalBootstrapRequest {
             secret: local.bootstrap.secret.clone(),
             developer_subject: keycloak_user.subject.clone(),
@@ -1333,35 +2181,8 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .build()
         .map_err(|e| format!("build keycloak client: {e}"))?;
 
-    let token_resp = client
-        .post(format!(
-            "{}/realms/master/protocol/openid-connect/token",
-            base
-        ))
-        .form(&[
-            ("grant_type", "password"),
-            ("client_id", "admin-cli"),
-            ("username", local.keycloak.admin_username.as_str()),
-            ("password", local.keycloak.admin_password.as_str()),
-        ])
-        .send()
-        .await
-        .map_err(|e| format!("keycloak admin login failed: {e}"))?;
-    if !token_resp.status().is_success() {
-        let body = token_resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "unable to read body".to_string());
-        return Err(format!("keycloak admin login failed: {}", body));
-    }
-    let token_json: Value = token_resp
-        .json()
-        .await
-        .map_err(|e| format!("parse keycloak token response: {e}"))?;
-    let access_token = token_json
-        .get("access_token")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| "keycloak token response missing access_token".to_string())?;
+    let access_token =
+        wait_for_keycloak_admin_login(&client, &base, local, Duration::from_secs(90)).await?;
 
     let auth = format!("Bearer {}", access_token);
 
@@ -1514,16 +2335,73 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
     })
 }
 
+async fn wait_for_keycloak_admin_login(
+    client: &reqwest::Client,
+    base: &str,
+    local: &LocalProfile,
+    timeout: Duration,
+) -> Result<String, String> {
+    let started = Instant::now();
+    let mut last_error = "keycloak admin login did not start".to_string();
+
+    while started.elapsed() < timeout {
+        match request_keycloak_admin_token(client, base, local).await {
+            Ok(token) => return Ok(token),
+            Err(error) => {
+                last_error = error;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+
+    Err(format!(
+        "keycloak admin login did not become ready after {}s: {}",
+        timeout.as_secs(),
+        last_error
+    ))
+}
+
+async fn request_keycloak_admin_token(
+    client: &reqwest::Client,
+    base: &str,
+    local: &LocalProfile,
+) -> Result<String, String> {
+    let token_resp = client
+        .post(format!(
+            "{}/realms/master/protocol/openid-connect/token",
+            base
+        ))
+        .form(&[
+            ("grant_type", "password"),
+            ("client_id", "admin-cli"),
+            ("username", local.keycloak.admin_username.as_str()),
+            ("password", local.keycloak.admin_password.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("keycloak admin login failed: {e}"))?;
+    if !token_resp.status().is_success() {
+        let body = token_resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "unable to read body".to_string());
+        return Err(format!("keycloak admin login failed: {}", body));
+    }
+    let token_json: Value = token_resp
+        .json()
+        .await
+        .map_err(|e| format!("parse keycloak token response: {e}"))?;
+    token_json
+        .get("access_token")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "keycloak token response missing access_token".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
-
-    fn test_env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn set_xdg(temp: &TempDir) {
         unsafe {
@@ -1534,7 +2412,7 @@ mod tests {
 
     #[test]
     fn save_and_load_profiles_round_trip() {
-        let _guard = test_env_lock().lock().unwrap();
+        let _guard = crate::test_support::lock_env();
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
 
@@ -1564,7 +2442,7 @@ mod tests {
 
     #[test]
     fn resolve_api_context_prefers_profile() {
-        let _guard = test_env_lock().lock().unwrap();
+        let _guard = crate::test_support::lock_env();
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
 
@@ -1591,8 +2469,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn init_self_managed_with_openai_flag_enables_embeddings_and_llm_inference() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+
+        init_self_managed(SelfManagedInitOptions {
+            profile_name: Some("local".to_string()),
+            with_grafana: false,
+            developer_bin: Some("/tmp/enscrive-developer".to_string()),
+            observe_bin: Some("/tmp/enscrive-observe".to_string()),
+            embed_bin: Some("/tmp/enscrive-embed".to_string()),
+            openai_api_key: Some("sk-test".to_string()),
+            anthropic_api_key: Some("anth-test".to_string()),
+            voyage_api_key: None,
+            nebius_api_key: None,
+            bge_endpoint: None,
+            bge_api_key: None,
+            bge_model_name: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let profiles = load_profiles().unwrap();
+        let local = profiles
+            .profiles
+            .get("local")
+            .and_then(|profile| profile.local.as_ref())
+            .unwrap();
+
+        assert_eq!(
+            local.providers.credentials.openai_api_key.as_deref(),
+            Some("sk-test")
+        );
+        assert!(local.providers.embedding.openai);
+        assert!(local.providers.llm_inference.openai);
+        assert!(local.providers.llm_inference.anthropic);
+    }
+
+    #[tokio::test]
     async fn init_self_managed_writes_runtime_files() {
-        let _guard = test_env_lock().lock().unwrap();
+        let _guard = crate::test_support::lock_env();
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
 
@@ -1605,6 +2523,7 @@ mod tests {
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
+            nebius_api_key: Some("neb-test".to_string()),
             bge_endpoint: Some("http://192.168.1.10:8080".to_string()),
             bge_api_key: None,
             bge_model_name: Some("bge-large-en-v1.5".to_string()),
@@ -1619,10 +2538,19 @@ mod tests {
         assert!(Path::new(config_dir).join("observe.env").exists());
         assert!(Path::new(config_dir).join("embed.env").exists());
 
-        let developer_env = std::fs::read_to_string(Path::new(config_dir).join("developer.env")).unwrap();
+        let developer_env =
+            std::fs::read_to_string(Path::new(config_dir).join("developer.env")).unwrap();
         assert!(
             developer_env.contains("LOCAL_BOOTSTRAP_SECRET="),
             "developer.env should include LOCAL_BOOTSTRAP_SECRET"
+        );
+        let aes_key = developer_env
+            .lines()
+            .find_map(|line| line.strip_prefix("AES_KEY="))
+            .expect("developer.env should include AES_KEY");
+        assert!(
+            is_valid_aes_key(aes_key),
+            "AES_KEY should be a 64-character hex string"
         );
 
         let profiles = load_profiles().unwrap();
@@ -1634,5 +2562,325 @@ mod tests {
         assert!(!local.bootstrap.secret.is_empty());
         assert_eq!(local.bootstrap.environment_name, "development");
         assert_eq!(local.bootstrap.api_key_label, "local-cli");
+    }
+
+    #[tokio::test]
+    async fn init_self_managed_preserves_existing_local_secrets() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+
+        init_self_managed(SelfManagedInitOptions {
+            profile_name: Some("local".to_string()),
+            with_grafana: false,
+            developer_bin: Some("/tmp/enscrive-developer".to_string()),
+            observe_bin: Some("/tmp/enscrive-observe".to_string()),
+            embed_bin: Some("/tmp/enscrive-embed".to_string()),
+            openai_api_key: None,
+            anthropic_api_key: None,
+            voyage_api_key: None,
+            nebius_api_key: None,
+            bge_endpoint: Some("http://127.0.0.1:8088".to_string()),
+            bge_api_key: None,
+            bge_model_name: Some("bge-large-en-v1.5".to_string()),
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let config_dir = cli_home()
+            .unwrap()
+            .config_root
+            .join("profiles")
+            .join("local");
+        let infra_env = config_dir.join("infra.env");
+        let developer_env = config_dir.join("developer.env");
+        let observe_env = config_dir.join("observe.env");
+
+        let original_postgres_password = read_env_value(&infra_env, "POSTGRES_PASSWORD").unwrap();
+        let original_hmac_pepper = read_env_value(&developer_env, "HMAC_PEPPER").unwrap();
+        let original_aes_key = read_env_value(&developer_env, "AES_KEY").unwrap();
+        let original_lab_secret = read_env_value(&observe_env, "LAB_SERVICE_SECRET").unwrap();
+        let original_client_secret = load_profiles()
+            .unwrap()
+            .profiles
+            .get("local")
+            .and_then(|profile| profile.local.as_ref())
+            .map(|local| local.keycloak.client_secret.clone())
+            .unwrap();
+
+        init_self_managed(SelfManagedInitOptions {
+            profile_name: Some("local".to_string()),
+            with_grafana: false,
+            developer_bin: Some("/tmp/enscrive-developer-v2".to_string()),
+            observe_bin: Some("/tmp/enscrive-observe-v2".to_string()),
+            embed_bin: Some("/tmp/enscrive-embed-v2".to_string()),
+            openai_api_key: Some("sk-second".to_string()),
+            anthropic_api_key: None,
+            voyage_api_key: None,
+            nebius_api_key: None,
+            bge_endpoint: None,
+            bge_api_key: None,
+            bge_model_name: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            read_env_value(&infra_env, "POSTGRES_PASSWORD").unwrap(),
+            original_postgres_password
+        );
+        assert_eq!(
+            read_env_value(&developer_env, "HMAC_PEPPER").unwrap(),
+            original_hmac_pepper
+        );
+        assert_eq!(
+            read_env_value(&developer_env, "AES_KEY").unwrap(),
+            original_aes_key
+        );
+        assert_eq!(
+            read_env_value(&observe_env, "LAB_SERVICE_SECRET").unwrap(),
+            original_lab_secret
+        );
+
+        let profiles = load_profiles().unwrap();
+        let local = profiles
+            .profiles
+            .get("local")
+            .and_then(|profile| profile.local.as_ref())
+            .unwrap();
+        assert_eq!(local.keycloak.client_secret, original_client_secret);
+        assert_eq!(local.binaries.developer, "/tmp/enscrive-developer-v2");
+        assert_eq!(
+            local.providers.credentials.openai_api_key.as_deref(),
+            Some("sk-second")
+        );
+        assert!(local.providers.embedding.openai);
+        assert!(local.providers.embedding.bge);
+        assert!(local.providers.llm_inference.openai);
+    }
+
+    #[test]
+    fn ensure_valid_developer_env_rewrites_invalid_aes_key() {
+        let temp = TempDir::new().unwrap();
+        let env_path = temp.path().join("developer.env");
+        std::fs::write(
+            &env_path,
+            "HMAC_PEPPER=test-pepper\nAES_KEY=not-a-valid-key\nLOCAL_BOOTSTRAP_SECRET=test-secret\n",
+        )
+        .unwrap();
+
+        ensure_valid_developer_env(&env_path).unwrap();
+
+        let updated = std::fs::read_to_string(&env_path).unwrap();
+        let aes_key = updated
+            .lines()
+            .find_map(|line| line.strip_prefix("AES_KEY="))
+            .expect("rewritten developer.env should include AES_KEY");
+        assert!(
+            is_valid_aes_key(aes_key),
+            "rewritten AES_KEY should be a 64-character hex string"
+        );
+    }
+
+    #[test]
+    fn infer_leptos_output_name_prefers_css_bundle_name() {
+        let temp = TempDir::new().unwrap();
+        let pkg_dir = temp.path().join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(pkg_dir.join("enscribe-developer.css"), "body{}").unwrap();
+        std::fs::write(pkg_dir.join("enscribe-developer.js"), "console.log('ok');").unwrap();
+
+        assert_eq!(
+            infer_leptos_output_name(temp.path()).as_deref(),
+            Some("enscribe-developer")
+        );
+    }
+
+    #[test]
+    fn render_developer_env_writes_leptos_site_configuration() {
+        let local = LocalProfile {
+            deployment_mode: "local".to_string(),
+            runtime_dir: "/tmp/runtime".to_string(),
+            config_dir: "/tmp/config".to_string(),
+            compose_file: "/tmp/docker-compose.yml".to_string(),
+            infra_env_file: "/tmp/infra.env".to_string(),
+            developer_env_file: "/tmp/developer.env".to_string(),
+            observe_env_file: "/tmp/observe.env".to_string(),
+            embed_env_file: "/tmp/embed.env".to_string(),
+            log_dir: "/tmp/logs".to_string(),
+            docker_project: "enscrive-local-local".to_string(),
+            binaries: LocalBinaries {
+                developer: "/tmp/enscrive-developer".to_string(),
+                observe: "/tmp/enscrive-observe".to_string(),
+                embed: "/tmp/enscrive-embed".to_string(),
+            },
+            ports: LocalPorts {
+                developer: 3000,
+                observe_rest: 8084,
+                observe_grpc: 9090,
+                embed_rest: 8081,
+                embed_grpc: 50052,
+                embed_metrics: 9000,
+                postgres: 55432,
+                qdrant_http: 6333,
+                qdrant_grpc: 6334,
+                keycloak: 8180,
+                loki: 3100,
+                grafana: None,
+            },
+            features: LocalFeatures {
+                with_grafana: false,
+                local_bge_management: false,
+            },
+            keycloak: LocalKeycloak {
+                realm: "enscrive".to_string(),
+                client_id: "enscrive-developer".to_string(),
+                client_secret: "secret".to_string(),
+                admin_username: "admin".to_string(),
+                admin_password: "admin-pass".to_string(),
+                developer_username: "developer".to_string(),
+                developer_password: "developer-pass".to_string(),
+            },
+            bootstrap: LocalBootstrap {
+                secret: "bootstrap-secret".to_string(),
+                developer_email: "developer@local.enscrive".to_string(),
+                developer_name: "Local Developer".to_string(),
+                tenant_name: "Local Developer".to_string(),
+                environment_name: "development".to_string(),
+                api_key_label: "local-cli".to_string(),
+                tenant_id: None,
+                environment_id: None,
+                api_key_id: None,
+            },
+            providers: LocalProviders::default(),
+        };
+
+        let rendered = render_developer_env(
+            &local,
+            "postgres-pass",
+            "lab-secret",
+            "pepper",
+            &generate_hex_secret(32),
+            Some(Path::new("/tmp/site")),
+            "enscribe-developer",
+        );
+
+        assert!(rendered.contains("LEPTOS_OUTPUT_NAME=enscribe-developer"));
+        assert!(rendered.contains("LEPTOS_SITE_ROOT=/tmp/site"));
+        assert!(rendered.contains("LEPTOS_SITE_PKG_DIR=pkg"));
+    }
+
+    #[test]
+    fn local_embedding_provider_requires_real_embedding_backend() {
+        let local = LocalProfile {
+            deployment_mode: "local".to_string(),
+            runtime_dir: "/tmp/runtime".to_string(),
+            config_dir: "/tmp/config".to_string(),
+            compose_file: "/tmp/docker-compose.yml".to_string(),
+            infra_env_file: "/tmp/infra.env".to_string(),
+            developer_env_file: "/tmp/developer.env".to_string(),
+            observe_env_file: "/tmp/observe.env".to_string(),
+            embed_env_file: "/tmp/embed.env".to_string(),
+            log_dir: "/tmp/logs".to_string(),
+            docker_project: "enscrive-local-local".to_string(),
+            binaries: LocalBinaries {
+                developer: "/tmp/enscrive-developer".to_string(),
+                observe: "/tmp/enscrive-observe".to_string(),
+                embed: "/tmp/enscrive-embed".to_string(),
+            },
+            ports: LocalPorts {
+                developer: 3000,
+                observe_rest: 8084,
+                observe_grpc: 9090,
+                embed_rest: 8081,
+                embed_grpc: 50052,
+                embed_metrics: 9000,
+                postgres: 55432,
+                qdrant_http: 6333,
+                qdrant_grpc: 6334,
+                keycloak: 8180,
+                loki: 3100,
+                grafana: None,
+            },
+            features: LocalFeatures {
+                with_grafana: false,
+                local_bge_management: false,
+            },
+            keycloak: LocalKeycloak {
+                realm: "enscrive-local".to_string(),
+                client_id: "client".to_string(),
+                client_secret: "secret".to_string(),
+                admin_username: "admin".to_string(),
+                admin_password: "password".to_string(),
+                developer_username: "developer".to_string(),
+                developer_password: "password".to_string(),
+            },
+            bootstrap: LocalBootstrap::default(),
+            providers: LocalProviders {
+                credentials: LocalProviderCredentials {
+                    anthropic_api_key: Some("anthropic-only".to_string()),
+                    ..LocalProviderCredentials::default()
+                },
+                embedding: LocalEmbeddingProviders::default(),
+                llm_inference: LocalLlmInferenceProviders {
+                    anthropic: true,
+                    ..LocalLlmInferenceProviders::default()
+                },
+            },
+        };
+
+        let error = ensure_local_embedding_provider(&local).unwrap_err();
+        assert!(error.contains("requires at least one embedding provider"));
+
+        let mut with_bge = local.clone();
+        with_bge.providers.credentials.bge_endpoint = Some("http://127.0.0.1:8088".to_string());
+        with_bge.providers.embedding.bge = true;
+        ensure_local_embedding_provider(&with_bge).unwrap();
+    }
+
+    #[test]
+    fn local_providers_deserialize_legacy_flat_shape() {
+        let providers: LocalProviders = serde_json::from_str(
+            r#"{
+                "openai_api_key":"sk-legacy",
+                "anthropic_api_key":"anth-legacy",
+                "voyage_api_key":"voy-legacy",
+                "nebius_api_key":"neb-legacy",
+                "bge_endpoint":"http://127.0.0.1:8088",
+                "bge_api_key":"bge-secret",
+                "bge_model_name":"bge-large-en-v1.5"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            providers.credentials.openai_api_key.as_deref(),
+            Some("sk-legacy")
+        );
+        assert!(providers.embedding.openai);
+        assert!(providers.embedding.voyage);
+        assert!(providers.embedding.nebius);
+        assert!(providers.embedding.bge);
+        assert!(providers.llm_inference.openai);
+        assert!(providers.llm_inference.anthropic);
+        assert_eq!(
+            providers.credentials.bge_model_name.as_deref(),
+            Some("bge-large-en-v1.5")
+        );
+    }
+
+    #[test]
+    fn detects_transient_local_postgres_errors() {
+        assert!(is_transient_local_postgres_error(
+            "check postgres database 'enscrive_developer' failed: psql: error: connection to server on socket \"/var/run/postgresql/.s.PGSQL.5432\" failed: FATAL:  the database system is shutting down"
+        ));
+        assert!(is_transient_local_postgres_error(
+            "create postgres database 'enscrive_observe' failed: could not connect to server: Connection refused"
+        ));
+        assert!(!is_transient_local_postgres_error(
+            "check postgres database 'enscrive_keycloak' failed: password authentication failed for user \"enscrive\""
+        ));
     }
 }

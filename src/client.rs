@@ -8,14 +8,15 @@ pub struct BinaryResponse {
     pub content_disposition: Option<String>,
 }
 
-pub struct EnscribeClient {
+pub struct EnscriveClient {
     http: Client,
     base_url: String,
     api_key: String,
+    embedding_provider_key: Option<String>,
 }
 
-impl EnscribeClient {
-    pub fn new(base_url: String, api_key: String) -> Self {
+impl EnscriveClient {
+    pub fn new(base_url: String, api_key: String, embedding_provider_key: Option<String>) -> Self {
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
@@ -24,7 +25,18 @@ impl EnscribeClient {
             http,
             base_url,
             api_key,
+            embedding_provider_key: embedding_provider_key
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
         }
+    }
+
+    fn with_auth_headers(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let request = request.header("X-API-Key", &self.api_key);
+        if let Some(provider_key) = &self.embedding_provider_key {
+            return request.header("X-Embedding-Provider-Key", provider_key);
+        }
+        request
     }
 
     pub async fn get_json(&self, path: &str) -> Result<Value, String> {
@@ -43,9 +55,7 @@ impl EnscribeClient {
         );
 
         let response = self
-            .http
-            .request(Method::GET, &url)
-            .header("X-API-Key", &self.api_key)
+            .with_auth_headers(self.http.request(Method::GET, &url))
             .query(query)
             .send()
             .await
@@ -81,9 +91,7 @@ impl EnscribeClient {
         );
 
         let response = self
-            .http
-            .request(Method::GET, &url)
-            .header("X-API-Key", &self.api_key)
+            .with_auth_headers(self.http.request(Method::GET, &url))
             .header("Accept", accept)
             .query(query)
             .send()
@@ -137,9 +145,7 @@ impl EnscribeClient {
         );
 
         let response = self
-            .http
-            .request(Method::GET, &url)
-            .header("X-API-Key", &self.api_key)
+            .with_auth_headers(self.http.request(Method::GET, &url))
             .header("Accept", accept)
             .query(query)
             .send()
@@ -210,9 +216,7 @@ impl EnscribeClient {
         );
 
         let response = self
-            .http
-            .request(Method::POST, &url)
-            .header("X-API-Key", &self.api_key)
+            .with_auth_headers(self.http.request(Method::POST, &url))
             .header("Accept", accept)
             .json(&body)
             .send()
@@ -256,10 +260,7 @@ impl EnscribeClient {
             path.trim_start_matches('/')
         );
 
-        let mut request = self
-            .http
-            .request(method, &url)
-            .header("X-API-Key", &self.api_key);
+        let mut request = self.with_auth_headers(self.http.request(method, &url));
 
         if let Some(body) = body {
             request = request.json(&body);

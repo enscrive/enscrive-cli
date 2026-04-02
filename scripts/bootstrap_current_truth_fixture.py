@@ -61,6 +61,7 @@ def default_dimensions_for_model(model: str) -> int | None:
         "text-embedding-3-small": 1536,
         "text-embedding-3-large": 3072,
         "text-embedding-ada-002": 1536,
+        "bge-en-icl": 1024,
         "voyage-3": 1024,
         "voyage-3-lite": 512,
         "voyage-code-3": 1024,
@@ -71,12 +72,21 @@ def default_dimensions_for_model(model: str) -> int | None:
     }.get(model)
 
 
-def request(base_url: str, api_key: str, method: str, path: str, body=None):
+def request(
+    base_url: str,
+    api_key: str,
+    method: str,
+    path: str,
+    body=None,
+    embedding_provider_key: str | None = None,
+):
     payload = None
     headers = {
         "X-API-Key": api_key,
         "Accept": "application/json",
     }
+    if embedding_provider_key:
+        headers["X-Embedding-Provider-Key"] = embedding_provider_key
     if body is not None:
         headers["Content-Type"] = "application/json"
         payload = json.dumps(body).encode("utf-8")
@@ -103,7 +113,17 @@ def request(base_url: str, api_key: str, method: str, path: str, body=None):
     return json.loads(text)
 
 
-def wait_for_search_hit(base_url: str, api_key: str, collection_id: str, document_id: str, query: str, metadata_key: str, metadata_value: str, timeout_secs: int):
+def wait_for_search_hit(
+    base_url: str,
+    api_key: str,
+    collection_id: str,
+    document_id: str,
+    query: str,
+    metadata_key: str,
+    metadata_value: str,
+    timeout_secs: int,
+    embedding_provider_key: str | None,
+):
     deadline = time.time() + timeout_secs
     last_payload = None
     while time.time() < deadline:
@@ -123,6 +143,7 @@ def wait_for_search_hit(base_url: str, api_key: str, collection_id: str, documen
                     }
                 },
             },
+            embedding_provider_key=embedding_provider_key,
         )
         last_payload = payload
         if any(item.get("document_id") == document_id for item in payload.get("results", [])):
@@ -141,15 +162,15 @@ def main():
     )
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("ENSCRIBE_BASE_URL", "http://127.0.0.1:3000"),
+        default=os.environ.get("ENSCRIVE_BASE_URL", "http://127.0.0.1:3000"),
     )
     parser.add_argument(
         "--api-key",
-        default=os.environ.get("ENSCRIBE_API_KEY"),
+        default=os.environ.get("ENSCRIVE_API_KEY"),
     )
     parser.add_argument(
         "--prefix",
-        default=os.environ.get("ENSCRIBE_FIXTURE_PREFIX", "codex-v1"),
+        default=os.environ.get("ENSCRIVE_FIXTURE_PREFIX", "codex-v1"),
     )
     parser.add_argument(
         "--out",
@@ -158,17 +179,22 @@ def main():
     parser.add_argument(
         "--embedding-model",
         default=os.environ.get(
-            "ENSCRIBE_FIXTURE_EMBEDDING_MODEL", "text-embedding-3-small"
+            "ENSCRIVE_FIXTURE_EMBEDDING_MODEL", "text-embedding-3-small"
         ),
     )
     parser.add_argument(
         "--dimensions",
         type=int,
         default=(
-            int(os.environ["ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS"])
-            if os.environ.get("ENSCRIBE_FIXTURE_EMBEDDING_DIMENSIONS")
+            int(os.environ["ENSCRIVE_FIXTURE_EMBEDDING_DIMENSIONS"])
+            if os.environ.get("ENSCRIVE_FIXTURE_EMBEDDING_DIMENSIONS")
             else None
         ),
+    )
+    parser.add_argument(
+        "--embedding-provider-key",
+        default=os.environ.get("ENSCRIVE_EMBEDDING_PROVIDER_KEY"),
+        help="Optional BYOK embedding provider key forwarded as X-Embedding-Provider-Key",
     )
     parser.add_argument(
         "--search-timeout-secs",
@@ -178,7 +204,7 @@ def main():
     args = parser.parse_args()
 
     if not args.api_key:
-        raise RuntimeError("missing ENSCRIBE_API_KEY or --api-key")
+        raise RuntimeError("missing ENSCRIVE_API_KEY or --api-key")
 
     if args.dimensions is None:
         args.dimensions = default_dimensions_for_model(args.embedding_model)
@@ -186,8 +212,13 @@ def main():
         raise RuntimeError(
             f"unknown dimensions for embedding model '{args.embedding_model}'; pass --dimensions"
         )
+    args.embedding_provider_key = (
+        args.embedding_provider_key.strip() if args.embedding_provider_key else None
+    )
+    if args.embedding_provider_key == "":
+        args.embedding_provider_key = None
 
-    os.environ.setdefault("ENSCRIBE_REPO_ROOT", str(REPO_ROOT))
+    os.environ.setdefault("ENSCRIVE_REPO_ROOT", str(REPO_ROOT))
     args.base_url = canonicalize_loopback_base_url(args.base_url)
 
     suffix = str(int(time.time()))
@@ -208,8 +239,8 @@ def main():
             "description": "Codex live validation current-truth fixture",
             "embedding_model": args.embedding_model,
             "dimensions": args.dimensions,
-            "default_voice_id": None,
         },
+        embedding_provider_key=args.embedding_provider_key,
     )
     collection_id = collection["id"]
 
@@ -241,6 +272,7 @@ def main():
             ],
             "voice_id": None,
         },
+        embedding_provider_key=args.embedding_provider_key,
     )
 
     wait_for_search_hit(
@@ -252,6 +284,7 @@ def main():
         metadata_key,
         metadata_value,
         args.search_timeout_secs,
+        args.embedding_provider_key,
     )
 
     request(
@@ -263,6 +296,7 @@ def main():
             "texts": [search_query],
             "collection_id": collection_id,
         },
+        embedding_provider_key=args.embedding_provider_key,
     )
 
     time.sleep(2)
@@ -271,17 +305,17 @@ def main():
     append_exports(
         Path(args.out) if args.out else None,
         {
-            "ENSCRIBE_REPO_ROOT": os.environ["ENSCRIBE_REPO_ROOT"],
-            "ENSCRIBE_COLLECTION_ID": collection_id,
-            "ENSCRIBE_COLLECTION_NAME": collection_name,
-            "ENSCRIBE_COLLECTION_EMBEDDING_MODEL": args.embedding_model,
-            "ENSCRIBE_COLLECTION_EMBEDDING_DIMENSIONS": str(args.dimensions),
-            "ENSCRIBE_EXPECT_DOCUMENT_ID": document_id,
-            "ENSCRIBE_SEARCH_QUERY": search_query,
-            "ENSCRIBE_METADATA_KEY": metadata_key,
-            "ENSCRIBE_METADATA_VALUE": metadata_value,
-            "ENSCRIBE_LOGS_START_TIME": logs_start,
-            "ENSCRIBE_LOGS_END_TIME": logs_end,
+            "ENSCRIVE_REPO_ROOT": os.environ["ENSCRIVE_REPO_ROOT"],
+            "ENSCRIVE_COLLECTION_ID": collection_id,
+            "ENSCRIVE_COLLECTION_NAME": collection_name,
+            "ENSCRIVE_COLLECTION_EMBEDDING_MODEL": args.embedding_model,
+            "ENSCRIVE_COLLECTION_EMBEDDING_DIMENSIONS": str(args.dimensions),
+            "ENSCRIVE_EXPECT_DOCUMENT_ID": document_id,
+            "ENSCRIVE_SEARCH_QUERY": search_query,
+            "ENSCRIVE_METADATA_KEY": metadata_key,
+            "ENSCRIVE_METADATA_VALUE": metadata_value,
+            "ENSCRIVE_LOGS_START_TIME": logs_start,
+            "ENSCRIVE_LOGS_END_TIME": logs_end,
         },
     )
 

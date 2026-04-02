@@ -17,6 +17,8 @@ import yaml
 ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 EXPORT_PATTERN = re.compile(r'^export\s+([A-Z0-9_]+)="(.*)"$')
 MANIFEST_SUFFIXES = {".json", ".yaml", ".yml"}
+EMBEDDING_PROVIDER_KEY_ENV = "ENSCRIVE_EMBEDDING_PROVIDER_KEY"
+EMBEDDING_PROVIDER_KEY_HEADER = "X-Embedding-Provider-Key"
 
 SCRIPT_PATH = Path(__file__).resolve()
 CLI_ROOT = SCRIPT_PATH.parents[1]
@@ -77,6 +79,20 @@ def resolve_env(value):
 
         return ENV_PATTERN.sub(replace, value)
     return value
+
+
+def build_request_headers(api_key: str, spec: dict, include_content_type: bool) -> dict[str, str]:
+    headers = {"X-API-Key": api_key}
+    embedding_provider_key = os.environ.get(EMBEDDING_PROVIDER_KEY_ENV, "").strip()
+    if embedding_provider_key:
+        headers[EMBEDDING_PROVIDER_KEY_HEADER] = embedding_provider_key
+    if spec.get("accept"):
+        headers["Accept"] = spec["accept"]
+    if include_content_type:
+        headers["Content-Type"] = "application/json"
+    for name, value in spec.get("headers", {}).items():
+        headers[name] = str(value)
+    return headers
 
 
 def json_path_exists(data, path: str) -> bool:
@@ -353,6 +369,7 @@ def assert_expectations(label: str, payload, spec: dict):
 def run_api(base_url: str, api_key: str, spec: dict):
     url = f"{base_url.rstrip('/')}/{spec['path'].lstrip('/')}"
     if spec.get("max_time_secs") is not None:
+        headers = build_request_headers(api_key, spec, "body" in spec)
         command = [
             "curl",
             "-sS",
@@ -361,18 +378,12 @@ def run_api(base_url: str, api_key: str, spec: dict):
             str(spec["max_time_secs"]),
             "-X",
             spec.get("method", "POST"),
-            "-H",
-            f"X-API-Key: {api_key}",
             "-w",
             "\n__STATUS__:%{http_code}\n",
         ]
-
-        accept = spec.get("accept")
-        if accept:
-            command.extend(["-H", f"Accept: {accept}"])
-
+        for name, value in headers.items():
+            command.extend(["-H", f"{name}: {value}"])
         if "body" in spec:
-            command.extend(["-H", "Content-Type: application/json"])
             command.extend(["--data-binary", json.dumps(spec["body"])])
 
         command.append(url)
@@ -436,18 +447,13 @@ def run_api(base_url: str, api_key: str, spec: dict):
     body = None
     if "body" in spec:
         body = json.dumps(spec["body"]).encode("utf-8")
+    headers = build_request_headers(api_key, spec, body is not None)
     request = urllib.request.Request(
         url,
         data=body,
         method=spec.get("method", "POST"),
-        headers={
-            "Content-Type": "application/json",
-            "X-API-Key": api_key,
-        },
+        headers=headers,
     )
-
-    if spec.get("accept"):
-        request.add_header("Accept", spec["accept"])
 
     try:
         with urllib.request.urlopen(request) as response:
@@ -470,10 +476,10 @@ def run_api(base_url: str, api_key: str, spec: dict):
 
 
 def run_cli(cli_root: Path, base_url: str, api_key: str, spec: dict):
-    binary = cli_root / "target" / "debug" / "enscribe-cli"
+    binary = cli_root / "target" / "debug" / "enscrive"
     if not binary.exists():
         raise RuntimeError(
-            f"CLI binary not found at {binary}. Build enscribe-CLI first."
+            f"CLI binary not found at {binary}. Build Enscrive first."
         )
 
     command = [
@@ -558,7 +564,7 @@ def manifest_label(manifest: dict) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run public API + enscribe-CLI parity manifests"
+        description="Run public API + Enscrive parity manifests"
     )
     parser.add_argument("paths", nargs="+", help="Manifest file or directory path(s)")
     parser.add_argument(
@@ -569,11 +575,11 @@ def main():
     )
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("ENSCRIBE_BASE_URL", "http://localhost:3000"),
+        default=os.environ.get("ENSCRIVE_BASE_URL", "http://localhost:3000"),
     )
     parser.add_argument(
         "--api-key",
-        default=os.environ.get("ENSCRIBE_API_KEY"),
+        default=os.environ.get("ENSCRIVE_API_KEY"),
     )
     parser.add_argument(
         "--suite",
@@ -583,12 +589,12 @@ def main():
     )
     args = parser.parse_args()
 
-    os.environ.setdefault("ENSCRIBE_REPO_ROOT", str(REPO_ROOT))
+    os.environ.setdefault("ENSCRIVE_REPO_ROOT", str(REPO_ROOT))
     for raw_path in args.env_file:
         load_env_file(Path(raw_path))
 
     if not args.api_key:
-        raise RuntimeError("missing ENSCRIBE_API_KEY or --api-key")
+        raise RuntimeError("missing ENSCRIVE_API_KEY or --api-key")
 
     failures = []
     suite_counts = defaultdict(Counter)
