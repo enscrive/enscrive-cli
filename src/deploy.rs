@@ -69,6 +69,7 @@ pub struct DeployRenderOptions {
     pub profile_name: Option<String>,
     pub output_dir: Option<String>,
     pub host_root: Option<String>,
+    pub bootstrap_public_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -505,6 +506,8 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
     let endpoint_state = profile_endpoint_state(&profile);
     let endpoint = endpoint_state.effective.clone();
     let public_hostname = public_hostname_from_endpoint(&endpoint)?;
+    let (bootstrap_public_key, bootstrap_public_key_source) =
+        resolve_bootstrap_public_key(opts.bootstrap_public_key.as_deref())?;
     let output_dir = resolve_render_output_dir(opts.output_dir.as_deref(), &selected_name)?;
     let host_root = opts
         .host_root
@@ -597,7 +600,13 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
     .map_err(|e| format!("write render README: {e}"))?;
     fs::write(
         &artifacts.developer_env,
-        render_developer_env(&profile, &endpoint, &layout, &ports),
+        render_developer_env(
+            &profile,
+            &endpoint,
+            &layout,
+            &ports,
+            bootstrap_public_key.as_deref(),
+        ),
     )
     .map_err(|e| format!("write developer env: {e}"))?;
     fs::write(&artifacts.observe_env, render_observe_env(&ports))
@@ -630,6 +639,8 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
         "endpoint_origin": endpoint_state.origin,
         "public_hostname": public_hostname,
         "bootstrap_present": profile.bootstrap.is_some(),
+        "bootstrap_trusted_public_key_present": bootstrap_public_key.is_some(),
+        "bootstrap_trusted_public_key_source": bootstrap_public_key_source,
         "host_root": layout.host_root,
         "output_dir": output_dir.display().to_string(),
         "layout": layout,
@@ -1198,7 +1209,9 @@ fn render_developer_env(
     endpoint: &str,
     layout: &RenderLayout,
     ports: &ManagedPorts,
+    bootstrap_public_key: Option<&str>,
 ) -> String {
+    let bootstrap_public_key = bootstrap_public_key.unwrap_or("__OPTIONAL_BOOTSTRAP_PUBLIC_KEY__");
     format!(
         "ENSCRIVE_REGION={region}\n\
 DEVELOPER_PORT={developer_port}\n\
@@ -1210,13 +1223,14 @@ PORTAL_OIDC_REDIRECT_URI={endpoint}/auth/callback\n\
 HMAC_PEPPER=__REQUIRED__\n\
 AES_KEY=__REQUIRED__\n\
 OBSERVE_GRPC_ADDR=http://127.0.0.1:{observe_grpc}\n\
-EBA_TRUSTED_PUBLIC_KEY=__OPTIONAL_BOOTSTRAP_PUBLIC_KEY__\n\
+EBA_TRUSTED_PUBLIC_KEY={bootstrap_public_key}\n\
 LEPTOS_SITE_ROOT={site_root}\n\
 LEPTOS_OUTPUT_NAME=enscrive-developer\n\
 LEPTOS_SITE_PKG_DIR=pkg\n",
         region = target_region_tag(&profile.target),
         developer_port = ports.developer_private_port,
         observe_grpc = ports.observe_grpc_port,
+        bootstrap_public_key = bootstrap_public_key,
         site_root = layout.site_root,
     )
 }
@@ -1249,6 +1263,53 @@ BGE_MODEL_NAME=bge-large-en-v1.5\n",
         embed_rest = ports.embed_rest_port,
         embed_metrics = ports.embed_metrics_port,
     )
+}
+
+fn resolve_bootstrap_public_key(
+    explicit: Option<&str>,
+) -> Result<(Option<String>, &'static str), String> {
+    if let Some(value) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok((Some(value.to_string()), "explicit"));
+    }
+
+    if let Ok(value) = env::var("EBA_TRUSTED_PUBLIC_KEY") {
+        let trimmed = value.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok((Some(trimmed), "env:EBA_TRUSTED_PUBLIC_KEY"));
+        }
+    }
+
+    if let Ok(value) = env::var("EBA_SIGNING_SECRET") {
+        if !value.trim().is_empty() {
+            let derived = derive_bootstrap_public_key_from_eba()?;
+            return Ok((Some(derived), "derived_from_eba"));
+        }
+    }
+
+    Ok((None, "placeholder"))
+}
+
+fn derive_bootstrap_public_key_from_eba() -> Result<String, String> {
+    let output = Command::new("eba")
+        .arg("public-key")
+        .output()
+        .map_err(|e| format!("derive bootstrap public key with `eba public-key`: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(if detail.is_empty() {
+            format!("`eba public-key` exited with {}", output.status)
+        } else {
+            format!("{} (exit {})", detail, output.status)
+        });
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return Err("`eba public-key` returned an empty public key".to_string());
+    }
+    Ok(value)
 }
 
 fn render_developer_service(layout: &RenderLayout) -> String {
@@ -2623,6 +2684,7 @@ mod tests {
             profile_name: Some("stage".to_string()),
             output_dir: Some(output_dir.display().to_string()),
             host_root: None,
+            bootstrap_public_key: Some("test-bootstrap-public-key".to_string()),
         })
         .await
         .unwrap();
@@ -2647,6 +2709,15 @@ mod tests {
                 .contains("PORTAL_OIDC_REDIRECT_URI=https://stage.api.enscrive.io/auth/callback")
         );
         assert!(developer_env.contains("DEVELOPER_PORT=13000"));
+        assert!(developer_env.contains("EBA_TRUSTED_PUBLIC_KEY=test-bootstrap-public-key"));
+        assert_eq!(
+            result["bootstrap_trusted_public_key_present"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            result["bootstrap_trusted_public_key_source"].as_str(),
+            Some("explicit")
+        );
     }
 
     #[tokio::test]
@@ -2725,6 +2796,7 @@ mod tests {
             profile_name: Some("stage".to_string()),
             output_dir: Some(render_dir.display().to_string()),
             host_root: Some(host_root.display().to_string()),
+            bootstrap_public_key: None,
         })
         .await
         .unwrap();

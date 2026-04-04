@@ -297,6 +297,10 @@ struct DeployRenderArgs {
     /// Host root expected on the managed instance
     #[arg(long = "host-root")]
     host_root: Option<String>,
+
+    /// Trusted bootstrap public key to write into developer.env
+    #[arg(long = "eba-trusted-public-key")]
+    bootstrap_public_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -2015,6 +2019,7 @@ async fn main() {
                     profile_name: args.profile_name.clone(),
                     output_dir: args.out_dir.clone(),
                     host_root: args.host_root.clone(),
+                    bootstrap_public_key: args.bootstrap_public_key.clone(),
                 })
                 .await
                 {
@@ -2832,6 +2837,8 @@ mod tests {
             "./enscrive-deploy/stage",
             "--host-root",
             "/opt/enscrive/stage",
+            "--eba-trusted-public-key",
+            "test-bootstrap-public-key",
         ]);
         match args.command {
             Commands::Deploy {
@@ -2840,11 +2847,16 @@ mod tests {
                         profile_name,
                         out_dir,
                         host_root,
+                        bootstrap_public_key,
                     }),
             } => {
                 assert_eq!(profile_name.as_deref(), Some("stage"));
                 assert_eq!(out_dir.as_deref(), Some("./enscrive-deploy/stage"));
                 assert_eq!(host_root.as_deref(), Some("/opt/enscrive/stage"));
+                assert_eq!(
+                    bootstrap_public_key.as_deref(),
+                    Some("test-bootstrap-public-key")
+                );
             }
             _ => panic!("expected deploy render"),
         }
