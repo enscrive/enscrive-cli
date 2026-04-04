@@ -5,6 +5,7 @@ mod output;
 #[cfg(test)]
 mod test_support;
 
+use std::collections::HashMap;
 use std::fs;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -18,6 +19,7 @@ use local::{
 use output::{
     CliResponse, EXIT_CONFIG, EXIT_FAILURE, EXIT_UNSUPPORTED, FailureClass, OutputFormat,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 #[derive(Parser)]
@@ -103,6 +105,12 @@ enum Commands {
     Analyze {
         #[command(subcommand)]
         sub: AnalyzeSubcommand,
+    },
+
+    /// Model discovery commands
+    Models {
+        #[command(subcommand)]
+        sub: ModelsSubcommand,
     },
 
     /// Collection commands
@@ -353,6 +361,12 @@ enum AnalyzeSubcommand {
     Content(ContentAnalysisArgs),
 }
 
+#[derive(Subcommand)]
+enum ModelsSubcommand {
+    /// List public embedding and chunking model names
+    List,
+}
+
 #[derive(Args)]
 struct EmbeddingsQueryArgs {
     /// Text to embed. Pass multiple times for batch requests.
@@ -527,7 +541,53 @@ enum VoicesSubcommand {
     Search(VoiceSearchArgs),
 }
 
+const VOICE_CONFIG_SCHEMA_SUMMARY: &str = "expected VoiceConfigApi keys: chunking_strategy, parameters, optional template_id, score_threshold, default_limit, description, tags";
+const EVAL_QUERY_ITEM_SCHEMA_SUMMARY: &str = "expected each EvalQueryItem to include query_id, query_text, relevant_doc_ids, relevance_scores, and optional collection_id, match_mode";
+const CREATE_VOICE_AFTER_HELP: &str = r#"Voice config JSON schema:
+  {
+    "chunking_strategy": "story_beats",
+    "parameters": {
+      "model": "gpt-4o",
+      "prompt_template": "conversational",
+      "min_beat_length": "120",
+      "max_beat_length": "600"
+    },
+    "template_id": "narrative-poetry-v1",
+    "score_threshold": 0.72,
+    "default_limit": 10,
+    "description": "Narrative document voice",
+    "tags": ["docs", "story"]
+  }"#;
+const EVAL_DATASET_AFTER_HELP: &str = r#"Expected eval dataset query JSON:
+  [
+    {
+      "query_id": "q-1",
+      "query_text": "Who blesses the water snakes?",
+      "relevant_doc_ids": ["doc-1"],
+      "relevance_scores": {"doc-1": 2},
+      "collection_id": "collection-uuid",
+      "match_mode": "document_prefix"
+    }
+  ]"#;
+const RUN_EVAL_CAMPAIGN_AFTER_HELP: &str = r#"Query JSON uses the same EvalQueryItem schema as eval datasets.
+
+Use --collection-id to set a campaign-level default collection for all queries that do not include collection_id.
+
+Example query item:
+  {
+    "query_id": "q-1",
+    "query_text": "Who blesses the water snakes?",
+    "relevant_doc_ids": ["doc-1"],
+    "relevance_scores": {"doc-1": 2},
+    "collection_id": "collection-uuid",
+    "match_mode": "document_prefix"
+  }"#;
+const RUN_BEIR_AFTER_HELP: &str = r#"Self-managed local note:
+  BeIR benchmarking requires pre-loaded datasets on the target stack.
+  Run `enscrive --output json evals beir-datasets` to inspect availability and support fields before attempting run-beir."#;
+
 #[derive(Args)]
+#[command(after_long_help = CREATE_VOICE_AFTER_HELP)]
 struct CreateVoiceArgs {
     #[arg(long)]
     name: String,
@@ -922,6 +982,7 @@ struct LogMetricsArgs {
 }
 
 #[derive(Args)]
+#[command(after_long_help = RUN_EVAL_CAMPAIGN_AFTER_HELP)]
 struct RunEvalCampaignArgs {
     #[arg(long)]
     name: String,
@@ -935,6 +996,10 @@ struct RunEvalCampaignArgs {
     /// Metric name to compute. Pass multiple times as needed.
     #[arg(long = "metric", required = true)]
     metrics: Vec<String>,
+
+    /// Campaign-level default collection ID for queries that do not include collection_id.
+    #[arg(long = "collection-id")]
+    collection_id: Option<String>,
 
     /// JSON string containing an array of EvalQueryItem objects
     #[arg(long, conflicts_with = "queries_file")]
@@ -950,6 +1015,7 @@ struct RunEvalCampaignArgs {
 }
 
 #[derive(Args)]
+#[command(after_long_help = RUN_BEIR_AFTER_HELP)]
 struct RunBeirArgs {
     #[arg(long = "voice-id")]
     voice_id: String,
@@ -962,6 +1028,7 @@ struct RunBeirArgs {
 }
 
 #[derive(Args)]
+#[command(after_long_help = EVAL_DATASET_AFTER_HELP)]
 struct CreateEvalDatasetArgs {
     #[arg(long)]
     name: String,
@@ -976,6 +1043,7 @@ struct CreateEvalDatasetArgs {
 }
 
 #[derive(Args)]
+#[command(after_long_help = EVAL_DATASET_AFTER_HELP)]
 struct UpdateEvalDatasetArgs {
     #[arg(long)]
     id: String,
@@ -1035,6 +1103,7 @@ fn require_api_key(api_key: Option<String>, fmt: OutputFormat) -> String {
 }
 
 fn request_failure(command: &str, error: String) -> CliResponse {
+    let error = augment_request_error(command, error);
     let lower = error.to_lowercase();
     if lower.contains("failedprecondition")
         || lower.contains("not yet supported")
@@ -1046,6 +1115,21 @@ fn request_failure(command: &str, error: String) -> CliResponse {
         CliResponse::fail(command, error, FailureClass::Unsupported, EXIT_UNSUPPORTED)
     } else {
         CliResponse::fail(command, error, FailureClass::Bug, EXIT_FAILURE)
+    }
+}
+
+fn augment_request_error(command: &str, error: String) -> String {
+    let lower = error.to_lowercase();
+    let beir_dataset_hint = "Run `enscrive --output json evals beir-datasets` to inspect dataset availability and support fields.";
+    let self_managed_hint = "Self-managed local does not ship a public BEIR dataset-load path yet.";
+
+    if command.starts_with("evals run-beir")
+        && (lower.contains("pre-loaded datasets") || lower.contains("beir_helper_v2.py"))
+        && !lower.contains("self-managed local does not ship a public beir dataset-load path yet")
+    {
+        format!("{error} {self_managed_hint} {beir_dataset_hint}")
+    } else {
+        error
     }
 }
 
@@ -1080,7 +1164,11 @@ fn parse_config_source(
         }
     };
 
-    serde_json::from_str(&raw).map_err(|e| format!("parse config JSON: {e}"))
+    let value: Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("parse config JSON: {e}; {VOICE_CONFIG_SCHEMA_SUMMARY}"))?;
+    let config: CliVoiceConfig = serde_json::from_value(value)
+        .map_err(|e| format!("parse config JSON: {e}; {VOICE_CONFIG_SCHEMA_SUMMARY}"))?;
+    serde_json::to_value(config).map_err(|e| format!("serialize config JSON: {e}"))
 }
 
 fn parse_json_source(
@@ -1110,12 +1198,224 @@ fn parse_json_source(
 
 fn parse_segments_source(args: &IngestPreparedArgs) -> Result<Value, String> {
     let value = parse_json_source(&args.segments_json, &args.segments_file, "segments")?;
-    match value {
-        Value::Array(items) if items.is_empty() => {
-            Err("segments array must not be empty".to_string())
+    let segments = coerce_prepared_segments(value)?;
+    if segments.is_empty() {
+        Err("segments array must not be empty".to_string())
+    } else {
+        serde_json::to_value(segments).map_err(|e| format!("serialize prepared segments: {e}"))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct CliPreparedSegment {
+    content: String,
+    label: String,
+    confidence: f64,
+    reasoning: String,
+    start_paragraph: u32,
+    end_paragraph: u32,
+    #[serde(default)]
+    metadata: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct CliVoiceConfig {
+    chunking_strategy: String,
+    parameters: HashMap<String, String>,
+    #[serde(default)]
+    template_id: Option<String>,
+    #[serde(default)]
+    score_threshold: Option<f32>,
+    #[serde(default)]
+    default_limit: Option<u32>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct CliEvalQueryItem {
+    query_id: String,
+    query_text: String,
+    relevant_doc_ids: Vec<String>,
+    relevance_scores: HashMap<String, i32>,
+    #[serde(default)]
+    collection_id: Option<String>,
+    #[serde(default)]
+    match_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CliSegmentInfo {
+    index: u32,
+    content: String,
+    label: String,
+    confidence: f64,
+    reasoning: String,
+    start_paragraph: u32,
+    end_paragraph: u32,
+    estimated_tokens: u32,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct CliSegmentCompletion {
+    #[serde(default)]
+    processing_time_ms: Option<u64>,
+    #[serde(default)]
+    template_name: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    total_paragraphs: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+struct CliSseEvent {
+    event: String,
+    data: String,
+}
+
+impl CliSegmentInfo {
+    fn into_prepared(self, completion: &CliSegmentCompletion) -> CliPreparedSegment {
+        let mut metadata = HashMap::new();
+        metadata.insert("segment_index".to_string(), self.index.to_string());
+        metadata.insert(
+            "estimated_tokens".to_string(),
+            self.estimated_tokens.to_string(),
+        );
+
+        if let Some(template_name) = completion.template_name.as_ref() {
+            metadata.insert("template_name".to_string(), template_name.clone());
         }
+        if let Some(model) = completion.model.as_ref() {
+            metadata.insert("segmentation_model".to_string(), model.clone());
+        }
+        if let Some(total_paragraphs) = completion.total_paragraphs {
+            metadata.insert("total_paragraphs".to_string(), total_paragraphs.to_string());
+        }
+        if let Some(processing_time_ms) = completion.processing_time_ms {
+            metadata.insert(
+                "processing_time_ms".to_string(),
+                processing_time_ms.to_string(),
+            );
+        }
+
+        CliPreparedSegment {
+            content: self.content,
+            label: self.label,
+            confidence: self.confidence,
+            reasoning: self.reasoning,
+            start_paragraph: self.start_paragraph,
+            end_paragraph: self.end_paragraph,
+            metadata,
+        }
+    }
+}
+
+fn coerce_prepared_segments(value: Value) -> Result<Vec<CliPreparedSegment>, String> {
+    let normalized = unwrap_segments_value(value)?;
+
+    if let Ok(segments) = serde_json::from_value::<Vec<CliSegmentInfo>>(normalized.clone()) {
+        let completion = CliSegmentCompletion::default();
+        return Ok(segments
+            .into_iter()
+            .map(|segment| segment.into_prepared(&completion))
+            .collect());
+    }
+
+    if let Ok(segments) = serde_json::from_value::<Vec<CliPreparedSegment>>(normalized) {
+        return Ok(segments);
+    }
+
+    Err(
+        "segments JSON must be an array of prepared segments or segment-document output"
+            .to_string(),
+    )
+}
+
+fn unwrap_segments_value(value: Value) -> Result<Value, String> {
+    match value {
         Value::Array(_) => Ok(value),
+        Value::Object(mut object) => {
+            if let Some(data) = object.remove("data") {
+                return unwrap_segments_value(data);
+            }
+            if let Some(segments) = object
+                .remove("prepared_segments")
+                .or_else(|| object.remove("segments"))
+            {
+                return unwrap_segments_value(segments);
+            }
+            Err("segments JSON must be an array or object containing a segments array".to_string())
+        }
         _ => Err("segments JSON must be an array".to_string()),
+    }
+}
+
+fn parse_segment_sse(raw: &str) -> Result<Value, String> {
+    let events = parse_sse_events(raw);
+    let mut segment_infos = Vec::new();
+    let mut completion = CliSegmentCompletion::default();
+
+    for event in events {
+        match event.event.as_str() {
+            "segment" => {
+                let segment: CliSegmentInfo = serde_json::from_str(&event.data)
+                    .map_err(|e| format!("parse segment-document segment event: {e}"))?;
+                segment_infos.push(segment);
+            }
+            "complete" => {
+                completion = serde_json::from_str(&event.data)
+                    .map_err(|e| format!("parse segment-document completion event: {e}"))?;
+            }
+            "error" => return Err(parse_segment_error_message(&event.data)),
+            _ => {}
+        }
+    }
+
+    let segments: Vec<CliPreparedSegment> = segment_infos
+        .into_iter()
+        .map(|segment| segment.into_prepared(&completion))
+        .collect();
+
+    serde_json::to_value(segments).map_err(|e| format!("serialize segment-document output: {e}"))
+}
+
+fn parse_sse_events(raw: &str) -> Vec<CliSseEvent> {
+    raw.replace("\r\n", "\n")
+        .split("\n\n")
+        .filter_map(|block| {
+            let mut event = "message".to_string();
+            let mut data_lines = Vec::new();
+
+            for line in block.lines().map(str::trim_end) {
+                if let Some(rest) = line.strip_prefix("event:") {
+                    event = rest.trim().to_string();
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    data_lines.push(rest.trim_start().to_string());
+                }
+            }
+
+            if data_lines.is_empty() {
+                None
+            } else {
+                Some(CliSseEvent {
+                    event,
+                    data: data_lines.join("\n"),
+                })
+            }
+        })
+        .collect()
+}
+
+fn parse_segment_error_message(raw: &str) -> String {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Object(mut object)) => object
+            .remove("message")
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| raw.to_string()),
+        _ => raw.to_string(),
     }
 }
 
@@ -1150,8 +1450,19 @@ fn parse_eval_queries_source(
     }
     let value = parse_json_source(queries_json, queries_file, "queries")?;
     match value {
-        Value::Array(_) => Ok(value),
-        _ => Err("queries JSON must be an array".to_string()),
+        Value::Array(_) => {
+            let queries: Vec<CliEvalQueryItem> = serde_json::from_value(value).map_err(|e| {
+                format!("parse queries JSON: {e}; {EVAL_QUERY_ITEM_SCHEMA_SUMMARY}")
+            })?;
+            for query in &queries {
+                parse_eval_match_mode(&query.match_mode)
+                    .map_err(|e| format!("{e}; {EVAL_QUERY_ITEM_SCHEMA_SUMMARY}"))?;
+            }
+            serde_json::to_value(queries).map_err(|e| format!("serialize queries JSON: {e}"))
+        }
+        _ => Err(format!(
+            "queries JSON must be an array; {EVAL_QUERY_ITEM_SCHEMA_SUMMARY}"
+        )),
     }
 }
 
@@ -1175,6 +1486,7 @@ fn build_eval_campaign_body(args: &RunEvalCampaignArgs) -> Result<Value, String>
         "voice_id": args.voice_id,
         "dataset_id": args.dataset_id,
         "metrics": args.metrics,
+        "collection_id": args.collection_id,
         "queries": queries,
         "match_mode": match_mode,
     }))
@@ -1680,10 +1992,12 @@ async fn main() {
                             .post_text("/v1/segment-document", body, "text/event-stream")
                             .await
                         {
-                            Ok(data) => {
-                                CliResponse::success("segment document", Value::String(data))
-                                    .emit(fmt)
-                            }
+                            Ok(data) => match parse_segment_sse(&data) {
+                                Ok(segments) => {
+                                    CliResponse::success("segment document", segments).emit(fmt)
+                                }
+                                Err(e) => request_failure("segment document", e).emit(fmt),
+                            },
                             Err(e) => request_failure("segment document", e).emit(fmt),
                         }
                     }
@@ -1710,6 +2024,16 @@ async fn main() {
                         CliResponse::fail("analyze content", e, FailureClass::Bug, EXIT_CONFIG)
                             .emit(fmt)
                     }
+                },
+            }
+        }
+        Commands::Models { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            match sub {
+                ModelsSubcommand::List => match client.get_json("/v1/models").await {
+                    Ok(data) => CliResponse::success("models list", data).emit(fmt),
+                    Err(e) => request_failure("models list", e).emit(fmt),
                 },
             }
         }
@@ -2487,6 +2811,18 @@ mod tests {
     }
 
     #[test]
+    fn parse_models_list_command() {
+        let args = Cli::parse_from(["enscrive", "--api-key", "test-key", "models", "list"]);
+
+        match args.command {
+            Commands::Models {
+                sub: ModelsSubcommand::List,
+            } => {}
+            _ => panic!("expected models list"),
+        }
+    }
+
+    #[test]
     fn parse_ingest_prepared_command() {
         let args = Cli::parse_from([
             "enscrive",
@@ -2656,7 +2992,10 @@ mod tests {
         };
 
         let error = parse_segments_source(&args).unwrap_err();
-        assert_eq!(error, "segments JSON must be an array");
+        assert_eq!(
+            error,
+            "segments JSON must be an array or object containing a segments array"
+        );
     }
 
     #[test]
@@ -2686,7 +3025,37 @@ mod tests {
     fn reject_non_array_eval_queries_json() {
         let error = parse_eval_queries_source(&Some("{\"query\":\"nope\"}".to_string()), &None)
             .unwrap_err();
-        assert_eq!(error, "queries JSON must be an array");
+        assert!(error.contains("queries JSON must be an array"));
+        assert!(error.contains("optional collection_id"));
+    }
+
+    #[test]
+    fn parse_eval_queries_source_accepts_collection_id() {
+        let value = parse_eval_queries_source(
+            &Some(
+                r#"[{"query_id":"q1","query_text":"hello","relevant_doc_ids":["doc-1"],"relevance_scores":{"doc-1":1},"collection_id":"col-1","match_mode":"document_prefix"}]"#
+                    .to_string(),
+            ),
+            &None,
+        )
+        .unwrap();
+
+        assert_eq!(value[0]["collection_id"], "col-1");
+        assert_eq!(value[0]["match_mode"], "document_prefix");
+    }
+
+    #[test]
+    fn parse_voice_config_source_accepts_template_id() {
+        let value = parse_config_source(
+            &Some(
+                r#"{"chunking_strategy":"story_beats","parameters":{"model":"gpt-4o"},"template_id":"tmpl-1","score_threshold":0.8,"default_limit":5,"description":"voice","tags":["docs"]}"#
+                    .to_string(),
+            ),
+            &None,
+        )
+        .unwrap();
+
+        assert_eq!(value["template_id"], "tmpl-1");
     }
 
     #[test]
@@ -2812,6 +3181,96 @@ mod tests {
             }
             _ => panic!("expected voices create"),
         }
+    }
+
+    #[test]
+    fn parse_segment_document_sse_into_prepared_segments() {
+        let sse = "\
+event: status\n\
+data: {\"phase\":\"resolving\"}\n\n\
+event: segment\n\
+data: {\"index\":0,\"content\":\"First beat\",\"label\":\"opening\",\"confidence\":0.94,\"reasoning\":\"Clear setup\",\"start_paragraph\":1,\"end_paragraph\":2,\"estimated_tokens\":123}\n\n\
+event: complete\n\
+data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrative\",\"model\":\"gpt-5-mini\",\"total_paragraphs\":7}\n\n";
+
+        let parsed = parse_segment_sse(sse).unwrap();
+        let segments: Vec<CliPreparedSegment> = serde_json::from_value(parsed).unwrap();
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].content, "First beat");
+        assert_eq!(segments[0].metadata.get("segment_index").unwrap(), "0");
+        assert_eq!(segments[0].metadata.get("estimated_tokens").unwrap(), "123");
+        assert_eq!(
+            segments[0].metadata.get("template_name").unwrap(),
+            "Narrative"
+        );
+        assert_eq!(
+            segments[0].metadata.get("segmentation_model").unwrap(),
+            "gpt-5-mini"
+        );
+    }
+
+    #[test]
+    fn parse_segments_source_accepts_segment_command_envelope() {
+        let args = IngestPreparedArgs {
+            collection_id: "col-1".to_string(),
+            document_id: "doc-1".to_string(),
+            voice_id: None,
+            segments_json: Some(
+                r#"{
+                    "ok": true,
+                    "command": "segment document",
+                    "data": [{
+                        "content": "First beat",
+                        "label": "opening",
+                        "confidence": 0.9,
+                        "reasoning": "setup",
+                        "start_paragraph": 1,
+                        "end_paragraph": 2,
+                        "metadata": {"segment_index": "0"}
+                    }],
+                    "exit_code": 0
+                }"#
+                .to_string(),
+            ),
+            segments_file: None,
+        };
+
+        let parsed = parse_segments_source(&args).unwrap();
+        let segments: Vec<CliPreparedSegment> = serde_json::from_value(parsed).unwrap();
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].metadata.get("segment_index").unwrap(), "0");
+    }
+
+    #[test]
+    fn parse_segments_source_converts_segment_info_arrays() {
+        let args = IngestPreparedArgs {
+            collection_id: "col-1".to_string(),
+            document_id: "doc-1".to_string(),
+            voice_id: None,
+            segments_json: Some(
+                r#"[{
+                    "index": 0,
+                    "content": "First beat",
+                    "label": "opening",
+                    "confidence": 0.9,
+                    "reasoning": "setup",
+                    "start_paragraph": 1,
+                    "end_paragraph": 2,
+                    "estimated_tokens": 88
+                }]"#
+                .to_string(),
+            ),
+            segments_file: None,
+        };
+
+        let parsed = parse_segments_source(&args).unwrap();
+        let segments: Vec<CliPreparedSegment> = serde_json::from_value(parsed).unwrap();
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].metadata.get("segment_index").unwrap(), "0");
+        assert_eq!(segments[0].metadata.get("estimated_tokens").unwrap(), "88");
     }
 
     #[test]
@@ -3010,6 +3469,12 @@ mod tests {
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["failure_class"], "FAIL_UNSUPPORTED");
         assert_eq!(json["exit_code"], 2);
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Self-managed local does not ship a public BEIR dataset-load path yet.")
+        );
     }
 
     #[test]
@@ -3086,6 +3551,8 @@ mod tests {
             "recall@10",
             "--queries-file",
             "queries.json",
+            "--collection-id",
+            "collection-1",
         ]);
         match args.command {
             Commands::Evals {
@@ -3097,6 +3564,7 @@ mod tests {
                 assert_eq!(run.metrics, vec!["ndcg@10", "recall@10"]);
                 assert_eq!(run.queries_file.as_deref(), Some("queries.json"));
                 assert!(run.queries_json.is_none());
+                assert_eq!(run.collection_id.as_deref(), Some("collection-1"));
                 assert!(run.match_mode.is_none());
             }
             _ => panic!("expected evals run-campaign"),
@@ -3139,6 +3607,7 @@ mod tests {
             voice_id: "voice-1".to_string(),
             dataset_id: "dataset-1".to_string(),
             metrics: vec!["ndcg@10".to_string()],
+            collection_id: Some("collection-1".to_string()),
             queries_json: Some(
                 r#"[{"query_id":"q1","query_text":"hello","relevant_doc_ids":["doc-1"],"relevance_scores":{"doc-1":1}}]"#
                     .to_string(),
@@ -3149,6 +3618,7 @@ mod tests {
 
         let body = build_eval_campaign_body(&args).unwrap();
         assert_eq!(body["match_mode"], "document_prefix");
+        assert_eq!(body["collection_id"], "collection-1");
     }
 
     #[test]
@@ -3158,6 +3628,7 @@ mod tests {
             voice_id: "voice-1".to_string(),
             dataset_id: "dataset-1".to_string(),
             metrics: vec!["ndcg@10".to_string()],
+            collection_id: None,
             queries_json: Some(
                 r#"[{"query_id":"q1","query_text":"hello","relevant_doc_ids":["doc-1"],"relevance_scores":{"doc-1":1}}]"#
                     .to_string(),
@@ -3177,6 +3648,7 @@ mod tests {
             voice_id: "voice-1".to_string(),
             dataset_id: "dataset-1".to_string(),
             metrics: vec!["ndcg@10".to_string()],
+            collection_id: Some("collection-1".to_string()),
             queries_json: None,
             queries_file: None,
             match_mode: Some("document_prefix".to_string()),
@@ -3185,6 +3657,7 @@ mod tests {
         let body = build_eval_campaign_body(&args).unwrap();
         assert_eq!(body["queries"], Value::Array(Vec::new()));
         assert_eq!(body["match_mode"], "document_prefix");
+        assert_eq!(body["collection_id"], "collection-1");
     }
 
     #[test]

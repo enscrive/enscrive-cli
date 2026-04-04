@@ -731,6 +731,7 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
 }
 
 pub async fn start(opts: StartOptions) -> Result<Value, String> {
+    let home = cli_home()?;
     let mut profiles = load_profiles()?;
     let (profile_name, mut profile) = load_local_profile(opts.profile_name.as_deref(), &profiles)?;
     let local = profile
@@ -738,10 +739,22 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         .clone()
         .ok_or_else(|| format!("profile '{}' is not self-managed", profile_name))?;
 
+    let developer_site_root = discover_developer_site_root(&home, &local.binaries);
+    let leptos_output_name = developer_site_root
+        .as_deref()
+        .and_then(infer_leptos_output_name)
+        .unwrap_or_else(|| DEFAULT_LEPTOS_OUTPUT_NAME.to_string());
+
     ensure_local_embedding_provider(&local)?;
-    ensure_valid_developer_env(Path::new(&local.developer_env_file))?;
+    ensure_valid_developer_env(
+        Path::new(&local.developer_env_file),
+        developer_site_root.as_deref(),
+        Some(&leptos_output_name),
+    )?;
     prepare_local_data_dirs(&Path::new(&local.runtime_dir).join("data"))?;
     ensure_docker_available()?;
+    let log_dir = Path::new(&local.log_dir);
+    let mut started_services = Vec::new();
     compose_cmd(&local)?
         .arg("up")
         .arg("-d")
@@ -766,45 +779,81 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         "enscrive-embed",
         &local.binaries.embed,
         Path::new(&local.embed_env_file),
-        Path::new(&local.log_dir),
+        log_dir,
     )?;
-    wait_for_http(
+    if service_was_newly_started(&started_embed) {
+        started_services.push("enscrive-embed");
+    }
+    if let Err(error) = wait_for_http(
         &format!("http://127.0.0.1:{}/v1/health", local.ports.embed_rest),
         Duration::from_secs(60),
     )
-    .await?;
+    .await
+    {
+        cleanup_started_services(&started_services, log_dir);
+        return Err(format_service_start_error(error, "enscrive-embed", log_dir));
+    }
 
     let started_observe = spawn_service(
         "enscrive-observe",
         &local.binaries.observe,
         Path::new(&local.observe_env_file),
-        Path::new(&local.log_dir),
+        log_dir,
     )?;
-    wait_for_http(
+    if service_was_newly_started(&started_observe) {
+        started_services.push("enscrive-observe");
+    }
+    if let Err(error) = wait_for_http(
         &format!("http://127.0.0.1:{}/health", local.ports.observe_rest),
         Duration::from_secs(60),
     )
-    .await?;
+    .await
+    {
+        cleanup_started_services(&started_services, log_dir);
+        return Err(format_service_start_error(
+            error,
+            "enscrive-observe",
+            log_dir,
+        ));
+    }
 
     let started_developer = spawn_service(
         "enscrive-developer",
         &local.binaries.developer,
         Path::new(&local.developer_env_file),
-        Path::new(&local.log_dir),
+        log_dir,
     )?;
-    wait_for_http(
+    if service_was_newly_started(&started_developer) {
+        started_services.push("enscrive-developer");
+    }
+    if let Err(error) = wait_for_http(
         &format!("http://127.0.0.1:{}/health", local.ports.developer),
         Duration::from_secs(60),
     )
-    .await?;
+    .await
+    {
+        cleanup_started_services(&started_services, log_dir);
+        return Err(format_service_start_error(
+            error,
+            "enscrive-developer",
+            log_dir,
+        ));
+    }
 
-    let bootstrap = bootstrap_local_stack(
+    let bootstrap = match bootstrap_local_stack(
         &profile.endpoint,
         &local,
         &keycloak_user,
         profile.api_key.is_none(),
     )
-    .await?;
+    .await
+    {
+        Ok(bootstrap) => bootstrap,
+        Err(error) => {
+            cleanup_started_services(&started_services, log_dir);
+            return Err(error);
+        }
+    };
 
     if let Some(local_profile) = profile.local.as_mut() {
         local_profile.bootstrap.tenant_id = Some(bootstrap.tenant_id.clone());
@@ -1598,17 +1647,35 @@ fn is_valid_aes_key(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
-fn ensure_valid_developer_env(env_file: &Path) -> Result<(), String> {
+fn ensure_valid_developer_env(
+    env_file: &Path,
+    leptos_site_root: Option<&Path>,
+    leptos_output_name: Option<&str>,
+) -> Result<(), String> {
     let mut envs = parse_env_file(env_file)?;
     let mut found_aes_key = false;
-    let mut rewrote_aes_key = false;
+    let mut changed = false;
+
+    fn upsert_env(envs: &mut Vec<(String, String)>, key: &str, value: String) -> bool {
+        for (candidate, current) in envs.iter_mut() {
+            if candidate == key {
+                if *current != value {
+                    *current = value;
+                    return true;
+                }
+                return false;
+            }
+        }
+        envs.push((key.to_string(), value));
+        true
+    }
 
     for (key, value) in envs.iter_mut() {
         if key == "AES_KEY" {
             found_aes_key = true;
             if !is_valid_aes_key(value.trim()) {
                 *value = generate_hex_secret(32);
-                rewrote_aes_key = true;
+                changed = true;
             }
         }
     }
@@ -1620,7 +1687,20 @@ fn ensure_valid_developer_env(env_file: &Path) -> Result<(), String> {
         ));
     }
 
-    if rewrote_aes_key {
+    if let Some(output_name) = leptos_output_name {
+        changed |= upsert_env(&mut envs, "LEPTOS_OUTPUT_NAME", output_name.to_string());
+    }
+
+    if let Some(site_root) = leptos_site_root {
+        changed |= upsert_env(
+            &mut envs,
+            "LEPTOS_SITE_ROOT",
+            site_root.display().to_string(),
+        );
+        changed |= upsert_env(&mut envs, "LEPTOS_SITE_PKG_DIR", "pkg".to_string());
+    }
+
+    if changed {
         let content = envs
             .iter()
             .map(|(key, value)| format!("{key}={value}"))
@@ -1919,6 +1999,7 @@ fn spawn_service(
                 "binary": binary,
             }));
         }
+        let _ = fs::remove_file(&pid_path);
     }
 
     let envs = parse_env_file(env_file)?;
@@ -1963,12 +2044,10 @@ fn stop_service(service_name: &str, log_dir: &Path) -> Result<Value, String> {
         return Ok(json!({"service": service_name, "status": "stale_pid_removed", "pid": pid}));
     }
 
-    Command::new("kill")
-        .arg("-TERM")
-        .arg(pid.to_string())
-        .status()
-        .map_err(|e| format!("stop {}: {e}", service_name))
-        .and_then(require_success("kill"))?;
+    if !send_pid_signal(pid, "-TERM").map_err(|e| format!("stop {}: {e}", service_name))? {
+        let _ = fs::remove_file(&pid_path);
+        return Ok(json!({"service": service_name, "status": "stale_pid_removed", "pid": pid}));
+    }
 
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(10) {
@@ -1979,12 +2058,10 @@ fn stop_service(service_name: &str, log_dir: &Path) -> Result<Value, String> {
         std::thread::sleep(Duration::from_millis(200));
     }
 
-    Command::new("kill")
-        .arg("-KILL")
-        .arg(pid.to_string())
-        .status()
-        .map_err(|e| format!("force stop {}: {e}", service_name))
-        .and_then(require_success("kill -KILL"))?;
+    if !send_pid_signal(pid, "-KILL").map_err(|e| format!("force stop {}: {e}", service_name))? {
+        let _ = fs::remove_file(&pid_path);
+        return Ok(json!({"service": service_name, "status": "stale_pid_removed", "pid": pid}));
+    }
     let _ = fs::remove_file(&pid_path);
     Ok(json!({"service": service_name, "status": "killed", "pid": pid}))
 }
@@ -2016,12 +2093,55 @@ fn read_pid(pid_path: &Path) -> Result<Option<u32>, String> {
 }
 
 fn pid_is_running(pid: u32) -> bool {
+    send_pid_signal(pid, "-0").unwrap_or(false)
+}
+
+fn send_pid_signal(pid: u32, signal: &str) -> Result<bool, String> {
     Command::new("kill")
-        .arg("-0")
+        .arg(signal)
         .arg(pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
-        .unwrap_or(false)
+        .map_err(|e| format!("send signal {} to pid {}: {e}", signal, pid))
+}
+
+fn service_was_newly_started(status: &Value) -> bool {
+    status.get("status").and_then(Value::as_str) == Some("started")
+}
+
+fn cleanup_started_services(services: &[&str], log_dir: &Path) {
+    for service_name in services.iter().rev() {
+        let _ = stop_service(service_name, log_dir);
+    }
+}
+
+fn format_service_start_error(error: String, service_name: &str, log_dir: &Path) -> String {
+    match recent_service_log_excerpt(log_dir, service_name, 20) {
+        Some(log_tail) if !log_tail.is_empty() => {
+            format!("{error}\nLast {service_name} log lines:\n{log_tail}")
+        }
+        _ => error,
+    }
+}
+
+fn recent_service_log_excerpt(
+    log_dir: &Path,
+    service_name: &str,
+    max_lines: usize,
+) -> Option<String> {
+    let log_path = log_dir.join(format!("{}.log", service_name));
+    let raw = fs::read_to_string(log_path).ok()?;
+    let lines = raw.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(max_lines);
+    let excerpt = lines[start..].join("\n").trim().to_string();
+    if excerpt.is_empty() {
+        None
+    } else {
+        Some(excerpt)
+    }
 }
 
 fn parse_env_file(path: &Path) -> Result<Vec<(String, String)>, String> {
@@ -2671,7 +2791,7 @@ mod tests {
         )
         .unwrap();
 
-        ensure_valid_developer_env(&env_path).unwrap();
+        ensure_valid_developer_env(&env_path, None, None).unwrap();
 
         let updated = std::fs::read_to_string(&env_path).unwrap();
         let aes_key = updated
@@ -2689,12 +2809,12 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let pkg_dir = temp.path().join("pkg");
         std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(pkg_dir.join("enscribe-developer.css"), "body{}").unwrap();
-        std::fs::write(pkg_dir.join("enscribe-developer.js"), "console.log('ok');").unwrap();
+        std::fs::write(pkg_dir.join("enscrive-developer.css"), "body{}").unwrap();
+        std::fs::write(pkg_dir.join("enscrive-developer.js"), "console.log('ok');").unwrap();
 
         assert_eq!(
             infer_leptos_output_name(temp.path()).as_deref(),
-            Some("enscribe-developer")
+            Some("enscrive-developer")
         );
     }
 
@@ -2764,12 +2884,74 @@ mod tests {
             "pepper",
             &generate_hex_secret(32),
             Some(Path::new("/tmp/site")),
-            "enscribe-developer",
+            "enscrive-developer",
         );
 
-        assert!(rendered.contains("LEPTOS_OUTPUT_NAME=enscribe-developer"));
+        assert!(rendered.contains("LEPTOS_OUTPUT_NAME=enscrive-developer"));
         assert!(rendered.contains("LEPTOS_SITE_ROOT=/tmp/site"));
         assert!(rendered.contains("LEPTOS_SITE_PKG_DIR=pkg"));
+    }
+
+    #[test]
+    fn ensure_valid_developer_env_rewrites_stale_leptos_bundle_name() {
+        let temp = TempDir::new().unwrap();
+        let env_path = temp.path().join("developer.env");
+        let site_root = temp.path().join("site");
+        std::fs::create_dir_all(site_root.join("pkg")).unwrap();
+        std::fs::write(
+            &env_path,
+            "HMAC_PEPPER=test-pepper\nAES_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nLOCAL_BOOTSTRAP_SECRET=test-secret\nLEPTOS_OUTPUT_NAME=enscribe-developer\nLEPTOS_SITE_ROOT=/stale/site\nLEPTOS_SITE_PKG_DIR=assets\n",
+        )
+        .unwrap();
+
+        ensure_valid_developer_env(
+            &env_path,
+            Some(site_root.as_path()),
+            Some("enscrive-developer"),
+        )
+        .unwrap();
+
+        let updated = std::fs::read_to_string(&env_path).unwrap();
+        assert!(updated.contains("LEPTOS_OUTPUT_NAME=enscrive-developer"));
+        assert!(updated.contains(&format!("LEPTOS_SITE_ROOT={}", site_root.display())));
+        assert!(updated.contains("LEPTOS_SITE_PKG_DIR=pkg"));
+    }
+
+    #[test]
+    fn recent_service_log_excerpt_returns_tail_lines() {
+        let temp = TempDir::new().unwrap();
+        let log_dir = temp.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("enscrive-embed.log"),
+            "line-1\nline-2\nline-3\nline-4\n",
+        )
+        .unwrap();
+
+        let excerpt = recent_service_log_excerpt(&log_dir, "enscrive-embed", 2).unwrap();
+        assert_eq!(excerpt, "line-3\nline-4");
+    }
+
+    #[test]
+    fn format_service_start_error_includes_recent_log_excerpt() {
+        let temp = TempDir::new().unwrap();
+        let log_dir = temp.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("enscrive-observe.log"),
+            "observe booting\nobserve waiting\nobserve failed\n",
+        )
+        .unwrap();
+
+        let error = format_service_start_error(
+            "timed out waiting for HTTP readiness".to_string(),
+            "enscrive-observe",
+            &log_dir,
+        );
+
+        assert!(error.contains("timed out waiting for HTTP readiness"));
+        assert!(error.contains("Last enscrive-observe log lines:"));
+        assert!(error.contains("observe failed"));
     }
 
     #[test]
