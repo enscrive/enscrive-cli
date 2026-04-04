@@ -635,7 +635,7 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
         "layout": layout,
         "ports": ports,
         "artifacts": artifacts,
-        "note": "render produces deterministic managed-host artifacts; apply remains a narrower future step"
+        "note": "render produces deterministic managed-host artifacts for enscrive deploy apply on the target host"
     }))
 }
 
