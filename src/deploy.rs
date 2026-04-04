@@ -1,5 +1,5 @@
 use clap::ValueEnum;
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -12,6 +12,12 @@ use std::process::Command;
 const DEPLOY_PROFILE_VERSION: u32 = 2;
 const LEGACY_LOCAL_DEPLOY_ENDPOINT: &str = "http://127.0.0.1:3000";
 const DEFAULT_BOOTSTRAP_BUNDLE_SECRET_KEY: &str = "ENSCRIVE_BOOTSTRAP_BUNDLE";
+const DEFAULT_MANAGED_DEVELOPER_PRIVATE_PORT: u16 = 13000;
+const DEFAULT_MANAGED_OBSERVE_REST_PORT: u16 = 18084;
+const DEFAULT_MANAGED_OBSERVE_GRPC_PORT: u16 = 19090;
+const DEFAULT_MANAGED_EMBED_REST_PORT: u16 = 18081;
+const DEFAULT_MANAGED_EMBED_GRPC_PORT: u16 = 15052;
+const DEFAULT_MANAGED_EMBED_METRICS_PORT: u16 = 19000;
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +57,19 @@ pub struct DeployBootstrapOptions {
     pub endpoint_override: Option<String>,
     pub bundle_path: Option<String>,
     pub bundle_secret_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeployRenderOptions {
+    pub profile_name: Option<String>,
+    pub output_dir: Option<String>,
+    pub host_root: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeployVerifyOptions {
+    pub profile_name: Option<String>,
+    pub endpoint_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -131,6 +150,84 @@ struct SignedBootstrapConsumeResponse {
     created_user: bool,
     consumed_nonce: String,
     stack_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RenderLayout {
+    host_root: String,
+    bin_dir: String,
+    config_dir: String,
+    runtime_dir: String,
+    logs_dir: String,
+    site_root: String,
+    systemd_dir: String,
+    nginx_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ManagedPorts {
+    developer_private_port: u16,
+    observe_rest_port: u16,
+    observe_grpc_port: u16,
+    embed_rest_port: u16,
+    embed_grpc_port: u16,
+    embed_metrics_port: u16,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RenderedArtifactPaths {
+    manifest: String,
+    readme: String,
+    developer_env: String,
+    observe_env: String,
+    embed_env: String,
+    developer_service: String,
+    observe_service: String,
+    embed_service: String,
+    nginx_config: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RenderManifest {
+    version: u32,
+    rendered_at: String,
+    profile: String,
+    target: String,
+    aws_region: String,
+    endpoint: String,
+    endpoint_origin: String,
+    public_hostname: String,
+    bootstrap_present: bool,
+    secrets_source: String,
+    layout: RenderLayout,
+    ports: ManagedPorts,
+    artifacts: RenderedArtifactPaths,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeployVerifyHealth {
+    healthy: bool,
+    degraded: bool,
+    version: String,
+    observe: Option<DeployVerifyServiceHealth>,
+    embed: Option<DeployVerifyServiceHealth>,
+    capabilities: DeployVerifyCapabilities,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeployVerifyServiceHealth {
+    healthy: bool,
+    version: String,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DeployVerifyCapabilities {
+    auth: bool,
+    collections: bool,
+    ingest: bool,
+    search: bool,
+    logs: bool,
 }
 
 fn default_legacy_deploy_endpoint() -> String {
@@ -328,6 +425,203 @@ pub async fn bootstrap(opts: DeployBootstrapOptions) -> Result<Value, String> {
     }))
 }
 
+pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
+    let profiles = load_deploy_profiles()?;
+    let (selected_name, profile) = resolve_selected_profile(&profiles, opts.profile_name)?;
+    let endpoint_state = profile_endpoint_state(&profile);
+    let endpoint = endpoint_state.effective.clone();
+    let public_hostname = public_hostname_from_endpoint(&endpoint)?;
+    let output_dir = resolve_render_output_dir(opts.output_dir.as_deref(), &selected_name)?;
+    let host_root = opts
+        .host_root
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("/opt/enscrive/{}", profile.target));
+    let layout = render_layout(&host_root);
+    let ports = managed_ports();
+
+    fs::create_dir_all(output_dir.join("config"))
+        .map_err(|e| format!("create render config dir: {e}"))?;
+    fs::create_dir_all(output_dir.join("systemd"))
+        .map_err(|e| format!("create render systemd dir: {e}"))?;
+    fs::create_dir_all(output_dir.join("nginx"))
+        .map_err(|e| format!("create render nginx dir: {e}"))?;
+
+    let artifacts = RenderedArtifactPaths {
+        manifest: output_dir.join("manifest.json").display().to_string(),
+        readme: output_dir.join("README.md").display().to_string(),
+        developer_env: output_dir
+            .join("config")
+            .join("developer.env")
+            .display()
+            .to_string(),
+        observe_env: output_dir
+            .join("config")
+            .join("observe.env")
+            .display()
+            .to_string(),
+        embed_env: output_dir
+            .join("config")
+            .join("embed.env")
+            .display()
+            .to_string(),
+        developer_service: output_dir
+            .join("systemd")
+            .join("enscrive-developer.service")
+            .display()
+            .to_string(),
+        observe_service: output_dir
+            .join("systemd")
+            .join("enscrive-observe.service")
+            .display()
+            .to_string(),
+        embed_service: output_dir
+            .join("systemd")
+            .join("enscrive-embed.service")
+            .display()
+            .to_string(),
+        nginx_config: output_dir
+            .join("nginx")
+            .join(format!("{public_hostname}.conf"))
+            .display()
+            .to_string(),
+    };
+
+    let manifest = RenderManifest {
+        version: 1,
+        rendered_at: chrono::Utc::now().to_rfc3339(),
+        profile: selected_name.clone(),
+        target: profile.target.clone(),
+        aws_region: profile.aws_region.clone(),
+        endpoint: endpoint.clone(),
+        endpoint_origin: endpoint_state.origin.to_string(),
+        public_hostname: public_hostname.clone(),
+        bootstrap_present: profile.bootstrap.is_some(),
+        secrets_source: profile.secrets_source.clone(),
+        layout: layout.clone(),
+        ports: ports.clone(),
+        artifacts: artifacts.clone(),
+    };
+
+    fs::write(
+        &artifacts.manifest,
+        serde_json::to_string_pretty(&manifest)
+            .map_err(|e| format!("serialize deploy manifest: {e}"))?,
+    )
+    .map_err(|e| format!("write manifest: {e}"))?;
+    fs::write(
+        &artifacts.readme,
+        render_readme(
+            &selected_name,
+            &profile,
+            &endpoint,
+            &public_hostname,
+            &layout,
+            &ports,
+        ),
+    )
+    .map_err(|e| format!("write render README: {e}"))?;
+    fs::write(
+        &artifacts.developer_env,
+        render_developer_env(&profile, &endpoint, &layout, &ports),
+    )
+    .map_err(|e| format!("write developer env: {e}"))?;
+    fs::write(&artifacts.observe_env, render_observe_env(&ports))
+        .map_err(|e| format!("write observe env: {e}"))?;
+    fs::write(&artifacts.embed_env, render_embed_env(&ports))
+        .map_err(|e| format!("write embed env: {e}"))?;
+    fs::write(
+        &artifacts.developer_service,
+        render_developer_service(&layout),
+    )
+    .map_err(|e| format!("write developer service: {e}"))?;
+    fs::write(
+        &artifacts.observe_service,
+        render_observe_service(&layout, &ports),
+    )
+    .map_err(|e| format!("write observe service: {e}"))?;
+    fs::write(&artifacts.embed_service, render_embed_service(&layout))
+        .map_err(|e| format!("write embed service: {e}"))?;
+    fs::write(
+        &artifacts.nginx_config,
+        render_nginx_config(&public_hostname, &ports),
+    )
+    .map_err(|e| format!("write nginx config: {e}"))?;
+
+    Ok(json!({
+        "profile": selected_name,
+        "target": profile.target,
+        "aws_region": profile.aws_region,
+        "endpoint": endpoint,
+        "endpoint_origin": endpoint_state.origin,
+        "public_hostname": public_hostname,
+        "bootstrap_present": profile.bootstrap.is_some(),
+        "host_root": layout.host_root,
+        "output_dir": output_dir.display().to_string(),
+        "layout": layout,
+        "ports": ports,
+        "artifacts": artifacts,
+        "note": "render produces deterministic managed-host artifacts; apply remains a narrower future step"
+    }))
+}
+
+pub async fn verify(opts: DeployVerifyOptions) -> Result<Value, String> {
+    let profiles = load_deploy_profiles()?;
+    let (selected_name, profile) = resolve_selected_profile(&profiles, opts.profile_name)?;
+    let endpoint_state = profile_endpoint_state(&profile);
+    let configured_endpoint = endpoint_state.effective.clone();
+    let endpoint_override_used = opts
+        .endpoint_override
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    let request_endpoint = opts
+        .endpoint_override
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| configured_endpoint.clone());
+    let expected_endpoint = default_managed_endpoint_for_target_name(&profile.target)
+        .unwrap_or(LEGACY_LOCAL_DEPLOY_ENDPOINT)
+        .to_string();
+    let public_hostname = public_hostname_from_endpoint(&request_endpoint)?;
+    let health = fetch_health(&request_endpoint).await?;
+
+    let service_healthy = health
+        .observe
+        .as_ref()
+        .map(|svc| svc.healthy)
+        .unwrap_or(false)
+        && health
+            .embed
+            .as_ref()
+            .map(|svc| svc.healthy)
+            .unwrap_or(false);
+    if !health.healthy || health.degraded || !service_healthy {
+        let summary = serde_json::to_string(&health).unwrap_or_else(|_| "<unserializable>".into());
+        return Err(format!(
+            "managed endpoint reported unhealthy state at {}: {}",
+            request_endpoint, summary
+        ));
+    }
+
+    Ok(json!({
+        "profile": selected_name,
+        "target": profile.target,
+        "aws_region": profile.aws_region,
+        "endpoint": request_endpoint,
+        "configured_endpoint": configured_endpoint,
+        "expected_endpoint": expected_endpoint,
+        "matches_target_default": request_endpoint == expected_endpoint,
+        "endpoint_origin": endpoint_state.origin,
+        "endpoint_override_used": endpoint_override_used,
+        "public_hostname": public_hostname,
+        "bootstrap_present": profile.bootstrap.is_some(),
+        "secrets_source": profile.secrets_source,
+        "health": health,
+        "verified": true
+    }))
+}
+
 fn load_deploy_profiles() -> Result<DeployProfilesFile, String> {
     let home = cli_home()?;
     let path = home.config_root.join("deploy-profiles.toml");
@@ -425,6 +719,290 @@ fn default_managed_endpoint_for_target_name(target: &str) -> Option<&'static str
         "ap" => Some(default_managed_endpoint(DeployTarget::Ap)),
         _ => None,
     }
+}
+
+fn resolve_render_output_dir(
+    explicit: Option<&str>,
+    profile_name: &str,
+) -> Result<PathBuf, String> {
+    if let Some(path) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+
+    let cwd = env::current_dir().map_err(|e| format!("resolve current dir: {e}"))?;
+    Ok(cwd.join("enscrive-deploy").join(profile_name))
+}
+
+fn public_hostname_from_endpoint(endpoint: &str) -> Result<String, String> {
+    let parsed = Url::parse(endpoint).map_err(|e| format!("parse endpoint '{}': {e}", endpoint))?;
+    parsed
+        .host_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("endpoint '{}' has no public hostname", endpoint))
+}
+
+fn render_layout(host_root: &str) -> RenderLayout {
+    let host_root = host_root.trim_end_matches('/').to_string();
+    RenderLayout {
+        bin_dir: format!("{host_root}/bin"),
+        config_dir: format!("{host_root}/config"),
+        runtime_dir: format!("{host_root}/runtime"),
+        logs_dir: format!("{host_root}/logs"),
+        site_root: format!("{host_root}/site/enscrive-developer"),
+        systemd_dir: format!("{host_root}/systemd"),
+        nginx_dir: format!("{host_root}/nginx"),
+        host_root,
+    }
+}
+
+fn managed_ports() -> ManagedPorts {
+    ManagedPorts {
+        developer_private_port: DEFAULT_MANAGED_DEVELOPER_PRIVATE_PORT,
+        observe_rest_port: DEFAULT_MANAGED_OBSERVE_REST_PORT,
+        observe_grpc_port: DEFAULT_MANAGED_OBSERVE_GRPC_PORT,
+        embed_rest_port: DEFAULT_MANAGED_EMBED_REST_PORT,
+        embed_grpc_port: DEFAULT_MANAGED_EMBED_GRPC_PORT,
+        embed_metrics_port: DEFAULT_MANAGED_EMBED_METRICS_PORT,
+    }
+}
+
+fn target_region_tag(target: &str) -> String {
+    target.trim().to_ascii_uppercase()
+}
+
+fn render_readme(
+    profile_name: &str,
+    profile: &DeployProfile,
+    endpoint: &str,
+    public_hostname: &str,
+    layout: &RenderLayout,
+    ports: &ManagedPorts,
+) -> String {
+    format!(
+        "# Enscrive Managed Deploy Render\n\n\
+profile: {profile_name}\n\
+target: {target}\n\
+endpoint: {endpoint}\n\
+public hostname: {public_hostname}\n\n\
+This bundle is the deterministic output of `enscrive deploy render`.\n\
+It does not perform host mutation by itself. Use it to stage a managed host\n\
+before running `enscrive deploy bootstrap` and `enscrive deploy verify`.\n\n\
+## Host Layout\n\n\
+- host root: `{host_root}`\n\
+- bin dir: `{bin_dir}`\n\
+- config dir: `{config_dir}`\n\
+- runtime dir: `{runtime_dir}`\n\
+- logs dir: `{logs_dir}`\n\n\
+## Private Ports\n\n\
+- enscrive-developer: `{developer_port}`\n\
+- enscrive-observe REST: `{observe_rest}`\n\
+- enscrive-observe gRPC: `{observe_grpc}`\n\
+- enscrive-embed REST: `{embed_rest}`\n\
+- enscrive-embed gRPC: `{embed_grpc}`\n\
+- enscrive-embed metrics: `{embed_metrics}`\n\n\
+## Next Steps\n\n\
+1. Copy the current `enscrive-*` binaries into `{bin_dir}`.\n\
+2. Fill the generated env files under `{config_dir}` with real secrets and host values.\n\
+3. Install the generated systemd units under `/etc/systemd/system/` and the generated nginx config under `/etc/nginx/conf.d/`.\n\
+4. Reload systemd and nginx, then start the three Enscrive services.\n\
+5. Run `enscrive deploy bootstrap --profile-name {profile_name}` against the managed endpoint once bootstrap is ready.\n\
+6. Run `enscrive deploy verify --profile-name {profile_name}` to verify `/health` over the managed endpoint.\n\n\
+## Notes\n\n\
+- The canonical public endpoint remains `{endpoint}`.\n\
+- The reverse proxy should terminate TLS on `443` for `{public_hostname}`.\n\
+- This bundle uses placeholders rather than silently inventing secrets.\n",
+        target = profile.target,
+        host_root = layout.host_root,
+        bin_dir = layout.bin_dir,
+        config_dir = layout.config_dir,
+        runtime_dir = layout.runtime_dir,
+        logs_dir = layout.logs_dir,
+        developer_port = ports.developer_private_port,
+        observe_rest = ports.observe_rest_port,
+        observe_grpc = ports.observe_grpc_port,
+        embed_rest = ports.embed_rest_port,
+        embed_grpc = ports.embed_grpc_port,
+        embed_metrics = ports.embed_metrics_port,
+    )
+}
+
+fn render_developer_env(
+    profile: &DeployProfile,
+    endpoint: &str,
+    layout: &RenderLayout,
+    ports: &ManagedPorts,
+) -> String {
+    format!(
+        "ENSCRIVE_REGION={region}\n\
+DEVELOPER_PORT={developer_port}\n\
+DATABASE_URL=__REQUIRED__\n\
+KEYCLOAK_ISSUER=__REQUIRED__\n\
+KEYCLOAK_CLIENT_ID=enscrive-developer\n\
+KEYCLOAK_CLIENT_SECRET=__REQUIRED__\n\
+PORTAL_OIDC_REDIRECT_URI={endpoint}/auth/callback\n\
+HMAC_PEPPER=__REQUIRED__\n\
+AES_KEY=__REQUIRED__\n\
+OBSERVE_GRPC_ADDR=http://127.0.0.1:{observe_grpc}\n\
+EBA_TRUSTED_PUBLIC_KEY=__OPTIONAL_BOOTSTRAP_PUBLIC_KEY__\n\
+LEPTOS_SITE_ROOT={site_root}\n\
+LEPTOS_OUTPUT_NAME=enscrive-developer\n\
+LEPTOS_SITE_PKG_DIR=pkg\n",
+        region = target_region_tag(&profile.target),
+        developer_port = ports.developer_private_port,
+        observe_grpc = ports.observe_grpc_port,
+        site_root = layout.site_root,
+    )
+}
+
+fn render_observe_env(ports: &ManagedPorts) -> String {
+    format!(
+        "LOKI_URL=http://127.0.0.1:3100\n\
+EMBED_URL=http://127.0.0.1:{embed_grpc}\n\
+DATABASE_URL=__REQUIRED__\n\
+LAB_SERVICE_SECRET=__REQUIRED__\n",
+        embed_grpc = ports.embed_grpc_port,
+    )
+}
+
+fn render_embed_env(ports: &ManagedPorts) -> String {
+    format!(
+        "SERVER_ADDR=127.0.0.1:{embed_grpc}\n\
+REST_ADDR=127.0.0.1:{embed_rest}\n\
+METRICS_PORT={embed_metrics}\n\
+QDRANT_URL=http://127.0.0.1:6333\n\
+QDRANT_GRPC_URL=http://127.0.0.1:6334\n\
+LAB_SERVICE_SECRET=__REQUIRED__\n\
+OPENAI_API_KEY=__OPTIONAL__\n\
+NEBIUS_API_KEY=__OPTIONAL__\n\
+VOYAGE_API_KEY=__OPTIONAL__\n\
+BGE_ENDPOINT=__OPTIONAL__\n\
+BGE_API_KEY=__OPTIONAL__\n\
+BGE_MODEL_NAME=bge-large-en-v1.5\n",
+        embed_grpc = ports.embed_grpc_port,
+        embed_rest = ports.embed_rest_port,
+        embed_metrics = ports.embed_metrics_port,
+    )
+}
+
+fn render_developer_service(layout: &RenderLayout) -> String {
+    format!(
+        "[Unit]\n\
+Description=enscrive-developer\n\
+After=network-online.target\n\
+Wants=network-online.target\n\n\
+[Service]\n\
+Type=simple\n\
+User=enscrive\n\
+Group=enscrive\n\
+WorkingDirectory={host_root}\n\
+EnvironmentFile={config_dir}/developer.env\n\
+ExecStart={bin_dir}/enscrive-developer\n\
+Restart=always\n\
+RestartSec=5\n\n\
+[Install]\n\
+WantedBy=multi-user.target\n",
+        host_root = layout.host_root,
+        config_dir = layout.config_dir,
+        bin_dir = layout.bin_dir,
+    )
+}
+
+fn render_observe_service(layout: &RenderLayout, ports: &ManagedPorts) -> String {
+    format!(
+        "[Unit]\n\
+Description=enscrive-observe\n\
+After=network-online.target\n\
+Wants=network-online.target\n\n\
+[Service]\n\
+Type=simple\n\
+User=enscrive\n\
+Group=enscrive\n\
+WorkingDirectory={host_root}\n\
+EnvironmentFile={config_dir}/observe.env\n\
+ExecStart={bin_dir}/enscrive-observe --port {rest_port} --grpc-port {grpc_port}\n\
+Restart=always\n\
+RestartSec=5\n\n\
+[Install]\n\
+WantedBy=multi-user.target\n",
+        host_root = layout.host_root,
+        config_dir = layout.config_dir,
+        bin_dir = layout.bin_dir,
+        rest_port = ports.observe_rest_port,
+        grpc_port = ports.observe_grpc_port,
+    )
+}
+
+fn render_embed_service(layout: &RenderLayout) -> String {
+    format!(
+        "[Unit]\n\
+Description=enscrive-embed\n\
+After=network-online.target\n\
+Wants=network-online.target\n\n\
+[Service]\n\
+Type=simple\n\
+User=enscrive\n\
+Group=enscrive\n\
+WorkingDirectory={host_root}\n\
+EnvironmentFile={config_dir}/embed.env\n\
+ExecStart={bin_dir}/enscrive-embed\n\
+Restart=always\n\
+RestartSec=5\n\n\
+[Install]\n\
+WantedBy=multi-user.target\n",
+        host_root = layout.host_root,
+        config_dir = layout.config_dir,
+        bin_dir = layout.bin_dir,
+    )
+}
+
+fn render_nginx_config(public_hostname: &str, ports: &ManagedPorts) -> String {
+    format!(
+        "server {{\n\
+    listen 443 ssl http2;\n\
+    server_name {public_hostname};\n\n\
+    ssl_certificate /etc/letsencrypt/live/{public_hostname}/fullchain.pem;\n\
+    ssl_certificate_key /etc/letsencrypt/live/{public_hostname}/privkey.pem;\n\n\
+    location / {{\n\
+        proxy_pass http://127.0.0.1:{developer_port};\n\
+        proxy_http_version 1.1;\n\
+        proxy_set_header Host $host;\n\
+        proxy_set_header X-Forwarded-Proto https;\n\
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
+        proxy_set_header X-Real-IP $remote_addr;\n\
+    }}\n\
+}}\n",
+        developer_port = ports.developer_private_port,
+    )
+}
+
+async fn fetch_health(endpoint: &str) -> Result<DeployVerifyHealth, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| format!("build verify client: {e}"))?;
+    let url = format!("{}/health", endpoint.trim_end_matches('/'));
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("call /health: {e}"))?;
+
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unable to read error body".to_string());
+        return Err(format!(
+            "verify health failed with HTTP {}: {}",
+            status, body
+        ));
+    }
+
+    response
+        .json::<DeployVerifyHealth>()
+        .await
+        .map_err(|e| format!("parse /health response: {e}"))
 }
 
 #[derive(Debug, Clone)]
@@ -885,6 +1463,107 @@ mod tests {
             }
         });
         format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn deploy_render_writes_stage_bundle() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        unsafe {
+            env::remove_var("ESM_BINARY");
+            env::remove_var("ESM_VAULT_PATH");
+        }
+
+        init(DeployInitOptions {
+            target: Some(DeployTarget::Stage),
+            profile_name: Some("stage".to_string()),
+            secrets_source: Some(DeploySecretsSource::Env),
+            endpoint_override: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let output_dir = temp.path().join("rendered");
+        let result = render(DeployRenderOptions {
+            profile_name: Some("stage".to_string()),
+            output_dir: Some(output_dir.display().to_string()),
+            host_root: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result["public_hostname"].as_str(),
+            Some("stage.api.enscrive.io")
+        );
+        assert!(output_dir.join("manifest.json").exists());
+        assert!(output_dir.join("config").join("developer.env").exists());
+        assert!(
+            output_dir
+                .join("systemd")
+                .join("enscrive-developer.service")
+                .exists()
+        );
+
+        let developer_env =
+            fs::read_to_string(output_dir.join("config").join("developer.env")).unwrap();
+        assert!(
+            developer_env
+                .contains("PORTAL_OIDC_REDIRECT_URI=https://stage.api.enscrive.io/auth/callback")
+        );
+        assert!(developer_env.contains("DEVELOPER_PORT=13000"));
+    }
+
+    #[tokio::test]
+    async fn deploy_verify_checks_health() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        unsafe {
+            env::remove_var("ESM_BINARY");
+            env::remove_var("ESM_VAULT_PATH");
+        }
+
+        init(DeployInitOptions {
+            target: Some(DeployTarget::Stage),
+            profile_name: Some("stage".to_string()),
+            secrets_source: Some(DeploySecretsSource::Env),
+            endpoint_override: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let endpoint = spawn_json_server(
+            json!({
+                "healthy": true,
+                "degraded": false,
+                "version": "test",
+                "observe": {"healthy": true, "version": "test", "status": "ok"},
+                "embed": {"healthy": true, "version": "test", "status": "ok"},
+                "capabilities": {
+                    "auth": true,
+                    "collections": true,
+                    "ingest": true,
+                    "search": true,
+                    "logs": true
+                }
+            })
+            .to_string(),
+        );
+
+        let result = verify(DeployVerifyOptions {
+            profile_name: Some("stage".to_string()),
+            endpoint_override: Some(endpoint),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["verified"].as_bool(), Some(true));
+        assert_eq!(result["health"]["healthy"].as_bool(), Some(true));
+        assert_eq!(result["matches_target_default"].as_bool(), Some(false));
     }
 
     #[tokio::test]

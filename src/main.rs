@@ -10,8 +10,8 @@ use std::fs;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use deploy::{
-    DeployBootstrapOptions, DeployInitOptions, DeploySecretsSource, DeployStatusOptions,
-    DeployTarget,
+    DeployBootstrapOptions, DeployInitOptions, DeployRenderOptions, DeploySecretsSource,
+    DeployStatusOptions, DeployTarget, DeployVerifyOptions,
 };
 use local::{
     InitMode, ManagedInitOptions, SelfManagedInitOptions, StartOptions, StatusOptions, StopOptions,
@@ -237,6 +237,12 @@ enum DeploySubcommand {
     /// Show the configured deploy profile and current ESM detection status
     Status(DeployStatusArgs),
 
+    /// Render deterministic managed-host artifacts for the selected deploy profile
+    Render(DeployRenderArgs),
+
+    /// Verify the managed endpoint for the selected deploy profile through /health
+    Verify(DeployVerifyArgs),
+
     /// Consume a signed bootstrap bundle and persist returned operator authority
     Bootstrap(DeployBootstrapArgs),
 }
@@ -269,6 +275,32 @@ struct DeployStatusArgs {
     /// Deploy profile name to inspect
     #[arg(long = "profile-name")]
     profile_name: Option<String>,
+}
+
+#[derive(Args)]
+struct DeployRenderArgs {
+    /// Deploy profile name to render
+    #[arg(long = "profile-name")]
+    profile_name: Option<String>,
+
+    /// Output directory for rendered artifacts
+    #[arg(long = "out-dir")]
+    out_dir: Option<String>,
+
+    /// Host root expected on the managed instance
+    #[arg(long = "host-root")]
+    host_root: Option<String>,
+}
+
+#[derive(Args)]
+struct DeployVerifyArgs {
+    /// Deploy profile name to verify
+    #[arg(long = "profile-name")]
+    profile_name: Option<String>,
+
+    /// Temporary endpoint override for verification
+    #[arg(long = "endpoint")]
+    endpoint: Option<String>,
 }
 
 #[derive(Args)]
@@ -1905,6 +1937,35 @@ async fn main() {
                     }
                 }
             }
+            DeploySubcommand::Render(args) => {
+                match deploy::render(DeployRenderOptions {
+                    profile_name: args.profile_name.clone(),
+                    output_dir: args.out_dir.clone(),
+                    host_root: args.host_root.clone(),
+                })
+                .await
+                {
+                    Ok(data) => CliResponse::success("deploy.render", data).emit(fmt),
+                    Err(e) => {
+                        CliResponse::fail("deploy.render", e, FailureClass::Bug, EXIT_FAILURE)
+                            .emit(fmt)
+                    }
+                }
+            }
+            DeploySubcommand::Verify(args) => {
+                match deploy::verify(DeployVerifyOptions {
+                    profile_name: args.profile_name.clone(),
+                    endpoint_override: args.endpoint.clone().or_else(|| cli.endpoint.clone()),
+                })
+                .await
+                {
+                    Ok(data) => CliResponse::success("deploy.verify", data).emit(fmt),
+                    Err(e) => {
+                        CliResponse::fail("deploy.verify", e, FailureClass::Bug, EXIT_FAILURE)
+                            .emit(fmt)
+                    }
+                }
+            }
             DeploySubcommand::Bootstrap(args) => {
                 match deploy::bootstrap(DeployBootstrapOptions {
                     profile_name: args.profile_name.clone(),
@@ -2648,6 +2709,62 @@ mod tests {
                 assert_eq!(profile_name.as_deref(), Some("stage"));
             }
             _ => panic!("expected deploy status"),
+        }
+    }
+
+    #[test]
+    fn parse_deploy_render_command() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "deploy",
+            "render",
+            "--profile-name",
+            "stage",
+            "--out-dir",
+            "./enscrive-deploy/stage",
+            "--host-root",
+            "/opt/enscrive/stage",
+        ]);
+        match args.command {
+            Commands::Deploy {
+                sub:
+                    DeploySubcommand::Render(DeployRenderArgs {
+                        profile_name,
+                        out_dir,
+                        host_root,
+                    }),
+            } => {
+                assert_eq!(profile_name.as_deref(), Some("stage"));
+                assert_eq!(out_dir.as_deref(), Some("./enscrive-deploy/stage"));
+                assert_eq!(host_root.as_deref(), Some("/opt/enscrive/stage"));
+            }
+            _ => panic!("expected deploy render"),
+        }
+    }
+
+    #[test]
+    fn parse_deploy_verify_command() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "deploy",
+            "verify",
+            "--profile-name",
+            "stage",
+            "--endpoint",
+            "https://stage.api.enscrive.io",
+        ]);
+        match args.command {
+            Commands::Deploy {
+                sub:
+                    DeploySubcommand::Verify(DeployVerifyArgs {
+                        profile_name,
+                        endpoint,
+                    }),
+            } => {
+                assert_eq!(profile_name.as_deref(), Some("stage"));
+                assert_eq!(endpoint.as_deref(), Some("https://stage.api.enscrive.io"));
+            }
+            _ => panic!("expected deploy verify"),
         }
     }
 

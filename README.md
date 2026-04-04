@@ -137,7 +137,9 @@ Operator deploy profile commands:
 
 ```bash
 enscrive deploy init --target stage --secrets-source esm --set-default
+enscrive deploy render --profile-name stage
 enscrive deploy status
+enscrive deploy verify --profile-name stage
 enscrive deploy bootstrap
 ```
 
@@ -152,9 +154,35 @@ enscrive deploy bootstrap
 Use `--endpoint` on `deploy init` only when you intentionally want a non-standard
 steady-state operator endpoint for that profile.
 
-`deploy` is the operator-facing path for Enscribe-controlled environments such as
+`deploy` is the operator-facing path for Enscrive-controlled environments such as
 `DEV`, `STAGE`, `US`, `EU`, and `AP`. It is intentionally separate from customer
 `init` so local/self-managed onboarding does not inherit ESM/operator assumptions.
+
+`deploy render` is the first honest STAGE host-delivery step. It generates a
+deterministic managed-host bundle under `./enscrive-deploy/<profile>/` by
+default, including:
+
+- service env files for `enscrive-developer`, `enscrive-observe`, and `enscrive-embed`
+- systemd unit files for the three native services
+- an nginx reverse-proxy config targeting the private developer port
+- a machine-readable `manifest.json`
+- a rendered `README.md` with operator next steps
+
+Example:
+
+```bash
+enscrive deploy render \
+  --profile-name stage \
+  --out-dir ./enscrive-deploy/stage \
+  --host-root /opt/enscrive/stage
+```
+
+`deploy verify` checks the selected managed endpoint through `/health` and fails
+explicitly if the managed stack is unhealthy or degraded:
+
+```bash
+enscrive deploy verify --profile-name stage
+```
 
 Signed bootstrap consume:
 
