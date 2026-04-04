@@ -179,12 +179,51 @@ enscrive deploy render \
   --host-root /opt/enscrive/stage
 ```
 
-`deploy fetch` downloads the current release artifacts directly from a release
-manifest, verifies each artifact checksum, and stages the service binaries plus
-developer site bundle under `./enscrive-artifacts/<profile>/` by default:
+`deploy fetch` now supports two honest artifact sources:
+
+- `manifest`
+  Download the current release artifacts from a hosted release manifest,
+  verify checksums, and stage them under `./enscrive-artifacts/<profile>/`.
+- `local-build`
+  Build or reuse the current local source tree artifacts and stage them into the
+  same `./enscrive-artifacts/<profile>/` layout.
+
+For the current managed operator path, `fetch` defaults to local workspace
+artifact staging for `stage`, `us`, `eu`, and `ap` when no explicit `--source`
+is provided. This keeps `api.enscrive.io` bootstrap and deploy self-contained in
+the CLI without requiring a hosted artifact channel first.
+
+Recommended current STAGE path:
 
 ```bash
 enscrive deploy fetch --profile-name stage
+```
+
+This stages:
+
+- `enscrive`
+- `enscrive-developer`
+- `enscrive-observe`
+- `enscrive-embed`
+- the `enscrive-developer` site bundle
+
+into:
+
+- `./enscrive-artifacts/<profile>/bin`
+- `./enscrive-artifacts/<profile>/site/enscrive-developer`
+
+If the workspace root is not discoverable automatically, make it explicit:
+
+```bash
+enscrive deploy fetch \
+  --profile-name stage \
+  --workspace-root /home/christopher/enscrive-io
+```
+
+Hosted-manifest mode remains available:
+
+```bash
+enscrive deploy fetch --profile-name stage --source manifest --manifest-url <manifest-url>
 ```
 
 Use `--manifest-url` when you want to pin an exact staged release manifest.

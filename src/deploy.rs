@@ -95,6 +95,16 @@ pub struct DeployFetchOptions {
     pub profile_name: Option<String>,
     pub output_dir: Option<String>,
     pub manifest_url: Option<String>,
+    pub source: Option<DeployFetchSource>,
+    pub workspace_root: Option<String>,
+    pub build_local: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeployFetchSource {
+    Manifest,
+    LocalBuild,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -282,6 +292,16 @@ struct ReleaseArtifact {
     sha256: String,
     mode: String,
     size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalBuildArtifacts {
+    workspace_root: PathBuf,
+    cli_binary: PathBuf,
+    developer_binary: PathBuf,
+    observe_binary: PathBuf,
+    embed_binary: PathBuf,
+    developer_site_root: PathBuf,
 }
 
 fn default_legacy_deploy_endpoint() -> String {
@@ -679,20 +699,10 @@ pub async fn verify(opts: DeployVerifyOptions) -> Result<Value, String> {
 pub async fn fetch(opts: DeployFetchOptions) -> Result<Value, String> {
     let profiles = load_deploy_profiles()?;
     let (selected_name, profile) = resolve_selected_profile(&profiles, opts.profile_name)?;
-    let manifest_url = opts
-        .manifest_url
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| default_release_manifest_url(&profile.target).to_string());
     let output_dir = resolve_fetch_output_dir(opts.output_dir.as_deref(), &selected_name)?;
-    let platform = detect_release_platform()?;
-    let manifest = fetch_release_manifest(&manifest_url).await?;
-    let platform_release = manifest.platforms.get(&platform).ok_or_else(|| {
-        format!(
-            "release manifest '{}' does not define platform '{}'",
-            manifest_url, platform
-        )
-    })?;
+    let source = resolve_fetch_source(&profile, opts.source, opts.manifest_url.as_deref());
+    let build_local =
+        opts.build_local || (opts.source.is_none() && source == DeployFetchSource::LocalBuild);
 
     let downloads_dir = output_dir.join("downloads");
     let bin_dir = output_dir.join("bin");
@@ -702,51 +712,123 @@ pub async fn fetch(opts: DeployFetchOptions) -> Result<Value, String> {
     fs::create_dir_all(&bin_dir)
         .map_err(|e| format!("create bin dir '{}': {e}", bin_dir.display()))?;
 
-    let mut downloaded = Vec::new();
-    let mut extracted_site = false;
-    for artifact in &platform_release.artifacts {
-        let downloaded_path = downloads_dir.join(&artifact.name);
-        download_release_artifact(artifact, &downloaded_path).await?;
-        downloaded.push(downloaded_path.display().to_string());
+    match source {
+        DeployFetchSource::Manifest => {
+            let manifest_url = opts
+                .manifest_url
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| default_release_manifest_url(&profile.target).to_string());
+            let platform = detect_release_platform()?;
+            let manifest = fetch_release_manifest(&manifest_url).await?;
+            let platform_release = manifest.platforms.get(&platform).ok_or_else(|| {
+                format!(
+                    "release manifest '{}' does not define platform '{}'",
+                    manifest_url, platform
+                )
+            })?;
 
-        if artifact.name == "enscrive-developer-site.tar.gz" {
-            remove_dir_if_exists(&site_root)?;
-            fs::create_dir_all(&site_root)
-                .map_err(|e| format!("create site root '{}': {e}", site_root.display()))?;
-            extract_tar_gz(&downloaded_path, &site_root)?;
-            extracted_site = true;
-            continue;
+            let mut downloaded = Vec::new();
+            let mut extracted_site = false;
+            for artifact in &platform_release.artifacts {
+                let downloaded_path = downloads_dir.join(&artifact.name);
+                download_release_artifact(artifact, &downloaded_path).await?;
+                downloaded.push(downloaded_path.display().to_string());
+
+                if artifact.name == "enscrive-developer-site.tar.gz" {
+                    remove_dir_if_exists(&site_root)?;
+                    fs::create_dir_all(&site_root)
+                        .map_err(|e| format!("create site root '{}': {e}", site_root.display()))?;
+                    extract_tar_gz(&downloaded_path, &site_root)?;
+                    extracted_site = true;
+                    continue;
+                }
+
+                let installed_path = bin_dir.join(&artifact.name);
+                copy_file(&downloaded_path, &installed_path)?;
+                if artifact.mode != "0644" {
+                    set_executable(&installed_path)?;
+                }
+            }
+
+            if !extracted_site || !site_root.join("pkg").is_dir() {
+                return Err(
+                    "release manifest did not yield an enscrive developer site bundle with pkg/; managed apply requires the site artifact"
+                        .to_string(),
+                );
+            }
+
+            Ok(json!({
+                "profile": selected_name,
+                "target": profile.target,
+                "source": "manifest",
+                "manifest_url": manifest_url,
+                "channel": manifest.channel,
+                "version": manifest.version,
+                "platform": platform,
+                "managed_endpoint_from_manifest": manifest.managed_endpoint,
+                "profile_endpoint": profile_endpoint_state(&profile).effective,
+                "out_dir": output_dir.display().to_string(),
+                "binary_dir": bin_dir.display().to_string(),
+                "site_root": site_root.display().to_string(),
+                "downloaded_artifacts": downloaded,
+                "note": "fetch downloaded and verified release artifacts from a hosted manifest; use the returned binary_dir and site_root with `enscrive deploy apply`"
+            }))
         }
+        DeployFetchSource::LocalBuild => {
+            let platform = detect_release_platform()?;
+            let artifacts = stage_local_build_artifacts(
+                &bin_dir,
+                &site_root,
+                opts.workspace_root.as_deref(),
+                build_local,
+            )?;
 
-        let installed_path = bin_dir.join(&artifact.name);
-        copy_file(&downloaded_path, &installed_path)?;
-        if artifact.mode != "0644" {
-            set_executable(&installed_path)?;
+            Ok(json!({
+                "profile": selected_name,
+                "target": profile.target,
+                "source": "local_build",
+                "platform": platform,
+                "workspace_root": artifacts.workspace_root.display().to_string(),
+                "build_executed": build_local,
+                "profile_endpoint": profile_endpoint_state(&profile).effective,
+                "out_dir": output_dir.display().to_string(),
+                "binary_dir": bin_dir.display().to_string(),
+                "site_root": site_root.display().to_string(),
+                "staged_artifacts": [
+                    artifacts.cli_binary.display().to_string(),
+                    artifacts.developer_binary.display().to_string(),
+                    artifacts.observe_binary.display().to_string(),
+                    artifacts.embed_binary.display().to_string(),
+                    artifacts.developer_site_root.display().to_string()
+                ],
+                "note": "fetch staged locally built Enscrive artifacts into the managed apply layout; use the returned binary_dir and site_root with `enscrive deploy apply`"
+            }))
         }
     }
+}
 
-    if !extracted_site || !site_root.join("pkg").is_dir() {
-        return Err(
-            "release manifest did not yield an enscrive developer site bundle with pkg/; managed apply requires the site artifact"
-                .to_string(),
-        );
+fn resolve_fetch_source(
+    profile: &DeployProfile,
+    explicit: Option<DeployFetchSource>,
+    manifest_url: Option<&str>,
+) -> DeployFetchSource {
+    if let Some(explicit) = explicit {
+        return explicit;
     }
 
-    Ok(json!({
-        "profile": selected_name,
-        "target": profile.target,
-        "manifest_url": manifest_url,
-        "channel": manifest.channel,
-        "version": manifest.version,
-        "platform": platform,
-        "managed_endpoint_from_manifest": manifest.managed_endpoint,
-        "profile_endpoint": profile_endpoint_state(&profile).effective,
-        "out_dir": output_dir.display().to_string(),
-        "binary_dir": bin_dir.display().to_string(),
-        "site_root": site_root.display().to_string(),
-        "downloaded_artifacts": downloaded,
-        "note": "fetch downloads and verifies release artifacts directly from the manifest; use the returned binary_dir and site_root with `enscrive deploy apply`"
-    }))
+    if manifest_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+    {
+        return DeployFetchSource::Manifest;
+    }
+
+    match profile.target.as_str() {
+        "stage" | "us" | "eu" | "ap" => DeployFetchSource::LocalBuild,
+        _ => DeployFetchSource::Manifest,
+    }
 }
 
 pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
@@ -1300,23 +1382,40 @@ async fn fetch_release_manifest(manifest_url: &str) -> Result<ReleaseManifest, S
         .send()
         .await
         .map_err(|e| format!("download manifest '{}': {e}", manifest_url))?;
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string());
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| format!("read manifest body '{}': {e}", manifest_url))?;
 
-    if response.status() != StatusCode::OK {
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "unable to read error body".to_string());
+    if status != StatusCode::OK {
         return Err(format!(
             "fetch manifest failed with HTTP {}: {}",
-            status, body
+            status,
+            summarize_manifest_response(manifest_url, content_type.as_deref(), &body)
         ));
     }
 
-    response
-        .json::<ReleaseManifest>()
-        .await
-        .map_err(|e| format!("parse manifest '{}': {e}", manifest_url))
+    if looks_like_html(content_type.as_deref(), &body) {
+        return Err(format!(
+            "parse manifest '{}': expected JSON release manifest but received HTML; the artifact host may be misconfigured or the stage release channel may not be published yet. Use `--source local-build` for local staging or pass a known-good `--manifest-url`",
+            manifest_url
+        ));
+    }
+
+    serde_json::from_slice::<ReleaseManifest>(&body).map_err(|e| {
+        format!(
+            "parse manifest '{}': {}. Body summary: {}",
+            manifest_url,
+            e,
+            summarize_manifest_response(manifest_url, content_type.as_deref(), &body)
+        )
+    })
 }
 
 fn detect_release_platform() -> Result<String, String> {
@@ -1331,6 +1430,281 @@ fn detect_release_platform() -> Result<String, String> {
         other => return Err(format!("unsupported architecture '{}'", other)),
     };
     Ok(format!("{os}-{arch}"))
+}
+
+fn looks_like_html(content_type: Option<&str>, body: &[u8]) -> bool {
+    if content_type
+        .map(|value| value.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let snippet = String::from_utf8_lossy(body);
+    let trimmed = snippet.trim_start();
+    trimmed.starts_with("<!DOCTYPE html")
+        || trimmed.starts_with("<html")
+        || trimmed.starts_with("<HTML")
+}
+
+fn summarize_manifest_response(
+    _manifest_url: &str,
+    content_type: Option<&str>,
+    body: &[u8],
+) -> String {
+    if looks_like_html(content_type, body) {
+        return format!(
+            "received HTML instead of a JSON manifest{}",
+            content_type
+                .map(|value| format!(" (content-type {})", value))
+                .unwrap_or_default()
+        );
+    }
+
+    let snippet = String::from_utf8_lossy(body);
+    let mut summary = snippet.trim().replace(char::is_control, " ");
+    if summary.len() > 240 {
+        summary.truncate(240);
+        summary.push_str("...");
+    }
+    if summary.is_empty() {
+        "empty response body".to_string()
+    } else {
+        summary
+    }
+}
+
+fn stage_local_build_artifacts(
+    bin_dir: &Path,
+    site_root: &Path,
+    workspace_root_override: Option<&str>,
+    build_local: bool,
+) -> Result<LocalBuildArtifacts, String> {
+    let mut artifacts = resolve_local_build_artifacts(workspace_root_override)?;
+    if build_local {
+        build_local_workspace(&artifacts.workspace_root)?;
+        artifacts = resolve_local_build_artifacts(Some(
+            artifacts
+                .workspace_root
+                .to_str()
+                .ok_or_else(|| "workspace root is not valid UTF-8".to_string())?,
+        ))?;
+    }
+
+    remove_dir_if_exists(bin_dir)?;
+    fs::create_dir_all(bin_dir)
+        .map_err(|e| format!("create local-build bin dir '{}': {e}", bin_dir.display()))?;
+    stage_binary(&artifacts.cli_binary, &bin_dir.join("enscrive"))?;
+    stage_binary(
+        &artifacts.developer_binary,
+        &bin_dir.join("enscrive-developer"),
+    )?;
+    stage_binary(&artifacts.observe_binary, &bin_dir.join("enscrive-observe"))?;
+    stage_binary(&artifacts.embed_binary, &bin_dir.join("enscrive-embed"))?;
+
+    remove_dir_if_exists(site_root)?;
+    copy_dir_recursive(&artifacts.developer_site_root, site_root)?;
+    if !site_root.join("pkg").is_dir() {
+        return Err(format!(
+            "staged site root '{}' is missing pkg/ after copy",
+            site_root.display()
+        ));
+    }
+
+    Ok(artifacts)
+}
+
+fn stage_binary(source: &Path, destination: &Path) -> Result<(), String> {
+    copy_file(source, destination)?;
+    set_executable(destination)
+}
+
+fn resolve_local_build_artifacts(
+    workspace_root_override: Option<&str>,
+) -> Result<LocalBuildArtifacts, String> {
+    let workspace_root = resolve_workspace_root(workspace_root_override)?;
+    let cli_binary = workspace_root
+        .join("enscrive-cli")
+        .join("target")
+        .join("release")
+        .join("enscrive");
+    let developer_binary = workspace_root
+        .join("enscrive-developer")
+        .join("target")
+        .join("release")
+        .join("enscrive-developer");
+    let observe_binary = workspace_root
+        .join("enscrive-observe")
+        .join("target")
+        .join("release")
+        .join("enscrive-observe");
+    let embed_binary = [
+        workspace_root
+            .join("enscrive-embed")
+            .join("embed-svc")
+            .join("target")
+            .join("release")
+            .join("enscrive-embed"),
+        workspace_root
+            .join("enscrive-embed")
+            .join("target")
+            .join("release")
+            .join("enscrive-embed"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+    .unwrap_or_else(|| {
+        workspace_root
+            .join("enscrive-embed")
+            .join("embed-svc")
+            .join("target")
+            .join("release")
+            .join("enscrive-embed")
+    });
+    let developer_site_root = workspace_root
+        .join("enscrive-developer")
+        .join("target")
+        .join("site");
+
+    for (label, path) in [
+        ("enscrive CLI binary", &cli_binary),
+        ("enscrive-developer binary", &developer_binary),
+        ("enscrive-observe binary", &observe_binary),
+        ("enscrive-embed binary", &embed_binary),
+    ] {
+        if !path.is_file() {
+            return Err(format!(
+                "{} not found at '{}'; build local artifacts first or rerun with `--build`",
+                label,
+                path.display()
+            ));
+        }
+    }
+
+    if !developer_site_root.join("pkg").is_dir() {
+        return Err(format!(
+            "enscrive-developer site bundle not found at '{}'; run `cargo leptos build --release` in enscrive-developer or rerun with `--build`",
+            developer_site_root.display()
+        ));
+    }
+
+    Ok(LocalBuildArtifacts {
+        workspace_root,
+        cli_binary,
+        developer_binary,
+        observe_binary,
+        embed_binary,
+        developer_site_root,
+    })
+}
+
+fn resolve_workspace_root(explicit: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(path) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        let root = PathBuf::from(path);
+        ensure_workspace_root(&root)?;
+        return Ok(root);
+    }
+
+    discover_workspace_root().ok_or_else(|| {
+        "unable to discover Enscrive workspace root; pass --workspace-root pointing at the directory containing enscrive-cli, enscrive-developer, enscrive-observe, and enscrive-embed".to_string()
+    })
+}
+
+fn discover_workspace_root() -> Option<PathBuf> {
+    let mut current = env::current_dir().ok()?;
+    loop {
+        if ensure_workspace_root(&current).is_ok() {
+            return Some(current);
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    None
+}
+
+fn ensure_workspace_root(root: &Path) -> Result<(), String> {
+    for child in [
+        root.join("enscrive-cli"),
+        root.join("enscrive-developer"),
+        root.join("enscrive-observe"),
+        root.join("enscrive-embed"),
+    ] {
+        if !child.is_dir() {
+            return Err(format!(
+                "workspace root '{}' is missing '{}'",
+                root.display(),
+                child.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_local_workspace(workspace_root: &Path) -> Result<(), String> {
+    let cli_manifest = workspace_root.join("enscrive-cli").join("Cargo.toml");
+    run_command_in_dir(
+        workspace_root,
+        "build enscrive CLI",
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "--manifest-path",
+            cli_manifest
+                .to_str()
+                .ok_or_else(|| "CLI manifest path is not valid UTF-8".to_string())?,
+            "--bin",
+            "enscrive",
+        ],
+    )?;
+
+    let observe_manifest = workspace_root.join("enscrive-observe").join("Cargo.toml");
+    run_command_in_dir(
+        workspace_root,
+        "build enscrive-observe",
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "--manifest-path",
+            observe_manifest
+                .to_str()
+                .ok_or_else(|| "observe manifest path is not valid UTF-8".to_string())?,
+            "--bin",
+            "enscrive-observe",
+        ],
+    )?;
+
+    let embed_manifest = workspace_root
+        .join("enscrive-embed")
+        .join("embed-svc")
+        .join("Cargo.toml");
+    run_command_in_dir(
+        workspace_root,
+        "build enscrive-embed",
+        "cargo",
+        &[
+            "build",
+            "--release",
+            "--manifest-path",
+            embed_manifest
+                .to_str()
+                .ok_or_else(|| "embed manifest path is not valid UTF-8".to_string())?,
+            "--bin",
+            "enscrive-embed",
+        ],
+    )?;
+
+    let developer_dir = workspace_root.join("enscrive-developer");
+    run_command_in_dir(
+        &developer_dir,
+        "build enscrive-developer and site bundle",
+        "cargo",
+        &["leptos", "build", "--release"],
+    )?;
+
+    Ok(())
 }
 
 async fn download_release_artifact(
@@ -1653,6 +2027,30 @@ fn run_host_command(label: &str, args: &[&str]) -> Result<(), String> {
         .ok_or_else(|| format!("invalid host command '{}'", label))?;
     let output = Command::new(program)
         .args(rest)
+        .output()
+        .map_err(|e| format!("run '{}': {e}", label))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(if detail.is_empty() {
+            format!("'{}' exited with {}", label, output.status)
+        } else {
+            format!("{} (exit {})", detail, output.status)
+        });
+    }
+    Ok(())
+}
+
+fn run_command_in_dir(
+    working_dir: &Path,
+    label: &str,
+    program: &str,
+    args: &[&str],
+) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(working_dir)
         .output()
         .map_err(|e| format!("run '{}': {e}", label))?;
     if !output.status.success() {
@@ -2470,6 +2868,9 @@ mod tests {
             profile_name: Some("stage".to_string()),
             output_dir: Some(output_dir.display().to_string()),
             manifest_url: Some(format!("{manifest_server}/latest.json")),
+            source: Some(DeployFetchSource::Manifest),
+            workspace_root: None,
+            build_local: false,
         })
         .await
         .unwrap();
@@ -2484,6 +2885,188 @@ mod tests {
                 .join("enscrive-developer.css")
                 .exists()
         );
+    }
+
+    #[tokio::test]
+    async fn deploy_fetch_stages_local_build_workspace_artifacts() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        unsafe {
+            env::remove_var("ESM_BINARY");
+            env::remove_var("ESM_VAULT_PATH");
+        }
+
+        init(DeployInitOptions {
+            target: Some(DeployTarget::Stage),
+            profile_name: Some("stage".to_string()),
+            secrets_source: Some(DeploySecretsSource::Env),
+            endpoint_override: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let workspace_root = temp.path().join("workspace");
+        fs::create_dir_all(
+            workspace_root
+                .join("enscrive-cli")
+                .join("target")
+                .join("release"),
+        )
+        .unwrap();
+        fs::create_dir_all(
+            workspace_root
+                .join("enscrive-developer")
+                .join("target")
+                .join("release"),
+        )
+        .unwrap();
+        fs::create_dir_all(
+            workspace_root
+                .join("enscrive-developer")
+                .join("target")
+                .join("site")
+                .join("pkg"),
+        )
+        .unwrap();
+        fs::create_dir_all(
+            workspace_root
+                .join("enscrive-observe")
+                .join("target")
+                .join("release"),
+        )
+        .unwrap();
+        fs::create_dir_all(
+            workspace_root
+                .join("enscrive-embed")
+                .join("embed-svc")
+                .join("target")
+                .join("release"),
+        )
+        .unwrap();
+
+        fs::write(
+            workspace_root
+                .join("enscrive-cli")
+                .join("target")
+                .join("release")
+                .join("enscrive"),
+            "cli",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root
+                .join("enscrive-developer")
+                .join("target")
+                .join("release")
+                .join("enscrive-developer"),
+            "developer",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root
+                .join("enscrive-developer")
+                .join("target")
+                .join("site")
+                .join("pkg")
+                .join("enscrive-developer.css"),
+            "body{}",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root
+                .join("enscrive-observe")
+                .join("target")
+                .join("release")
+                .join("enscrive-observe"),
+            "observe",
+        )
+        .unwrap();
+        fs::write(
+            workspace_root
+                .join("enscrive-embed")
+                .join("embed-svc")
+                .join("target")
+                .join("release")
+                .join("enscrive-embed"),
+            "embed",
+        )
+        .unwrap();
+
+        let output_dir = temp.path().join("local-build-staged");
+        let result = fetch(DeployFetchOptions {
+            profile_name: Some("stage".to_string()),
+            output_dir: Some(output_dir.display().to_string()),
+            manifest_url: None,
+            source: Some(DeployFetchSource::LocalBuild),
+            workspace_root: Some(workspace_root.display().to_string()),
+            build_local: false,
+        })
+        .await
+        .unwrap();
+
+        let workspace_root_str = workspace_root.display().to_string();
+        assert_eq!(result["source"].as_str(), Some("local_build"));
+        assert_eq!(
+            result["workspace_root"].as_str(),
+            Some(workspace_root_str.as_str())
+        );
+        assert!(output_dir.join("bin").join("enscrive").exists());
+        assert!(output_dir.join("bin").join("enscrive-developer").exists());
+        assert!(output_dir.join("bin").join("enscrive-observe").exists());
+        assert!(output_dir.join("bin").join("enscrive-embed").exists());
+        assert!(
+            output_dir
+                .join("site")
+                .join("enscrive-developer")
+                .join("pkg")
+                .join("enscrive-developer.css")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn deploy_fetch_reports_html_manifest_misconfiguration_cleanly() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        unsafe {
+            env::remove_var("ESM_BINARY");
+            env::remove_var("ESM_VAULT_PATH");
+        }
+
+        init(DeployInitOptions {
+            target: Some(DeployTarget::Stage),
+            profile_name: Some("stage".to_string()),
+            secrets_source: Some(DeploySecretsSource::Env),
+            endpoint_override: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let manifest_server = spawn_static_server(HashMap::from([(
+            "/latest.json".into(),
+            (
+                "text/html".into(),
+                b"<!DOCTYPE html><html>wrong</html>".to_vec(),
+            ),
+        )]));
+
+        let error = fetch(DeployFetchOptions {
+            profile_name: Some("stage".to_string()),
+            output_dir: Some(temp.path().join("bad-fetch").display().to_string()),
+            manifest_url: Some(format!("{manifest_server}/latest.json")),
+            source: Some(DeployFetchSource::Manifest),
+            workspace_root: None,
+            build_local: false,
+        })
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("expected JSON release manifest but received HTML"));
+        assert!(error.contains("--source local-build"));
     }
 
     #[tokio::test]

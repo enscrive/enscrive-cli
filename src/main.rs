@@ -10,8 +10,8 @@ use std::fs;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use deploy::{
-    DeployApplyOptions, DeployBootstrapOptions, DeployFetchOptions, DeployInitOptions,
-    DeployRenderOptions, DeploySecretsSource, DeployStatusOptions, DeployTarget,
+    DeployApplyOptions, DeployBootstrapOptions, DeployFetchOptions, DeployFetchSource,
+    DeployInitOptions, DeployRenderOptions, DeploySecretsSource, DeployStatusOptions, DeployTarget,
     DeployVerifyOptions,
 };
 use local::{
@@ -241,7 +241,7 @@ enum DeploySubcommand {
     /// Render deterministic managed-host artifacts for the selected deploy profile
     Render(DeployRenderArgs),
 
-    /// Download and verify managed release artifacts for the selected deploy profile
+    /// Stage managed artifacts for the selected deploy profile from hosted manifest or local source builds
     Fetch(DeployFetchArgs),
 
     /// Install a rendered managed-host bundle onto the local host
@@ -305,13 +305,25 @@ struct DeployFetchArgs {
     #[arg(long = "profile-name")]
     profile_name: Option<String>,
 
-    /// Output directory for downloaded artifacts
+    /// Artifact source: hosted manifest or locally built workspace artifacts
+    #[arg(long, value_enum)]
+    source: Option<DeployFetchSource>,
+
+    /// Output directory for staged artifacts
     #[arg(long = "out-dir")]
     out_dir: Option<String>,
 
     /// Explicit release manifest URL
     #[arg(long = "manifest-url")]
     manifest_url: Option<String>,
+
+    /// Enscrive workspace root for local-build artifact staging
+    #[arg(long = "workspace-root")]
+    workspace_root: Option<String>,
+
+    /// Build local artifacts from source before staging them
+    #[arg(long = "build", default_value_t = false)]
+    build_local: bool,
 }
 
 #[derive(Args)]
@@ -2018,6 +2030,9 @@ async fn main() {
                     profile_name: args.profile_name.clone(),
                     output_dir: args.out_dir.clone(),
                     manifest_url: args.manifest_url.clone(),
+                    source: args.source,
+                    workspace_root: args.workspace_root.clone(),
+                    build_local: args.build_local,
                 })
                 .await
                 {
@@ -2869,6 +2884,11 @@ mod tests {
             "fetch",
             "--profile-name",
             "stage",
+            "--source",
+            "local-build",
+            "--build",
+            "--workspace-root",
+            "/home/christopher/enscrive-io",
             "--out-dir",
             "./enscrive-artifacts/stage",
             "--manifest-url",
@@ -2879,16 +2899,25 @@ mod tests {
                 sub:
                     DeploySubcommand::Fetch(DeployFetchArgs {
                         profile_name,
+                        source,
                         out_dir,
                         manifest_url,
+                        workspace_root,
+                        build_local,
                     }),
             } => {
                 assert_eq!(profile_name.as_deref(), Some("stage"));
+                assert_eq!(source, Some(DeployFetchSource::LocalBuild));
                 assert_eq!(out_dir.as_deref(), Some("./enscrive-artifacts/stage"));
                 assert_eq!(
                     manifest_url.as_deref(),
                     Some("https://stage.enscrive.io/releases/stage/latest.json")
                 );
+                assert_eq!(
+                    workspace_root.as_deref(),
+                    Some("/home/christopher/enscrive-io")
+                );
+                assert!(build_local);
             }
             _ => panic!("expected deploy fetch"),
         }
