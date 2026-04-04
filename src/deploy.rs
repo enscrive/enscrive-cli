@@ -1697,14 +1697,45 @@ fn build_local_workspace(workspace_root: &Path) -> Result<(), String> {
     )?;
 
     let developer_dir = workspace_root.join("enscrive-developer");
-    run_command_in_dir(
-        &developer_dir,
+    run_developer_site_build(&developer_dir)?;
+
+    Ok(())
+}
+
+fn ensure_leptos_server_binary_compat_path(developer_dir: &Path) -> Result<(), String> {
+    let release_dir = developer_dir.join("target").join("release");
+    let source = release_dir.join("enscrive-developer");
+    let destination = release_dir.join("server");
+    if !source.is_file() {
+        return Err(format!(
+            "enscrive-developer server binary not found at '{}'",
+            source.display()
+        ));
+    }
+
+    copy_file(&source, &destination)?;
+    set_executable(&destination)
+}
+
+fn run_developer_site_build(developer_dir: &Path) -> Result<(), String> {
+    match run_command_in_dir(
+        developer_dir,
         "build enscrive-developer and site bundle",
         "cargo",
         &["leptos", "build", "--release"],
-    )?;
-
-    Ok(())
+    ) {
+        Ok(()) => Ok(()),
+        Err(error) if error.contains("target/release/server") => {
+            ensure_leptos_server_binary_compat_path(developer_dir)?;
+            run_command_in_dir(
+                developer_dir,
+                "build enscrive-developer and site bundle",
+                "cargo",
+                &["leptos", "build", "--release"],
+            )
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn download_release_artifact(
@@ -3067,6 +3098,22 @@ mod tests {
 
         assert!(error.contains("expected JSON release manifest but received HTML"));
         assert!(error.contains("--source local-build"));
+    }
+
+    #[test]
+    fn ensure_leptos_server_binary_compat_path_materializes_server_alias() {
+        let temp = TempDir::new().unwrap();
+        let developer_dir = temp.path().join("enscrive-developer");
+        let release_dir = developer_dir.join("target").join("release");
+        fs::create_dir_all(&release_dir).unwrap();
+        let source = release_dir.join("enscrive-developer");
+        fs::write(&source, b"developer-binary").unwrap();
+
+        ensure_leptos_server_binary_compat_path(&developer_dir).unwrap();
+
+        let destination = release_dir.join("server");
+        assert!(destination.is_file());
+        assert_eq!(fs::read(destination).unwrap(), b"developer-binary");
     }
 
     #[tokio::test]
