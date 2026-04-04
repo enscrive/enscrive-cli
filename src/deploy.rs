@@ -4,7 +4,7 @@ use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
@@ -840,23 +840,8 @@ pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
         Path::new(&sources.site_root),
     )?;
 
-    let installed_configs = install_named_files(&[
-        (
-            "developer.env",
-            &render_artifacts.developer_env,
-            &manifest.layout.config_dir,
-        ),
-        (
-            "observe.env",
-            &render_artifacts.observe_env,
-            &manifest.layout.config_dir,
-        ),
-        (
-            "embed.env",
-            &render_artifacts.embed_env,
-            &manifest.layout.config_dir,
-        ),
-    ])?;
+    let installed_configs =
+        install_hydrated_config_files(&manifest.layout.config_dir, &render_artifacts, &profile)?;
 
     let systemd_dir = opts
         .systemd_dir
@@ -1187,6 +1172,8 @@ KEYCLOAK_CLIENT_SECRET=__REQUIRED__\n\
 PORTAL_OIDC_REDIRECT_URI={endpoint}/auth/callback\n\
 HMAC_PEPPER=__REQUIRED__\n\
 AES_KEY=__REQUIRED__\n\
+OPENAI_API_KEY=__OPTIONAL__\n\
+ANTHROPIC_API_KEY=__OPTIONAL__\n\
 OBSERVE_GRPC_ADDR=http://127.0.0.1:{observe_grpc}\n\
 EBA_TRUSTED_PUBLIC_KEY={bootstrap_public_key}\n\
 LEPTOS_SITE_ROOT={site_root}\n\
@@ -2108,6 +2095,149 @@ fn install_named_files(files: &[(&str, &str, &str)]) -> Result<Vec<String>, Stri
     Ok(installed)
 }
 
+fn install_hydrated_config_files(
+    destination_dir: &str,
+    artifacts: &RenderedArtifactPaths,
+    profile: &DeployProfile,
+) -> Result<Vec<String>, String> {
+    let mut installed = Vec::new();
+    for (name, source, required_keys, optional_keys) in [
+        (
+            "developer.env",
+            artifacts.developer_env.as_str(),
+            vec![
+                "DATABASE_URL",
+                "KEYCLOAK_ISSUER",
+                "KEYCLOAK_CLIENT_SECRET",
+                "HMAC_PEPPER",
+                "AES_KEY",
+            ],
+            vec!["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+        ),
+        (
+            "observe.env",
+            artifacts.observe_env.as_str(),
+            vec!["DATABASE_URL", "LAB_SERVICE_SECRET"],
+            Vec::new(),
+        ),
+        (
+            "embed.env",
+            artifacts.embed_env.as_str(),
+            vec!["LAB_SERVICE_SECRET"],
+            vec![
+                "OPENAI_API_KEY",
+                "NEBIUS_API_KEY",
+                "VOYAGE_API_KEY",
+                "BGE_ENDPOINT",
+                "BGE_API_KEY",
+            ],
+        ),
+    ] {
+        let template = fs::read_to_string(source)
+            .map_err(|e| format!("read config template '{}': {e}", source))?;
+        let rendered = hydrate_env_template(&template, profile, &required_keys, &optional_keys)?;
+        let destination = Path::new(destination_dir).join(name);
+        let parent = destination.parent().ok_or_else(|| {
+            format!(
+                "destination '{}' has no parent directory",
+                destination.display()
+            )
+        })?;
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("create destination dir '{}': {e}", parent.display()))?;
+        fs::write(&destination, rendered)
+            .map_err(|e| format!("write hydrated config '{}': {e}", destination.display()))?;
+        installed.push(destination.display().to_string());
+    }
+    Ok(installed)
+}
+
+fn hydrate_env_template(
+    template: &str,
+    profile: &DeployProfile,
+    required_keys: &[&str],
+    optional_keys: &[&str],
+) -> Result<String, String> {
+    let required_values: HashMap<&str, String> = required_keys
+        .iter()
+        .map(|key| {
+            resolve_deploy_secret(profile, key, true).map(|value| {
+                (
+                    *key,
+                    value.expect("required deploy secret resolution returned None"),
+                )
+            })
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
+    let optional_values: HashMap<&str, Option<String>> = optional_keys
+        .iter()
+        .map(|key| resolve_deploy_secret(profile, key, false).map(|value| (*key, value)))
+        .collect::<Result<HashMap<_, _>, _>>()?;
+
+    let mut rendered_lines = Vec::new();
+    for line in template.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            if value == "__REQUIRED__" {
+                let resolved = required_values.get(key).ok_or_else(|| {
+                    format!("no required deploy secret mapping found for '{}'", key)
+                })?;
+                rendered_lines.push(format!("{key}={resolved}"));
+                continue;
+            }
+            if value == "__OPTIONAL__" {
+                if let Some(Some(resolved)) = optional_values.get(key) {
+                    rendered_lines.push(format!("{key}={resolved}"));
+                }
+                continue;
+            }
+        }
+        rendered_lines.push(line.to_string());
+    }
+
+    let mut rendered = rendered_lines.join("\n");
+    rendered.push('\n');
+    Ok(rendered)
+}
+
+fn resolve_deploy_secret(
+    profile: &DeployProfile,
+    key: &str,
+    required: bool,
+) -> Result<Option<String>, String> {
+    let resolved = match profile.secrets_source.as_str() {
+        "esm" => {
+            let esm = profile
+                .esm
+                .as_ref()
+                .ok_or_else(|| format!("deploy profile is missing ESM configuration for '{}'", key))?;
+            load_secret_from_esm_optional(esm, key)?
+        }
+        "env" | "prompt" => env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        other => {
+            return Err(format!(
+                "unsupported deploy secrets source '{}' while resolving '{}'",
+                other, key
+            ));
+        }
+    };
+
+    if required {
+        resolved.ok_or_else(|| {
+            format!(
+                "required deploy secret '{}' not found in {}",
+                key, profile.secrets_source
+            )
+        }).map(Some)
+    } else {
+        Ok(resolved)
+    }
+}
+
 fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
     let parent = destination.parent().ok_or_else(|| {
         format!(
@@ -2392,6 +2522,12 @@ fn ensure_esm_master_key_if_needed() -> Result<(), String> {
 }
 
 fn load_bundle_from_esm(esm: &EsmProfile, secret_key: &str) -> Result<String, String> {
+    load_secret_from_esm_optional(esm, secret_key)?.ok_or_else(|| {
+        format!("ESM secret '{}' resolved to an empty bundle", secret_key)
+    })
+}
+
+fn load_secret_from_esm_optional(esm: &EsmProfile, secret_key: &str) -> Result<Option<String>, String> {
     ensure_esm_master_key_if_needed()?;
 
     let mut cmd = Command::new(&esm.binary);
@@ -2412,6 +2548,9 @@ fn load_bundle_from_esm(esm: &EsmProfile, secret_key: &str) -> Result<String, St
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let detail = if !stderr.is_empty() { stderr } else { stdout };
+        if detail.contains("not found") || detail.contains("No such secret") {
+            return Ok(None);
+        }
         return Err(if detail.is_empty() {
             format!("esm get {} exited with {}", secret_key, output.status)
         } else {
@@ -2419,19 +2558,15 @@ fn load_bundle_from_esm(esm: &EsmProfile, secret_key: &str) -> Result<String, St
         });
     }
 
-    String::from_utf8(output.stdout)
-        .map(|value| value.trim().to_string())
-        .map_err(|e| format!("bootstrap bundle is not valid UTF-8: {e}"))
-        .and_then(|value| {
-            if value.is_empty() {
-                Err(format!(
-                    "ESM secret '{}' resolved to an empty bundle",
-                    secret_key
-                ))
-            } else {
-                Ok(value)
-            }
-        })
+    let value = String::from_utf8(output.stdout)
+        .map_err(|e| format!("ESM secret '{}' is not valid UTF-8: {e}", secret_key))?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(value))
+    }
 }
 
 async fn consume_signed_bootstrap(
@@ -2601,6 +2736,29 @@ mod tests {
     fn set_xdg(temp: &TempDir) {
         unsafe {
             env::set_var("XDG_CONFIG_HOME", temp.path().join("config"));
+        }
+    }
+
+    fn set_required_deploy_env() {
+        unsafe {
+            env::set_var(
+                "DATABASE_URL",
+                "postgresql://enscrive:secret@db.example.com/enscrive",
+            );
+            env::set_var("KEYCLOAK_ISSUER", "https://auth.example.com/realms/enscrive");
+            env::set_var("KEYCLOAK_CLIENT_SECRET", "stage-keycloak-client-secret");
+            env::set_var(
+                "HMAC_PEPPER",
+                "stage-hmac-pepper-0123456789abcdef0123456789",
+            );
+            env::set_var(
+                "AES_KEY",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            );
+            env::set_var(
+                "LAB_SERVICE_SECRET",
+                "stage-lab-service-secret-0123456789abcdef",
+            );
         }
     }
 
@@ -2832,6 +2990,7 @@ mod tests {
         let _guard = crate::test_support::lock_env();
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
+        set_required_deploy_env();
         unsafe {
             env::remove_var("ESM_BINARY");
             env::remove_var("ESM_VAULT_PATH");
@@ -2908,6 +3067,7 @@ mod tests {
         let _guard = crate::test_support::lock_env();
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
+        set_required_deploy_env();
         unsafe {
             env::remove_var("ESM_BINARY");
             env::remove_var("ESM_VAULT_PATH");
