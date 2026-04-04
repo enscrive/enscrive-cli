@@ -243,6 +243,10 @@ struct DeployInitArgs {
     #[arg(long, value_enum)]
     target: Option<DeployTarget>,
 
+    /// Managed API endpoint for this operator profile
+    #[arg(long)]
+    endpoint: Option<String>,
+
     /// Deploy profile name to create or update
     #[arg(long = "profile-name")]
     profile_name: Option<String>,
@@ -269,7 +273,7 @@ struct DeployBootstrapArgs {
     #[arg(long = "profile-name")]
     profile_name: Option<String>,
 
-    /// Local stack endpoint hosting /bootstrap/consume
+    /// Bootstrap endpoint hosting /bootstrap/consume; use this for first bring-up or private access
     #[arg(long)]
     endpoint: Option<String>,
 
@@ -1871,6 +1875,7 @@ async fn main() {
             DeploySubcommand::Init(args) => {
                 match deploy::init(DeployInitOptions {
                     target: args.target,
+                    endpoint_override: args.endpoint.clone(),
                     profile_name: args.profile_name.clone(),
                     secrets_source: args.secrets_source,
                     set_default: args.set_default,
@@ -2579,6 +2584,8 @@ mod tests {
             "init",
             "--target",
             "stage",
+            "--endpoint",
+            "https://stage.api.enscrive.io",
             "--secrets-source",
             "esm",
             "--set-default",
@@ -2588,12 +2595,14 @@ mod tests {
                 sub:
                     DeploySubcommand::Init(DeployInitArgs {
                         target,
+                        endpoint,
                         secrets_source,
                         set_default,
                         ..
                     }),
             } => {
                 assert_eq!(target, Some(DeployTarget::Stage));
+                assert_eq!(endpoint.as_deref(), Some("https://stage.api.enscrive.io"));
                 assert_eq!(secrets_source, Some(DeploySecretsSource::Esm));
                 assert!(set_default);
             }

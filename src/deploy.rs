@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const DEPLOY_PROFILE_VERSION: u32 = 2;
-const DEFAULT_DEPLOY_ENDPOINT: &str = "http://127.0.0.1:3000";
+const LEGACY_LOCAL_DEPLOY_ENDPOINT: &str = "http://127.0.0.1:3000";
 const DEFAULT_BOOTSTRAP_BUNDLE_SECRET_KEY: &str = "ENSCRIVE_BOOTSTRAP_BUNDLE";
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +36,7 @@ pub struct DeployInitOptions {
     pub target: Option<DeployTarget>,
     pub profile_name: Option<String>,
     pub secrets_source: Option<DeploySecretsSource>,
+    pub endpoint_override: Option<String>,
     pub set_default: bool,
 }
 
@@ -66,7 +67,7 @@ struct DeployProfile {
     target: String,
     aws_region: String,
     secrets_source: String,
-    #[serde(default = "default_deploy_endpoint")]
+    #[serde(default = "default_legacy_deploy_endpoint")]
     endpoint: String,
     esm: Option<EsmProfile>,
     bootstrap: Option<DeployBootstrapState>,
@@ -132,8 +133,8 @@ struct SignedBootstrapConsumeResponse {
     stack_id: String,
 }
 
-fn default_deploy_endpoint() -> String {
-    DEFAULT_DEPLOY_ENDPOINT.to_string()
+fn default_legacy_deploy_endpoint() -> String {
+    LEGACY_LOCAL_DEPLOY_ENDPOINT.to_string()
 }
 
 pub async fn init(opts: DeployInitOptions) -> Result<Value, String> {
@@ -145,6 +146,11 @@ pub async fn init(opts: DeployInitOptions) -> Result<Value, String> {
     let profile_name = opts
         .profile_name
         .unwrap_or_else(|| deploy_target_name(target).to_string());
+    let configured_endpoint = opts
+        .endpoint_override
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default_managed_endpoint(target).to_string());
     let detected_esm = discover_esm();
     let secrets_source = resolve_secrets_source(opts.secrets_source, detected_esm.as_ref())?;
 
@@ -181,7 +187,7 @@ pub async fn init(opts: DeployInitOptions) -> Result<Value, String> {
         target: deploy_target_name(target).to_string(),
         aws_region: deploy_target_region(target).to_string(),
         secrets_source: deploy_secrets_source_name(secrets_source).to_string(),
-        endpoint: DEFAULT_DEPLOY_ENDPOINT.to_string(),
+        endpoint: configured_endpoint.clone(),
         esm,
         bootstrap: None,
     };
@@ -200,6 +206,7 @@ pub async fn init(opts: DeployInitOptions) -> Result<Value, String> {
         "target": profile.target,
         "aws_region": profile.aws_region,
         "secrets_source": profile.secrets_source,
+        "endpoint": configured_endpoint,
         "default_profile": profiles.default_profile,
         "esm": profile.esm,
         "note": "deploy profiles are operator-facing and separate from customer init/self-managed profiles"
@@ -210,13 +217,16 @@ pub async fn status(opts: DeployStatusOptions) -> Result<Value, String> {
     let profiles = load_deploy_profiles()?;
     let (selected_name, profile) = resolve_selected_profile(&profiles, opts.profile_name)?;
     let detected_esm = discover_esm();
+    let endpoint_state = profile_endpoint_state(&profile);
 
     Ok(json!({
         "profile": selected_name,
         "target": profile.target,
         "aws_region": profile.aws_region,
         "secrets_source": profile.secrets_source,
-        "endpoint": profile.endpoint,
+        "endpoint": endpoint_state.effective,
+        "stored_endpoint": endpoint_state.stored,
+        "endpoint_origin": endpoint_state.origin,
         "esm_configured": profile.esm,
         "esm_detected_now": detected_esm,
         "esm_master_key_present": env::var("ESM_MASTER_KEY").ok().map(|value| !value.trim().is_empty()).unwrap_or(false),
@@ -241,18 +251,18 @@ pub async fn status(opts: DeployStatusOptions) -> Result<Value, String> {
 pub async fn bootstrap(opts: DeployBootstrapOptions) -> Result<Value, String> {
     let mut profiles = load_deploy_profiles()?;
     let (selected_name, mut profile) = resolve_selected_profile(&profiles, opts.profile_name)?;
+    let endpoint_state = profile_endpoint_state(&profile);
+    let endpoint_override_used = opts
+        .endpoint_override
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
 
-    let endpoint = opts
+    let request_endpoint = opts
         .endpoint_override
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            if profile.endpoint.trim().is_empty() {
-                DEFAULT_DEPLOY_ENDPOINT.to_string()
-            } else {
-                profile.endpoint.clone()
-            }
-        });
+        .unwrap_or_else(|| endpoint_state.effective.clone());
 
     let (bundle_toml, bundle_source) = resolve_bootstrap_bundle(
         &profile,
@@ -260,10 +270,16 @@ pub async fn bootstrap(opts: DeployBootstrapOptions) -> Result<Value, String> {
         opts.bundle_secret_key.as_deref(),
     )?;
 
-    let response = consume_signed_bootstrap(&endpoint, &bundle_toml).await?;
+    let response = consume_signed_bootstrap(&request_endpoint, &bundle_toml).await?;
     let bootstrapped_at = chrono::Utc::now().to_rfc3339();
 
-    profile.endpoint = endpoint.clone();
+    let persist_endpoint = if endpoint_override_used {
+        endpoint_state.effective.clone()
+    } else {
+        request_endpoint.clone()
+    };
+
+    profile.endpoint = persist_endpoint.clone();
     profile.bootstrap = Some(DeployBootstrapState {
         tenant_id: response.tenant_id.clone(),
         tenant_name: response.tenant_name.clone(),
@@ -290,7 +306,9 @@ pub async fn bootstrap(opts: DeployBootstrapOptions) -> Result<Value, String> {
         "profile": selected_name,
         "target": profile.target,
         "aws_region": profile.aws_region,
-        "endpoint": endpoint,
+        "endpoint": request_endpoint,
+        "stored_endpoint": persist_endpoint,
+        "endpoint_override_used": endpoint_override_used,
         "bundle_source": bundle_source,
         "tenant_id": response.tenant_id,
         "tenant_name": response.tenant_name,
@@ -385,6 +403,64 @@ fn deploy_target_region(target: DeployTarget) -> &'static str {
         DeployTarget::Dev | DeployTarget::Stage | DeployTarget::Us => "us-east-2",
         DeployTarget::Eu => "eu-central-1",
         DeployTarget::Ap => "ap-southeast-1",
+    }
+}
+
+fn default_managed_endpoint(target: DeployTarget) -> &'static str {
+    match target {
+        DeployTarget::Dev => "https://dev.api.enscrive.io",
+        DeployTarget::Stage => "https://stage.api.enscrive.io",
+        DeployTarget::Us => "https://us.api.enscrive.io",
+        DeployTarget::Eu => "https://eu.api.enscrive.io",
+        DeployTarget::Ap => "https://ap.api.enscrive.io",
+    }
+}
+
+fn default_managed_endpoint_for_target_name(target: &str) -> Option<&'static str> {
+    match target.trim().to_ascii_lowercase().as_str() {
+        "dev" => Some(default_managed_endpoint(DeployTarget::Dev)),
+        "stage" => Some(default_managed_endpoint(DeployTarget::Stage)),
+        "us" => Some(default_managed_endpoint(DeployTarget::Us)),
+        "eu" => Some(default_managed_endpoint(DeployTarget::Eu)),
+        "ap" => Some(default_managed_endpoint(DeployTarget::Ap)),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ProfileEndpointState {
+    stored: String,
+    effective: String,
+    origin: &'static str,
+}
+
+fn profile_endpoint_state(profile: &DeployProfile) -> ProfileEndpointState {
+    let stored = profile.endpoint.trim().to_string();
+
+    if stored.is_empty() {
+        let fallback = default_managed_endpoint_for_target_name(&profile.target)
+            .unwrap_or(LEGACY_LOCAL_DEPLOY_ENDPOINT);
+        return ProfileEndpointState {
+            stored,
+            effective: fallback.to_string(),
+            origin: "target_default",
+        };
+    }
+
+    if stored == LEGACY_LOCAL_DEPLOY_ENDPOINT {
+        if let Some(fallback) = default_managed_endpoint_for_target_name(&profile.target) {
+            return ProfileEndpointState {
+                stored,
+                effective: fallback.to_string(),
+                origin: "target_default_from_legacy_local",
+            };
+        }
+    }
+
+    ProfileEndpointState {
+        stored: stored.clone(),
+        effective: stored,
+        origin: "profile",
     }
 }
 
@@ -753,6 +829,7 @@ mod tests {
             target: Some(DeployTarget::Stage),
             profile_name: Some("stage".to_string()),
             secrets_source: Some(DeploySecretsSource::Env),
+            endpoint_override: None,
             set_default: true,
         })
         .await
@@ -762,6 +839,10 @@ mod tests {
         assert_eq!(result["target"].as_str(), Some("stage"));
         assert_eq!(result["aws_region"].as_str(), Some("us-east-2"));
         assert_eq!(result["secrets_source"].as_str(), Some("env"));
+        assert_eq!(
+            result["endpoint"].as_str(),
+            Some("https://stage.api.enscrive.io")
+        );
 
         let profiles = load_deploy_profiles().unwrap();
         assert_eq!(profiles.default_profile.as_deref(), Some("stage"));
@@ -777,7 +858,7 @@ mod tests {
                 .profiles
                 .get("stage")
                 .map(|profile| profile.endpoint.as_str()),
-            Some(DEFAULT_DEPLOY_ENDPOINT)
+            Some("https://stage.api.enscrive.io")
         );
     }
 
@@ -820,6 +901,7 @@ mod tests {
             target: Some(DeployTarget::Stage),
             profile_name: Some("stage".to_string()),
             secrets_source: Some(DeploySecretsSource::Env),
+            endpoint_override: None,
             set_default: true,
         })
         .await
@@ -870,5 +952,22 @@ mod tests {
         assert_eq!(bootstrap.stack_id, "us-east-2-0");
         assert_eq!(bootstrap.operator_key_id.as_deref(), Some("opk-1"));
         assert_eq!(bootstrap.operator_api_key.as_deref(), Some("ens_op_456"));
+        assert_eq!(profile.endpoint, "https://stage.api.enscrive.io");
+    }
+
+    #[test]
+    fn profile_endpoint_state_upgrades_legacy_local_to_target_default() {
+        let state = profile_endpoint_state(&DeployProfile {
+            target: "stage".to_string(),
+            aws_region: "us-east-2".to_string(),
+            secrets_source: "esm".to_string(),
+            endpoint: LEGACY_LOCAL_DEPLOY_ENDPOINT.to_string(),
+            esm: None,
+            bootstrap: None,
+        });
+
+        assert_eq!(state.effective, "https://stage.api.enscrive.io");
+        assert_eq!(state.origin, "target_default_from_legacy_local");
+        assert_eq!(state.stored, LEGACY_LOCAL_DEPLOY_ENDPOINT);
     }
 }

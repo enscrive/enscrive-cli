@@ -136,6 +136,17 @@ enscrive deploy status
 enscrive deploy bootstrap
 ```
 
+`deploy init` now defaults managed operator profiles to their public endpoints:
+
+- `dev` -> `https://dev.api.enscrive.io`
+- `stage` -> `https://stage.api.enscrive.io`
+- `us` -> `https://us.api.enscrive.io`
+- `eu` -> `https://eu.api.enscrive.io`
+- `ap` -> `https://ap.api.enscrive.io`
+
+Use `--endpoint` on `deploy init` only when you intentionally want a non-standard
+steady-state operator endpoint for that profile.
+
 `deploy` is the operator-facing path for Enscribe-controlled environments such as
 `DEV`, `STAGE`, `US`, `EU`, and `AP`. It is intentionally separate from customer
 `init` so local/self-managed onboarding does not inherit ESM/operator assumptions.
@@ -147,6 +158,12 @@ enscrive deploy bootstrap \
   --profile-name stage \
   --bundle-secret-key ENSCRIVE_BOOTSTRAP_BUNDLE
 ```
+
+For a fresh STAGE bring-up, use `--endpoint` on `deploy bootstrap` only as a
+temporary bootstrap override, for example when talking to a private IP, SSH
+tunnel, or first-boot local listener before `stage.api.enscrive.io` is serving
+traffic. The override is not treated as the steady-state managed endpoint for
+the profile.
 
 For ESM-backed operator profiles, `deploy bootstrap` now tries `esm get --raw`
 for the signed bundle first, then falls back to `<vault-workdir>/bootstrap.bundle.toml`
