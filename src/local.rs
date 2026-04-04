@@ -46,6 +46,7 @@ pub struct ManagedInitOptions {
 pub struct SelfManagedInitOptions {
     pub profile_name: Option<String>,
     pub with_grafana: bool,
+    pub developer_port: Option<u16>,
     pub developer_bin: Option<String>,
     pub observe_bin: Option<String>,
     pub embed_bin: Option<String>,
@@ -542,7 +543,7 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
     prepare_local_data_dirs(&data_dir)?;
 
     let ports = LocalPorts {
-        developer: 3000,
+        developer: opts.developer_port.unwrap_or(3000),
         observe_rest: 8084,
         observe_grpc: 9090,
         embed_rest: 8081,
@@ -2597,6 +2598,7 @@ mod tests {
         init_self_managed(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
+            developer_port: None,
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
@@ -2637,6 +2639,7 @@ mod tests {
         let result = init_self_managed(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
+            developer_port: None,
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
@@ -2693,6 +2696,7 @@ mod tests {
         init_self_managed(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
+            developer_port: None,
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
@@ -2732,6 +2736,7 @@ mod tests {
         init_self_managed(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
+            developer_port: None,
             developer_bin: Some("/tmp/enscrive-developer-v2".to_string()),
             observe_bin: Some("/tmp/enscrive-observe-v2".to_string()),
             embed_bin: Some("/tmp/enscrive-embed-v2".to_string()),
@@ -2779,6 +2784,53 @@ mod tests {
         assert!(local.providers.embedding.openai);
         assert!(local.providers.embedding.bge);
         assert!(local.providers.llm_inference.openai);
+    }
+
+    #[tokio::test]
+    async fn init_self_managed_accepts_custom_developer_port() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+
+        let result = init_self_managed(SelfManagedInitOptions {
+            profile_name: Some("custom".to_string()),
+            with_grafana: false,
+            developer_port: Some(36300),
+            developer_bin: Some("/tmp/enscrive-developer".to_string()),
+            observe_bin: Some("/tmp/enscrive-observe".to_string()),
+            embed_bin: Some("/tmp/enscrive-embed".to_string()),
+            openai_api_key: Some("sk-test".to_string()),
+            anthropic_api_key: None,
+            voyage_api_key: None,
+            nebius_api_key: None,
+            bge_endpoint: None,
+            bge_api_key: None,
+            bge_model_name: None,
+            set_default: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["endpoint"].as_str(), Some("http://127.0.0.1:36300"));
+
+        let profiles = load_profiles().unwrap();
+        let local = profiles
+            .profiles
+            .get("custom")
+            .and_then(|profile| profile.local.as_ref())
+            .unwrap();
+        assert_eq!(local.ports.developer, 36300);
+
+        let config_dir = cli_home()
+            .unwrap()
+            .config_root
+            .join("profiles")
+            .join("custom");
+        let developer_env = fs::read_to_string(config_dir.join("developer.env")).unwrap();
+        assert!(developer_env.contains("DEVELOPER_PORT=36300"));
+        assert!(developer_env.contains(
+            "PORTAL_OIDC_REDIRECT_URI=http://127.0.0.1:36300/auth/callback"
+        ));
     }
 
     #[test]

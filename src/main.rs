@@ -167,6 +167,10 @@ struct InitArgs {
     #[arg(long, default_value_t = false)]
     with_grafana: bool,
 
+    /// Local port for enscrive-developer in self-managed mode
+    #[arg(long = "developer-port")]
+    developer_port: Option<u16>,
+
     /// Path to enscrive-developer binary for self-managed mode
     #[arg(long = "developer-bin")]
     developer_bin: Option<String>,
@@ -1825,6 +1829,7 @@ async fn main() {
                     local::init_self_managed(SelfManagedInitOptions {
                         profile_name: args.profile_name.clone(),
                         with_grafana: args.with_grafana,
+                        developer_port: args.developer_port,
                         developer_bin: args.developer_bin.clone(),
                         observe_bin: args.observe_bin.clone(),
                         embed_bin: args.embed_bin.clone(),
@@ -2607,6 +2612,29 @@ mod tests {
                 assert!(set_default);
             }
             _ => panic!("expected deploy init"),
+        }
+    }
+
+    #[test]
+    fn parse_self_managed_init_with_custom_developer_port() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "init",
+            "--mode",
+            "self-managed",
+            "--developer-port",
+            "36300",
+        ]);
+        match args.command {
+            Commands::Init(InitArgs {
+                mode,
+                developer_port,
+                ..
+            }) => {
+                assert!(matches!(mode, Some(InitMode::SelfManaged)));
+                assert_eq!(developer_port, Some(36300));
+            }
+            _ => panic!("expected init"),
         }
     }
 

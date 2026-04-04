@@ -86,11 +86,16 @@ Self-managed profile:
 
 ```bash
 enscrive init --mode self-managed \
+  --developer-port 36300 \
   --openai-api-key sk-... \
   --nebius-api-key neb-... \
   --bge-endpoint http://192.168.68.135:8088 \
   --set-default
 ```
+
+`--developer-port` is optional. If omitted, local self-managed mode still uses
+`3000` today for compatibility, but the CLI now owns that choice explicitly so
+developers do not have to compete for `3000` if their machine already uses it.
 
 Self-managed init now treats providers as two separate capability groups:
 
