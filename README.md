@@ -137,6 +137,7 @@ Operator deploy profile commands:
 
 ```bash
 enscrive deploy init --target stage --secrets-source esm --set-default
+enscrive deploy fetch --profile-name stage
 enscrive deploy render --profile-name stage
 enscrive deploy apply --profile-name stage
 enscrive deploy status
@@ -178,6 +179,16 @@ enscrive deploy render \
   --host-root /opt/enscrive/stage
 ```
 
+`deploy fetch` downloads the current release artifacts directly from a release
+manifest, verifies each artifact checksum, and stages the service binaries plus
+developer site bundle under `./enscrive-artifacts/<profile>/` by default:
+
+```bash
+enscrive deploy fetch --profile-name stage
+```
+
+Use `--manifest-url` when you want to pin an exact staged release manifest.
+
 `deploy verify` checks the selected managed endpoint through `/health` and fails
 explicitly if the managed stack is unhealthy or degraded:
 
@@ -202,8 +213,8 @@ Example:
 enscrive deploy apply \
   --profile-name stage \
   --render-dir ./enscrive-deploy/stage \
-  --binary-dir ~/.local/bin \
-  --site-root ~/.local/share/enscrive/site/enscrive-developer \
+  --binary-dir ./enscrive-artifacts/stage/bin \
+  --site-root ./enscrive-artifacts/stage/site/enscrive-developer \
   --reload-systemd \
   --start-services \
   --reload-nginx

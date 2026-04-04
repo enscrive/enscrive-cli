@@ -1,7 +1,9 @@
 use clap::ValueEnum;
+use flate2::read::GzDecoder;
 use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
@@ -10,6 +12,7 @@ use std::io::{self, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tar::Archive;
 
 const DEPLOY_PROFILE_VERSION: u32 = 2;
 const LEGACY_LOCAL_DEPLOY_ENDPOINT: &str = "http://127.0.0.1:3000";
@@ -85,6 +88,13 @@ pub struct DeployApplyOptions {
     pub reload_systemd: bool,
     pub start_services: bool,
     pub reload_nginx: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeployFetchOptions {
+    pub profile_name: Option<String>,
+    pub output_dir: Option<String>,
+    pub manifest_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -249,6 +259,29 @@ struct DeployVerifyCapabilities {
 struct DeployApplySources {
     binary_dir: String,
     site_root: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReleaseManifest {
+    channel: String,
+    version: String,
+    install_endpoint: String,
+    managed_endpoint: String,
+    platforms: BTreeMap<String, ReleasePlatform>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReleasePlatform {
+    artifacts: Vec<ReleaseArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReleaseArtifact {
+    name: String,
+    url: String,
+    sha256: String,
+    mode: String,
+    size_bytes: Option<u64>,
 }
 
 fn default_legacy_deploy_endpoint() -> String {
@@ -643,13 +676,90 @@ pub async fn verify(opts: DeployVerifyOptions) -> Result<Value, String> {
     }))
 }
 
+pub async fn fetch(opts: DeployFetchOptions) -> Result<Value, String> {
+    let profiles = load_deploy_profiles()?;
+    let (selected_name, profile) = resolve_selected_profile(&profiles, opts.profile_name)?;
+    let manifest_url = opts
+        .manifest_url
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default_release_manifest_url(&profile.target).to_string());
+    let output_dir = resolve_fetch_output_dir(opts.output_dir.as_deref(), &selected_name)?;
+    let platform = detect_release_platform()?;
+    let manifest = fetch_release_manifest(&manifest_url).await?;
+    let platform_release = manifest.platforms.get(&platform).ok_or_else(|| {
+        format!(
+            "release manifest '{}' does not define platform '{}'",
+            manifest_url, platform
+        )
+    })?;
+
+    let downloads_dir = output_dir.join("downloads");
+    let bin_dir = output_dir.join("bin");
+    let site_root = output_dir.join("site").join("enscrive-developer");
+    fs::create_dir_all(&downloads_dir)
+        .map_err(|e| format!("create downloads dir '{}': {e}", downloads_dir.display()))?;
+    fs::create_dir_all(&bin_dir)
+        .map_err(|e| format!("create bin dir '{}': {e}", bin_dir.display()))?;
+
+    let mut downloaded = Vec::new();
+    let mut extracted_site = false;
+    for artifact in &platform_release.artifacts {
+        let downloaded_path = downloads_dir.join(&artifact.name);
+        download_release_artifact(artifact, &downloaded_path).await?;
+        downloaded.push(downloaded_path.display().to_string());
+
+        if artifact.name == "enscrive-developer-site.tar.gz" {
+            remove_dir_if_exists(&site_root)?;
+            fs::create_dir_all(&site_root)
+                .map_err(|e| format!("create site root '{}': {e}", site_root.display()))?;
+            extract_tar_gz(&downloaded_path, &site_root)?;
+            extracted_site = true;
+            continue;
+        }
+
+        let installed_path = bin_dir.join(&artifact.name);
+        copy_file(&downloaded_path, &installed_path)?;
+        if artifact.mode != "0644" {
+            set_executable(&installed_path)?;
+        }
+    }
+
+    if !extracted_site || !site_root.join("pkg").is_dir() {
+        return Err(
+            "release manifest did not yield an enscrive developer site bundle with pkg/; managed apply requires the site artifact"
+                .to_string(),
+        );
+    }
+
+    Ok(json!({
+        "profile": selected_name,
+        "target": profile.target,
+        "manifest_url": manifest_url,
+        "channel": manifest.channel,
+        "version": manifest.version,
+        "platform": platform,
+        "managed_endpoint_from_manifest": manifest.managed_endpoint,
+        "profile_endpoint": profile_endpoint_state(&profile).effective,
+        "out_dir": output_dir.display().to_string(),
+        "binary_dir": bin_dir.display().to_string(),
+        "site_root": site_root.display().to_string(),
+        "downloaded_artifacts": downloaded,
+        "note": "fetch downloads and verifies release artifacts directly from the manifest; use the returned binary_dir and site_root with `enscrive deploy apply`"
+    }))
+}
+
 pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
     let profiles = load_deploy_profiles()?;
     let (selected_name, profile) = resolve_selected_profile(&profiles, opts.profile_name)?;
     let render_dir = resolve_render_output_dir(opts.render_dir.as_deref(), &selected_name)?;
     let manifest_path = render_dir.join("manifest.json");
     let manifest = load_render_manifest(&manifest_path)?;
-    let sources = resolve_apply_sources(opts.binary_dir.as_deref(), opts.site_root.as_deref())?;
+    let sources = resolve_apply_sources(
+        &selected_name,
+        opts.binary_dir.as_deref(),
+        opts.site_root.as_deref(),
+    )?;
 
     ensure_render_artifacts_exist(&manifest)?;
     fs::create_dir_all(&manifest.layout.host_root)
@@ -876,6 +986,24 @@ fn default_managed_endpoint_for_target_name(target: &str) -> Option<&'static str
         "ap" => Some(default_managed_endpoint(DeployTarget::Ap)),
         _ => None,
     }
+}
+
+fn default_release_manifest_url(target: &str) -> &'static str {
+    match target.trim().to_ascii_lowercase().as_str() {
+        "dev" => "https://dev.enscrive.io/releases/dev/latest.json",
+        "stage" => "https://stage.enscrive.io/releases/stage/latest.json",
+        "us" | "eu" | "ap" => "https://enscrive.io/releases/prod/latest.json",
+        _ => "https://enscrive.io/releases/prod/latest.json",
+    }
+}
+
+fn resolve_fetch_output_dir(explicit: Option<&str>, profile_name: &str) -> Result<PathBuf, String> {
+    if let Some(path) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+
+    let cwd = env::current_dir().map_err(|e| format!("resolve current dir: {e}"))?;
+    Ok(cwd.join("enscrive-artifacts").join(profile_name))
 }
 
 fn resolve_render_output_dir(
@@ -1162,6 +1290,110 @@ async fn fetch_health(endpoint: &str) -> Result<DeployVerifyHealth, String> {
         .map_err(|e| format!("parse /health response: {e}"))
 }
 
+async fn fetch_release_manifest(manifest_url: &str) -> Result<ReleaseManifest, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("build fetch client: {e}"))?;
+    let response = client
+        .get(manifest_url)
+        .send()
+        .await
+        .map_err(|e| format!("download manifest '{}': {e}", manifest_url))?;
+
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unable to read error body".to_string());
+        return Err(format!(
+            "fetch manifest failed with HTTP {}: {}",
+            status, body
+        ));
+    }
+
+    response
+        .json::<ReleaseManifest>()
+        .await
+        .map_err(|e| format!("parse manifest '{}': {e}", manifest_url))
+}
+
+fn detect_release_platform() -> Result<String, String> {
+    let os = match env::consts::OS {
+        "linux" => "linux",
+        "macos" => "darwin",
+        other => return Err(format!("unsupported operating system '{}'", other)),
+    };
+    let arch = match env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => return Err(format!("unsupported architecture '{}'", other)),
+    };
+    Ok(format!("{os}-{arch}"))
+}
+
+async fn download_release_artifact(
+    artifact: &ReleaseArtifact,
+    destination: &Path,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("build download client: {e}"))?;
+    let response = client
+        .get(&artifact.url)
+        .send()
+        .await
+        .map_err(|e| format!("download artifact '{}': {e}", artifact.url))?;
+
+    if response.status() != StatusCode::OK {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unable to read error body".to_string());
+        return Err(format!(
+            "download artifact '{}' failed with HTTP {}: {}",
+            artifact.url, status, body
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("read artifact '{}': {e}", artifact.url))?;
+    let actual_sha = format!("{:x}", Sha256::digest(&bytes));
+    if actual_sha != artifact.sha256.to_ascii_lowercase() {
+        return Err(format!(
+            "sha256 mismatch for '{}': expected {}, got {}",
+            artifact.name, artifact.sha256, actual_sha
+        ));
+    }
+
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "destination '{}' has no parent directory",
+            destination.display()
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|e| format!("create destination dir '{}': {e}", parent.display()))?;
+    fs::write(destination, &bytes)
+        .map_err(|e| format!("write artifact '{}': {e}", destination.display()))?;
+    Ok(())
+}
+
+fn extract_tar_gz(archive_path: &Path, destination: &Path) -> Result<(), String> {
+    let file = fs::File::open(archive_path)
+        .map_err(|e| format!("open archive '{}': {e}", archive_path.display()))?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = Archive::new(decoder);
+    archive
+        .unpack(destination)
+        .map_err(|e| format!("extract archive '{}': {e}", archive_path.display()))
+}
+
 fn load_render_manifest(path: &Path) -> Result<RenderManifest, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("read render manifest '{}': {e}", path.display()))?;
@@ -1190,6 +1422,7 @@ fn ensure_render_artifacts_exist(manifest: &RenderManifest) -> Result<(), String
 }
 
 fn resolve_apply_sources(
+    profile_name: &str,
     binary_dir_override: Option<&str>,
     site_root_override: Option<&str>,
 ) -> Result<DeployApplySources, String> {
@@ -1199,7 +1432,7 @@ fn resolve_apply_sources(
     {
         PathBuf::from(path)
     } else {
-        discover_binary_dir()?
+        discover_fetched_binary_dir(profile_name).unwrap_or(discover_binary_dir()?)
     };
     let site_root = if let Some(path) = site_root_override
         .map(str::trim)
@@ -1207,7 +1440,7 @@ fn resolve_apply_sources(
     {
         PathBuf::from(path)
     } else {
-        discover_site_root()?
+        discover_fetched_site_root(profile_name).unwrap_or(discover_site_root()?)
     };
 
     if !binary_dir.is_dir() {
@@ -1227,6 +1460,38 @@ fn resolve_apply_sources(
         binary_dir: binary_dir.display().to_string(),
         site_root: site_root.display().to_string(),
     })
+}
+
+fn discover_fetched_binary_dir(profile_name: &str) -> Option<PathBuf> {
+    let cwd = env::current_dir().ok()?;
+    let candidate = cwd
+        .join("enscrive-artifacts")
+        .join(profile_name)
+        .join("bin");
+    let required = [
+        candidate.join("enscrive-developer"),
+        candidate.join("enscrive-observe"),
+        candidate.join("enscrive-embed"),
+    ];
+    if required.iter().all(|path| path.is_file()) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+fn discover_fetched_site_root(profile_name: &str) -> Option<PathBuf> {
+    let cwd = env::current_dir().ok()?;
+    let candidate = cwd
+        .join("enscrive-artifacts")
+        .join(profile_name)
+        .join("site")
+        .join("enscrive-developer");
+    if candidate.join("pkg").is_dir() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 fn discover_binary_dir() -> Result<PathBuf, String> {
@@ -1781,6 +2046,7 @@ fn prompt_secret_line(label: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use tempfile::TempDir;
@@ -1857,6 +2123,46 @@ mod tests {
                     body
                 );
                 let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    fn spawn_static_server(responses: HashMap<String, (String, Vec<u8>)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..16 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buffer = [0_u8; 8192];
+                let Ok(size) = stream.read(&mut buffer) else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&buffer[..size]);
+                let path = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                let (status_line, content_type, body) =
+                    if let Some((content_type, body)) = responses.get(path) {
+                        ("HTTP/1.1 200 OK", content_type.as_str(), body.clone())
+                    } else {
+                        ("HTTP/1.1 404 Not Found", "text/plain", b"missing".to_vec())
+                    };
+                let header = format!(
+                    "{status_line}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(&body);
                 let _ = stream.flush();
             }
         });
@@ -2037,6 +2343,147 @@ mod tests {
         );
         assert!(systemd_dir.join("enscrive-developer.service").exists());
         assert!(nginx_dir.join("stage.api.enscrive.io.conf").exists());
+    }
+
+    #[tokio::test]
+    async fn deploy_fetch_downloads_and_extracts_release_artifacts() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        unsafe {
+            env::remove_var("ESM_BINARY");
+            env::remove_var("ESM_VAULT_PATH");
+        }
+
+        init(DeployInitOptions {
+            target: Some(DeployTarget::Stage),
+            profile_name: Some("stage".to_string()),
+            secrets_source: Some(DeploySecretsSource::Env),
+            endpoint_override: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let cli_bytes = b"cli".to_vec();
+        let developer_bytes = b"developer".to_vec();
+        let observe_bytes = b"observe".to_vec();
+        let embed_bytes = b"embed".to_vec();
+
+        let site_dir = temp.path().join("site-src");
+        fs::create_dir_all(site_dir.join("pkg")).unwrap();
+        fs::write(
+            site_dir.join("pkg").join("enscrive-developer.css"),
+            "body{}",
+        )
+        .unwrap();
+        let site_archive = temp.path().join("enscrive-developer-site.tar.gz");
+        {
+            let tar_gz = fs::File::create(&site_archive).unwrap();
+            let encoder = flate2::write::GzEncoder::new(tar_gz, flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            archive
+                .append_dir_all(".", &site_dir)
+                .expect("append site dir");
+            archive.into_inner().unwrap().finish().unwrap();
+        }
+        let site_bytes = fs::read(&site_archive).unwrap();
+
+        let mut responses: HashMap<String, (String, Vec<u8>)> = HashMap::new();
+        responses.insert(
+            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive".into(),
+            ("application/octet-stream".into(), cli_bytes.clone()),
+        );
+        responses.insert(
+            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive-developer".into(),
+            ("application/octet-stream".into(), developer_bytes.clone()),
+        );
+        responses.insert(
+            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive-observe".into(),
+            ("application/octet-stream".into(), observe_bytes.clone()),
+        );
+        responses.insert(
+            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive-embed".into(),
+            ("application/octet-stream".into(), embed_bytes.clone()),
+        );
+        responses.insert(
+            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive-developer-site.tar.gz".into(),
+            ("application/gzip".into(), site_bytes.clone()),
+        );
+
+        let server = spawn_static_server(responses.clone());
+        let manifest = json!({
+            "channel": "stage",
+            "version": "0.0.0-stage",
+            "install_endpoint": format!("{server}/install"),
+            "managed_endpoint": "https://stage.api.enscrive.io",
+            "platforms": {
+                "linux-x86_64": {
+                    "artifacts": [
+                        {
+                            "name": "enscrive",
+                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive"),
+                            "sha256": sha256_hex(&cli_bytes),
+                            "mode": "0755",
+                            "size_bytes": cli_bytes.len()
+                        },
+                        {
+                            "name": "enscrive-developer",
+                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive-developer"),
+                            "sha256": sha256_hex(&developer_bytes),
+                            "mode": "0755",
+                            "size_bytes": developer_bytes.len()
+                        },
+                        {
+                            "name": "enscrive-observe",
+                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive-observe"),
+                            "sha256": sha256_hex(&observe_bytes),
+                            "mode": "0755",
+                            "size_bytes": observe_bytes.len()
+                        },
+                        {
+                            "name": "enscrive-embed",
+                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive-embed"),
+                            "sha256": sha256_hex(&embed_bytes),
+                            "mode": "0755",
+                            "size_bytes": embed_bytes.len()
+                        },
+                        {
+                            "name": "enscrive-developer-site.tar.gz",
+                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive-developer-site.tar.gz"),
+                            "sha256": sha256_hex(&site_bytes),
+                            "mode": "0644",
+                            "size_bytes": site_bytes.len()
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string();
+        let manifest_server = spawn_static_server(HashMap::from([(
+            "/latest.json".into(),
+            ("application/json".into(), manifest.into_bytes()),
+        )]));
+
+        let output_dir = temp.path().join("fetched");
+        let result = fetch(DeployFetchOptions {
+            profile_name: Some("stage".to_string()),
+            output_dir: Some(output_dir.display().to_string()),
+            manifest_url: Some(format!("{manifest_server}/latest.json")),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["channel"].as_str(), Some("stage"));
+        assert!(output_dir.join("bin").join("enscrive-developer").exists());
+        assert!(
+            output_dir
+                .join("site")
+                .join("enscrive-developer")
+                .join("pkg")
+                .join("enscrive-developer.css")
+                .exists()
+        );
     }
 
     #[tokio::test]

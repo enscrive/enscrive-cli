@@ -10,8 +10,9 @@ use std::fs;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use deploy::{
-    DeployApplyOptions, DeployBootstrapOptions, DeployInitOptions, DeployRenderOptions,
-    DeploySecretsSource, DeployStatusOptions, DeployTarget, DeployVerifyOptions,
+    DeployApplyOptions, DeployBootstrapOptions, DeployFetchOptions, DeployInitOptions,
+    DeployRenderOptions, DeploySecretsSource, DeployStatusOptions, DeployTarget,
+    DeployVerifyOptions,
 };
 use local::{
     InitMode, ManagedInitOptions, SelfManagedInitOptions, StartOptions, StatusOptions, StopOptions,
@@ -240,6 +241,9 @@ enum DeploySubcommand {
     /// Render deterministic managed-host artifacts for the selected deploy profile
     Render(DeployRenderArgs),
 
+    /// Download and verify managed release artifacts for the selected deploy profile
+    Fetch(DeployFetchArgs),
+
     /// Install a rendered managed-host bundle onto the local host
     Apply(DeployApplyArgs),
 
@@ -293,6 +297,21 @@ struct DeployRenderArgs {
     /// Host root expected on the managed instance
     #[arg(long = "host-root")]
     host_root: Option<String>,
+}
+
+#[derive(Args)]
+struct DeployFetchArgs {
+    /// Deploy profile name to fetch artifacts for
+    #[arg(long = "profile-name")]
+    profile_name: Option<String>,
+
+    /// Output directory for downloaded artifacts
+    #[arg(long = "out-dir")]
+    out_dir: Option<String>,
+
+    /// Explicit release manifest URL
+    #[arg(long = "manifest-url")]
+    manifest_url: Option<String>,
 }
 
 #[derive(Args)]
@@ -1994,6 +2013,19 @@ async fn main() {
                     }
                 }
             }
+            DeploySubcommand::Fetch(args) => {
+                match deploy::fetch(DeployFetchOptions {
+                    profile_name: args.profile_name.clone(),
+                    output_dir: args.out_dir.clone(),
+                    manifest_url: args.manifest_url.clone(),
+                })
+                .await
+                {
+                    Ok(data) => CliResponse::success("deploy.fetch", data).emit(fmt),
+                    Err(e) => CliResponse::fail("deploy.fetch", e, FailureClass::Bug, EXIT_FAILURE)
+                        .emit(fmt),
+                }
+            }
             DeploySubcommand::Apply(args) => {
                 match deploy::apply(DeployApplyOptions {
                     profile_name: args.profile_name.clone(),
@@ -2826,6 +2858,39 @@ mod tests {
                 assert_eq!(endpoint.as_deref(), Some("https://stage.api.enscrive.io"));
             }
             _ => panic!("expected deploy verify"),
+        }
+    }
+
+    #[test]
+    fn parse_deploy_fetch_command() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "deploy",
+            "fetch",
+            "--profile-name",
+            "stage",
+            "--out-dir",
+            "./enscrive-artifacts/stage",
+            "--manifest-url",
+            "https://stage.enscrive.io/releases/stage/latest.json",
+        ]);
+        match args.command {
+            Commands::Deploy {
+                sub:
+                    DeploySubcommand::Fetch(DeployFetchArgs {
+                        profile_name,
+                        out_dir,
+                        manifest_url,
+                    }),
+            } => {
+                assert_eq!(profile_name.as_deref(), Some("stage"));
+                assert_eq!(out_dir.as_deref(), Some("./enscrive-artifacts/stage"));
+                assert_eq!(
+                    manifest_url.as_deref(),
+                    Some("https://stage.enscrive.io/releases/stage/latest.json")
+                );
+            }
+            _ => panic!("expected deploy fetch"),
         }
     }
 
