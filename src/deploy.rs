@@ -524,45 +524,8 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
     fs::create_dir_all(output_dir.join("nginx"))
         .map_err(|e| format!("create render nginx dir: {e}"))?;
 
-    let artifacts = RenderedArtifactPaths {
-        manifest: output_dir.join("manifest.json").display().to_string(),
-        readme: output_dir.join("README.md").display().to_string(),
-        developer_env: output_dir
-            .join("config")
-            .join("developer.env")
-            .display()
-            .to_string(),
-        observe_env: output_dir
-            .join("config")
-            .join("observe.env")
-            .display()
-            .to_string(),
-        embed_env: output_dir
-            .join("config")
-            .join("embed.env")
-            .display()
-            .to_string(),
-        developer_service: output_dir
-            .join("systemd")
-            .join("enscrive-developer.service")
-            .display()
-            .to_string(),
-        observe_service: output_dir
-            .join("systemd")
-            .join("enscrive-observe.service")
-            .display()
-            .to_string(),
-        embed_service: output_dir
-            .join("systemd")
-            .join("enscrive-embed.service")
-            .display()
-            .to_string(),
-        nginx_config: output_dir
-            .join("nginx")
-            .join(format!("{public_hostname}.conf"))
-            .display()
-            .to_string(),
-    };
+    let artifacts = render_artifact_paths(&public_hostname);
+    let render_targets = resolve_render_artifact_paths(&output_dir, &public_hostname, &artifacts);
 
     let manifest = RenderManifest {
         version: 1,
@@ -581,13 +544,13 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
     };
 
     fs::write(
-        &artifacts.manifest,
+        &render_targets.manifest,
         serde_json::to_string_pretty(&manifest)
             .map_err(|e| format!("serialize deploy manifest: {e}"))?,
     )
     .map_err(|e| format!("write manifest: {e}"))?;
     fs::write(
-        &artifacts.readme,
+        &render_targets.readme,
         render_readme(
             &selected_name,
             &profile,
@@ -599,7 +562,7 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
     )
     .map_err(|e| format!("write render README: {e}"))?;
     fs::write(
-        &artifacts.developer_env,
+        &render_targets.developer_env,
         render_developer_env(
             &profile,
             &endpoint,
@@ -609,24 +572,24 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
         ),
     )
     .map_err(|e| format!("write developer env: {e}"))?;
-    fs::write(&artifacts.observe_env, render_observe_env(&ports))
+    fs::write(&render_targets.observe_env, render_observe_env(&ports))
         .map_err(|e| format!("write observe env: {e}"))?;
-    fs::write(&artifacts.embed_env, render_embed_env(&ports))
+    fs::write(&render_targets.embed_env, render_embed_env(&ports))
         .map_err(|e| format!("write embed env: {e}"))?;
     fs::write(
-        &artifacts.developer_service,
+        &render_targets.developer_service,
         render_developer_service(&layout),
     )
     .map_err(|e| format!("write developer service: {e}"))?;
     fs::write(
-        &artifacts.observe_service,
+        &render_targets.observe_service,
         render_observe_service(&layout, &ports),
     )
     .map_err(|e| format!("write observe service: {e}"))?;
-    fs::write(&artifacts.embed_service, render_embed_service(&layout))
+    fs::write(&render_targets.embed_service, render_embed_service(&layout))
         .map_err(|e| format!("write embed service: {e}"))?;
     fs::write(
-        &artifacts.nginx_config,
+        &render_targets.nginx_config,
         render_nginx_config(&public_hostname, &ports),
     )
     .map_err(|e| format!("write nginx config: {e}"))?;
@@ -645,7 +608,7 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
         "output_dir": output_dir.display().to_string(),
         "layout": layout,
         "ports": ports,
-        "artifacts": artifacts,
+        "artifacts": render_targets,
         "note": "render produces deterministic managed-host artifacts for enscrive deploy apply on the target host"
     }))
 }
@@ -848,13 +811,15 @@ pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
     let render_dir = resolve_render_output_dir(opts.render_dir.as_deref(), &selected_name)?;
     let manifest_path = render_dir.join("manifest.json");
     let manifest = load_render_manifest(&manifest_path)?;
+    let render_artifacts =
+        resolve_render_artifact_paths(&render_dir, &manifest.public_hostname, &manifest.artifacts);
     let sources = resolve_apply_sources(
         &selected_name,
         opts.binary_dir.as_deref(),
         opts.site_root.as_deref(),
     )?;
 
-    ensure_render_artifacts_exist(&manifest)?;
+    ensure_render_artifacts_exist(&render_artifacts)?;
     fs::create_dir_all(&manifest.layout.host_root)
         .map_err(|e| format!("create host root '{}': {e}", manifest.layout.host_root))?;
     fs::create_dir_all(&manifest.layout.bin_dir)
@@ -878,17 +843,17 @@ pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
     let installed_configs = install_named_files(&[
         (
             "developer.env",
-            &manifest.artifacts.developer_env,
+            &render_artifacts.developer_env,
             &manifest.layout.config_dir,
         ),
         (
             "observe.env",
-            &manifest.artifacts.observe_env,
+            &render_artifacts.observe_env,
             &manifest.layout.config_dir,
         ),
         (
             "embed.env",
-            &manifest.artifacts.embed_env,
+            &render_artifacts.embed_env,
             &manifest.layout.config_dir,
         ),
     ])?;
@@ -911,23 +876,23 @@ pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
     let installed_units = install_named_files(&[
         (
             "enscrive-developer.service",
-            &manifest.artifacts.developer_service,
+            &render_artifacts.developer_service,
             &systemd_dir,
         ),
         (
             "enscrive-observe.service",
-            &manifest.artifacts.observe_service,
+            &render_artifacts.observe_service,
             &systemd_dir,
         ),
         (
             "enscrive-embed.service",
-            &manifest.artifacts.embed_service,
+            &render_artifacts.embed_service,
             &systemd_dir,
         ),
     ])?;
     let installed_nginx = install_named_files(&[(
         &format!("{}.conf", manifest.public_hostname),
-        &manifest.artifacts.nginx_config,
+        &render_artifacts.nginx_config,
         &nginx_dir,
     )])?;
 
@@ -1867,15 +1832,107 @@ fn load_render_manifest(path: &Path) -> Result<RenderManifest, String> {
         .map_err(|e| format!("parse render manifest '{}': {e}", path.display()))
 }
 
-fn ensure_render_artifacts_exist(manifest: &RenderManifest) -> Result<(), String> {
+fn render_artifact_paths(public_hostname: &str) -> RenderedArtifactPaths {
+    RenderedArtifactPaths {
+        manifest: "manifest.json".to_string(),
+        readme: "README.md".to_string(),
+        developer_env: PathBuf::from("config")
+            .join("developer.env")
+            .display()
+            .to_string(),
+        observe_env: PathBuf::from("config")
+            .join("observe.env")
+            .display()
+            .to_string(),
+        embed_env: PathBuf::from("config")
+            .join("embed.env")
+            .display()
+            .to_string(),
+        developer_service: PathBuf::from("systemd")
+            .join("enscrive-developer.service")
+            .display()
+            .to_string(),
+        observe_service: PathBuf::from("systemd")
+            .join("enscrive-observe.service")
+            .display()
+            .to_string(),
+        embed_service: PathBuf::from("systemd")
+            .join("enscrive-embed.service")
+            .display()
+            .to_string(),
+        nginx_config: PathBuf::from("nginx")
+            .join(format!("{public_hostname}.conf"))
+            .display()
+            .to_string(),
+    }
+}
+
+fn resolve_render_artifact_paths(
+    render_dir: &Path,
+    public_hostname: &str,
+    artifacts: &RenderedArtifactPaths,
+) -> RenderedArtifactPaths {
+    let expected = render_artifact_paths(public_hostname);
+
+    RenderedArtifactPaths {
+        manifest: resolve_render_artifact_path(render_dir, &artifacts.manifest, &expected.manifest),
+        readme: resolve_render_artifact_path(render_dir, &artifacts.readme, &expected.readme),
+        developer_env: resolve_render_artifact_path(
+            render_dir,
+            &artifacts.developer_env,
+            &expected.developer_env,
+        ),
+        observe_env: resolve_render_artifact_path(
+            render_dir,
+            &artifacts.observe_env,
+            &expected.observe_env,
+        ),
+        embed_env: resolve_render_artifact_path(render_dir, &artifacts.embed_env, &expected.embed_env),
+        developer_service: resolve_render_artifact_path(
+            render_dir,
+            &artifacts.developer_service,
+            &expected.developer_service,
+        ),
+        observe_service: resolve_render_artifact_path(
+            render_dir,
+            &artifacts.observe_service,
+            &expected.observe_service,
+        ),
+        embed_service: resolve_render_artifact_path(
+            render_dir,
+            &artifacts.embed_service,
+            &expected.embed_service,
+        ),
+        nginx_config: resolve_render_artifact_path(
+            render_dir,
+            &artifacts.nginx_config,
+            &expected.nginx_config,
+        ),
+    }
+}
+
+fn resolve_render_artifact_path(render_dir: &Path, configured: &str, expected_relative: &str) -> String {
+    let configured_path = Path::new(configured);
+    if configured_path.is_absolute() {
+        if configured_path.exists() {
+            configured.to_string()
+        } else {
+            render_dir.join(expected_relative).display().to_string()
+        }
+    } else {
+        render_dir.join(configured_path).display().to_string()
+    }
+}
+
+fn ensure_render_artifacts_exist(artifacts: &RenderedArtifactPaths) -> Result<(), String> {
     for path in [
-        manifest.artifacts.developer_env.as_str(),
-        manifest.artifacts.observe_env.as_str(),
-        manifest.artifacts.embed_env.as_str(),
-        manifest.artifacts.developer_service.as_str(),
-        manifest.artifacts.observe_service.as_str(),
-        manifest.artifacts.embed_service.as_str(),
-        manifest.artifacts.nginx_config.as_str(),
+        artifacts.developer_env.as_str(),
+        artifacts.observe_env.as_str(),
+        artifacts.embed_env.as_str(),
+        artifacts.developer_service.as_str(),
+        artifacts.observe_service.as_str(),
+        artifacts.embed_service.as_str(),
+        artifacts.nginx_config.as_str(),
     ] {
         if !Path::new(path).is_file() {
             return Err(format!(
@@ -2842,6 +2899,122 @@ mod tests {
                 .join("enscrive-developer.css")
                 .exists()
         );
+        assert!(systemd_dir.join("enscrive-developer.service").exists());
+        assert!(nginx_dir.join("stage.api.enscrive.io.conf").exists());
+    }
+
+    #[tokio::test]
+    async fn deploy_apply_accepts_portable_copy_of_absolute_manifest() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        unsafe {
+            env::remove_var("ESM_BINARY");
+            env::remove_var("ESM_VAULT_PATH");
+        }
+
+        init(DeployInitOptions {
+            target: Some(DeployTarget::Stage),
+            profile_name: Some("stage".to_string()),
+            secrets_source: Some(DeploySecretsSource::Env),
+            endpoint_override: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let host_root = temp.path().join("host");
+        let operator_render_dir = temp.path().join("operator-rendered");
+        render(DeployRenderOptions {
+            profile_name: Some("stage".to_string()),
+            output_dir: Some(operator_render_dir.display().to_string()),
+            host_root: Some(host_root.display().to_string()),
+            bootstrap_public_key: None,
+        })
+        .await
+        .unwrap();
+
+        let host_render_dir = temp.path().join("host-rendered");
+        copy_dir_recursive(&operator_render_dir, &host_render_dir).unwrap();
+
+        let mut manifest = load_render_manifest(&host_render_dir.join("manifest.json")).unwrap();
+        manifest.artifacts = RenderedArtifactPaths {
+            manifest: operator_render_dir.join("manifest.json").display().to_string(),
+            readme: operator_render_dir.join("README.md").display().to_string(),
+            developer_env: operator_render_dir
+                .join("config")
+                .join("missing-developer.env")
+                .display()
+                .to_string(),
+            observe_env: operator_render_dir
+                .join("config")
+                .join("missing-observe.env")
+                .display()
+                .to_string(),
+            embed_env: operator_render_dir
+                .join("config")
+                .join("missing-embed.env")
+                .display()
+                .to_string(),
+            developer_service: operator_render_dir
+                .join("systemd")
+                .join("missing-enscrive-developer.service")
+                .display()
+                .to_string(),
+            observe_service: operator_render_dir
+                .join("systemd")
+                .join("missing-enscrive-observe.service")
+                .display()
+                .to_string(),
+            embed_service: operator_render_dir
+                .join("systemd")
+                .join("missing-enscrive-embed.service")
+                .display()
+                .to_string(),
+            nginx_config: operator_render_dir
+                .join("nginx")
+                .join("missing-stage.api.enscrive.io.conf")
+                .display()
+                .to_string(),
+        };
+        fs::write(
+            host_render_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let binary_dir = temp.path().join("bin-src");
+        fs::create_dir_all(&binary_dir).unwrap();
+        for binary_name in ["enscrive-developer", "enscrive-observe", "enscrive-embed"] {
+            fs::write(binary_dir.join(binary_name), format!("{binary_name}-bytes")).unwrap();
+        }
+
+        let site_root = temp.path().join("site-src");
+        fs::create_dir_all(site_root.join("pkg")).unwrap();
+        fs::write(
+            site_root.join("pkg").join("enscrive-developer.css"),
+            "body{}",
+        )
+        .unwrap();
+
+        let systemd_dir = temp.path().join("systemd");
+        let nginx_dir = temp.path().join("nginx");
+
+        let result = apply(DeployApplyOptions {
+            profile_name: Some("stage".to_string()),
+            render_dir: Some(host_render_dir.display().to_string()),
+            binary_dir: Some(binary_dir.display().to_string()),
+            site_root: Some(site_root.display().to_string()),
+            systemd_dir: Some(systemd_dir.display().to_string()),
+            nginx_dir: Some(nginx_dir.display().to_string()),
+            reload_systemd: false,
+            start_services: false,
+            reload_nginx: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["profile"].as_str(), Some("stage"));
         assert!(systemd_dir.join("enscrive-developer.service").exists());
         assert!(nginx_dir.join("stage.api.enscrive.io.conf").exists());
     }
