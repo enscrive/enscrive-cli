@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -70,6 +72,19 @@ pub struct DeployRenderOptions {
 pub struct DeployVerifyOptions {
     pub profile_name: Option<String>,
     pub endpoint_override: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeployApplyOptions {
+    pub profile_name: Option<String>,
+    pub render_dir: Option<String>,
+    pub binary_dir: Option<String>,
+    pub site_root: Option<String>,
+    pub systemd_dir: Option<String>,
+    pub nginx_dir: Option<String>,
+    pub reload_systemd: bool,
+    pub start_services: bool,
+    pub reload_nginx: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -152,7 +167,7 @@ struct SignedBootstrapConsumeResponse {
     stack_id: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RenderLayout {
     host_root: String,
     bin_dir: String,
@@ -164,7 +179,7 @@ struct RenderLayout {
     nginx_dir: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManagedPorts {
     developer_private_port: u16,
     observe_rest_port: u16,
@@ -174,7 +189,7 @@ struct ManagedPorts {
     embed_metrics_port: u16,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RenderedArtifactPaths {
     manifest: String,
     readme: String,
@@ -187,7 +202,7 @@ struct RenderedArtifactPaths {
     nginx_config: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RenderManifest {
     version: u32,
     rendered_at: String,
@@ -228,6 +243,12 @@ struct DeployVerifyCapabilities {
     ingest: bool,
     search: bool,
     logs: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeployApplySources {
+    binary_dir: String,
+    site_root: String,
 }
 
 fn default_legacy_deploy_endpoint() -> String {
@@ -622,6 +643,142 @@ pub async fn verify(opts: DeployVerifyOptions) -> Result<Value, String> {
     }))
 }
 
+pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
+    let profiles = load_deploy_profiles()?;
+    let (selected_name, profile) = resolve_selected_profile(&profiles, opts.profile_name)?;
+    let render_dir = resolve_render_output_dir(opts.render_dir.as_deref(), &selected_name)?;
+    let manifest_path = render_dir.join("manifest.json");
+    let manifest = load_render_manifest(&manifest_path)?;
+    let sources = resolve_apply_sources(opts.binary_dir.as_deref(), opts.site_root.as_deref())?;
+
+    ensure_render_artifacts_exist(&manifest)?;
+    fs::create_dir_all(&manifest.layout.host_root)
+        .map_err(|e| format!("create host root '{}': {e}", manifest.layout.host_root))?;
+    fs::create_dir_all(&manifest.layout.bin_dir)
+        .map_err(|e| format!("create bin dir '{}': {e}", manifest.layout.bin_dir))?;
+    fs::create_dir_all(&manifest.layout.config_dir)
+        .map_err(|e| format!("create config dir '{}': {e}", manifest.layout.config_dir))?;
+    fs::create_dir_all(&manifest.layout.runtime_dir)
+        .map_err(|e| format!("create runtime dir '{}': {e}", manifest.layout.runtime_dir))?;
+    fs::create_dir_all(&manifest.layout.logs_dir)
+        .map_err(|e| format!("create logs dir '{}': {e}", manifest.layout.logs_dir))?;
+    fs::create_dir_all(&manifest.layout.site_root)
+        .map_err(|e| format!("create site root '{}': {e}", manifest.layout.site_root))?;
+
+    let installed_binaries =
+        install_binaries(&manifest.layout.bin_dir, Path::new(&sources.binary_dir))?;
+    let installed_site_root = install_site_bundle(
+        Path::new(&manifest.layout.site_root),
+        Path::new(&sources.site_root),
+    )?;
+
+    let installed_configs = install_named_files(&[
+        (
+            "developer.env",
+            &manifest.artifacts.developer_env,
+            &manifest.layout.config_dir,
+        ),
+        (
+            "observe.env",
+            &manifest.artifacts.observe_env,
+            &manifest.layout.config_dir,
+        ),
+        (
+            "embed.env",
+            &manifest.artifacts.embed_env,
+            &manifest.layout.config_dir,
+        ),
+    ])?;
+
+    let systemd_dir = opts
+        .systemd_dir
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "/etc/systemd/system".to_string());
+    let nginx_dir = opts
+        .nginx_dir
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "/etc/nginx/conf.d".to_string());
+
+    fs::create_dir_all(&systemd_dir)
+        .map_err(|e| format!("create systemd dir '{}': {e}", systemd_dir))?;
+    fs::create_dir_all(&nginx_dir).map_err(|e| format!("create nginx dir '{}': {e}", nginx_dir))?;
+
+    let installed_units = install_named_files(&[
+        (
+            "enscrive-developer.service",
+            &manifest.artifacts.developer_service,
+            &systemd_dir,
+        ),
+        (
+            "enscrive-observe.service",
+            &manifest.artifacts.observe_service,
+            &systemd_dir,
+        ),
+        (
+            "enscrive-embed.service",
+            &manifest.artifacts.embed_service,
+            &systemd_dir,
+        ),
+    ])?;
+    let installed_nginx = install_named_files(&[(
+        &format!("{}.conf", manifest.public_hostname),
+        &manifest.artifacts.nginx_config,
+        &nginx_dir,
+    )])?;
+
+    let mut actions_run = Vec::new();
+    if opts.reload_systemd {
+        run_host_command("systemctl daemon-reload", &["systemctl", "daemon-reload"])?;
+        actions_run.push("systemctl daemon-reload".to_string());
+    }
+    if opts.start_services {
+        run_host_command(
+            "systemctl enable --now enscrive-developer enscrive-observe enscrive-embed",
+            &[
+                "systemctl",
+                "enable",
+                "--now",
+                "enscrive-developer",
+                "enscrive-observe",
+                "enscrive-embed",
+            ],
+        )?;
+        actions_run.push(
+            "systemctl enable --now enscrive-developer enscrive-observe enscrive-embed".to_string(),
+        );
+    }
+    if opts.reload_nginx {
+        run_host_command("nginx -t", &["nginx", "-t"])?;
+        run_host_command("systemctl reload nginx", &["systemctl", "reload", "nginx"])?;
+        actions_run.push("nginx -t".to_string());
+        actions_run.push("systemctl reload nginx".to_string());
+    }
+
+    Ok(json!({
+        "profile": selected_name,
+        "target": profile.target,
+        "endpoint": manifest.endpoint,
+        "host_root": manifest.layout.host_root,
+        "render_dir": render_dir.display().to_string(),
+        "sources": sources,
+        "installed": {
+            "binaries": installed_binaries,
+            "site_root": installed_site_root,
+            "config_files": installed_configs,
+            "systemd_units": installed_units,
+            "nginx_files": installed_nginx,
+        },
+        "actions_run": actions_run,
+        "next_steps": [
+            "enscrive deploy bootstrap --profile-name <profile>",
+            "enscrive deploy verify --profile-name <profile>"
+        ],
+        "note": "apply stages the rendered bundle onto the local host; remote execution and SSH orchestration remain intentionally out of scope"
+    }))
+}
+
 fn load_deploy_profiles() -> Result<DeployProfilesFile, String> {
     let home = cli_home()?;
     let path = home.config_root.join("deploy-profiles.toml");
@@ -1003,6 +1160,247 @@ async fn fetch_health(endpoint: &str) -> Result<DeployVerifyHealth, String> {
         .json::<DeployVerifyHealth>()
         .await
         .map_err(|e| format!("parse /health response: {e}"))
+}
+
+fn load_render_manifest(path: &Path) -> Result<RenderManifest, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| format!("read render manifest '{}': {e}", path.display()))?;
+    serde_json::from_str(&content)
+        .map_err(|e| format!("parse render manifest '{}': {e}", path.display()))
+}
+
+fn ensure_render_artifacts_exist(manifest: &RenderManifest) -> Result<(), String> {
+    for path in [
+        manifest.artifacts.developer_env.as_str(),
+        manifest.artifacts.observe_env.as_str(),
+        manifest.artifacts.embed_env.as_str(),
+        manifest.artifacts.developer_service.as_str(),
+        manifest.artifacts.observe_service.as_str(),
+        manifest.artifacts.embed_service.as_str(),
+        manifest.artifacts.nginx_config.as_str(),
+    ] {
+        if !Path::new(path).is_file() {
+            return Err(format!(
+                "rendered artifact '{}' is missing; rerun `enscrive deploy render` first",
+                path
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_apply_sources(
+    binary_dir_override: Option<&str>,
+    site_root_override: Option<&str>,
+) -> Result<DeployApplySources, String> {
+    let binary_dir = if let Some(path) = binary_dir_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        PathBuf::from(path)
+    } else {
+        discover_binary_dir()?
+    };
+    let site_root = if let Some(path) = site_root_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        PathBuf::from(path)
+    } else {
+        discover_site_root()?
+    };
+
+    if !binary_dir.is_dir() {
+        return Err(format!(
+            "binary source dir '{}' does not exist",
+            binary_dir.display()
+        ));
+    }
+    if !site_root.join("pkg").is_dir() {
+        return Err(format!(
+            "site source '{}' is missing a pkg/ directory",
+            site_root.display()
+        ));
+    }
+
+    Ok(DeployApplySources {
+        binary_dir: binary_dir.display().to_string(),
+        site_root: site_root.display().to_string(),
+    })
+}
+
+fn discover_binary_dir() -> Result<PathBuf, String> {
+    let current_exe = env::current_exe().map_err(|e| format!("resolve current executable: {e}"))?;
+    if let Some(parent) = current_exe.parent() {
+        let candidates = [
+            parent.join("enscrive-developer"),
+            parent.join("enscrive-observe"),
+            parent.join("enscrive-embed"),
+        ];
+        if candidates.iter().all(|candidate| candidate.is_file()) {
+            return Ok(parent.to_path_buf());
+        }
+    }
+
+    let path_var = env::var_os("PATH").ok_or_else(|| "PATH is not set".to_string())?;
+    for dir in env::split_paths(&path_var) {
+        let candidates = [
+            dir.join("enscrive-developer"),
+            dir.join("enscrive-observe"),
+            dir.join("enscrive-embed"),
+        ];
+        if candidates.iter().all(|candidate| candidate.is_file()) {
+            return Ok(dir);
+        }
+    }
+
+    Err(
+        "unable to discover enscrive service binaries; pass --binary-dir with enscrive-developer, enscrive-observe, and enscrive-embed"
+            .to_string(),
+    )
+}
+
+fn discover_site_root() -> Result<PathBuf, String> {
+    let home = env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
+    let xdg_data_home = env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(home).join(".local").join("share"));
+    let installed = xdg_data_home
+        .join("enscrive")
+        .join("site")
+        .join("enscrive-developer");
+    if installed.join("pkg").is_dir() {
+        return Ok(installed);
+    }
+
+    let cwd = env::current_dir().map_err(|e| format!("resolve current dir: {e}"))?;
+    let repo_candidate = cwd.join("enscrive-developer").join("target").join("site");
+    if repo_candidate.join("pkg").is_dir() {
+        return Ok(repo_candidate);
+    }
+
+    Err(
+        "unable to discover the enscrive developer site bundle; pass --site-root with a directory containing pkg/"
+            .to_string(),
+    )
+}
+
+fn install_binaries(destination_dir: &str, source_dir: &Path) -> Result<Vec<String>, String> {
+    let mut installed = Vec::new();
+    for binary_name in ["enscrive-developer", "enscrive-observe", "enscrive-embed"] {
+        let source = source_dir.join(binary_name);
+        if !source.is_file() {
+            return Err(format!(
+                "required binary '{}' is missing from '{}'",
+                binary_name,
+                source_dir.display()
+            ));
+        }
+        let destination = Path::new(destination_dir).join(binary_name);
+        copy_file(&source, &destination)?;
+        set_executable(&destination)?;
+        installed.push(destination.display().to_string());
+    }
+    Ok(installed)
+}
+
+fn install_site_bundle(destination_root: &Path, source_root: &Path) -> Result<String, String> {
+    remove_dir_if_exists(destination_root)?;
+    copy_dir_recursive(source_root, destination_root)?;
+    Ok(destination_root.display().to_string())
+}
+
+fn install_named_files(files: &[(&str, &str, &str)]) -> Result<Vec<String>, String> {
+    let mut installed = Vec::new();
+    for (name, source, destination_dir) in files {
+        let destination = Path::new(destination_dir).join(name);
+        copy_file(Path::new(source), &destination)?;
+        installed.push(destination.display().to_string());
+    }
+    Ok(installed)
+}
+
+fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "destination '{}' has no parent directory",
+            destination.display()
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|e| format!("create destination dir '{}': {e}", parent.display()))?;
+    fs::copy(source, destination).map_err(|e| {
+        format!(
+            "copy '{}' to '{}': {e}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn copy_dir_recursive(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|e| format!("create directory '{}': {e}", destination.display()))?;
+    for entry in
+        fs::read_dir(source).map_err(|e| format!("read directory '{}': {e}", source.display()))?
+    {
+        let entry =
+            entry.map_err(|e| format!("read directory entry '{}': {e}", source.display()))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .map_err(|e| format!("read file type '{}': {e}", source_path.display()))?
+            .is_dir()
+        {
+            copy_dir_recursive(&source_path, &destination_path)?;
+        } else {
+            copy_file(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        fs::remove_dir_all(path)
+            .map_err(|e| format!("remove directory '{}': {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn set_executable(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let metadata = fs::metadata(path).map_err(|e| format!("stat '{}': {e}", path.display()))?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)
+            .map_err(|e| format!("set permissions '{}': {e}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn run_host_command(label: &str, args: &[&str]) -> Result<(), String> {
+    let (program, rest) = args
+        .split_first()
+        .ok_or_else(|| format!("invalid host command '{}'", label))?;
+    let output = Command::new(program)
+        .args(rest)
+        .output()
+        .map_err(|e| format!("run '{}': {e}", label))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if !stderr.is_empty() { stderr } else { stdout };
+        return Err(if detail.is_empty() {
+            format!("'{}' exited with {}", label, output.status)
+        } else {
+            format!("{} (exit {})", detail, output.status)
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -1564,6 +1962,81 @@ mod tests {
         assert_eq!(result["verified"].as_bool(), Some(true));
         assert_eq!(result["health"]["healthy"].as_bool(), Some(true));
         assert_eq!(result["matches_target_default"].as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn deploy_apply_installs_rendered_bundle() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        unsafe {
+            env::remove_var("ESM_BINARY");
+            env::remove_var("ESM_VAULT_PATH");
+        }
+
+        init(DeployInitOptions {
+            target: Some(DeployTarget::Stage),
+            profile_name: Some("stage".to_string()),
+            secrets_source: Some(DeploySecretsSource::Env),
+            endpoint_override: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let host_root = temp.path().join("host");
+        let render_dir = temp.path().join("rendered");
+        render(DeployRenderOptions {
+            profile_name: Some("stage".to_string()),
+            output_dir: Some(render_dir.display().to_string()),
+            host_root: Some(host_root.display().to_string()),
+        })
+        .await
+        .unwrap();
+
+        let binary_dir = temp.path().join("bin-src");
+        fs::create_dir_all(&binary_dir).unwrap();
+        for binary_name in ["enscrive-developer", "enscrive-observe", "enscrive-embed"] {
+            fs::write(binary_dir.join(binary_name), format!("{binary_name}-bytes")).unwrap();
+        }
+
+        let site_root = temp.path().join("site-src");
+        fs::create_dir_all(site_root.join("pkg")).unwrap();
+        fs::write(
+            site_root.join("pkg").join("enscrive-developer.css"),
+            "body{}",
+        )
+        .unwrap();
+
+        let systemd_dir = temp.path().join("systemd");
+        let nginx_dir = temp.path().join("nginx");
+
+        let result = apply(DeployApplyOptions {
+            profile_name: Some("stage".to_string()),
+            render_dir: Some(render_dir.display().to_string()),
+            binary_dir: Some(binary_dir.display().to_string()),
+            site_root: Some(site_root.display().to_string()),
+            systemd_dir: Some(systemd_dir.display().to_string()),
+            nginx_dir: Some(nginx_dir.display().to_string()),
+            reload_systemd: false,
+            start_services: false,
+            reload_nginx: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["profile"].as_str(), Some("stage"));
+        assert!(host_root.join("bin").join("enscrive-developer").exists());
+        assert!(
+            host_root
+                .join("site")
+                .join("enscrive-developer")
+                .join("pkg")
+                .join("enscrive-developer.css")
+                .exists()
+        );
+        assert!(systemd_dir.join("enscrive-developer.service").exists());
+        assert!(nginx_dir.join("stage.api.enscrive.io.conf").exists());
     }
 
     #[tokio::test]

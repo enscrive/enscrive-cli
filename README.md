@@ -138,6 +138,7 @@ Operator deploy profile commands:
 ```bash
 enscrive deploy init --target stage --secrets-source esm --set-default
 enscrive deploy render --profile-name stage
+enscrive deploy apply --profile-name stage
 enscrive deploy status
 enscrive deploy verify --profile-name stage
 enscrive deploy bootstrap
@@ -182,6 +183,30 @@ explicitly if the managed stack is unhealthy or degraded:
 
 ```bash
 enscrive deploy verify --profile-name stage
+```
+
+`deploy apply` is the narrow host-local install step. Run it on the target host
+after rendering. It stages:
+
+- `enscrive-developer`, `enscrive-observe`, and `enscrive-embed` into the managed host `bin/`
+- the developer portal site bundle into the managed host `site/`
+- rendered env files into the managed host `config/`
+- systemd units and nginx config into operator-selected destinations
+
+By default it only installs files. Use `--reload-systemd`, `--start-services`,
+and `--reload-nginx` when you want the CLI to reconcile the live host too.
+
+Example:
+
+```bash
+enscrive deploy apply \
+  --profile-name stage \
+  --render-dir ./enscrive-deploy/stage \
+  --binary-dir ~/.local/bin \
+  --site-root ~/.local/share/enscrive/site/enscrive-developer \
+  --reload-systemd \
+  --start-services \
+  --reload-nginx
 ```
 
 Signed bootstrap consume:

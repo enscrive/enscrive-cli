@@ -10,8 +10,8 @@ use std::fs;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
 use deploy::{
-    DeployBootstrapOptions, DeployInitOptions, DeployRenderOptions, DeploySecretsSource,
-    DeployStatusOptions, DeployTarget, DeployVerifyOptions,
+    DeployApplyOptions, DeployBootstrapOptions, DeployInitOptions, DeployRenderOptions,
+    DeploySecretsSource, DeployStatusOptions, DeployTarget, DeployVerifyOptions,
 };
 use local::{
     InitMode, ManagedInitOptions, SelfManagedInitOptions, StartOptions, StatusOptions, StopOptions,
@@ -240,6 +240,9 @@ enum DeploySubcommand {
     /// Render deterministic managed-host artifacts for the selected deploy profile
     Render(DeployRenderArgs),
 
+    /// Install a rendered managed-host bundle onto the local host
+    Apply(DeployApplyArgs),
+
     /// Verify the managed endpoint for the selected deploy profile through /health
     Verify(DeployVerifyArgs),
 
@@ -301,6 +304,45 @@ struct DeployVerifyArgs {
     /// Temporary endpoint override for verification
     #[arg(long = "endpoint")]
     endpoint: Option<String>,
+}
+
+#[derive(Args)]
+struct DeployApplyArgs {
+    /// Deploy profile name to apply
+    #[arg(long = "profile-name")]
+    profile_name: Option<String>,
+
+    /// Directory containing the previously rendered bundle
+    #[arg(long = "render-dir")]
+    render_dir: Option<String>,
+
+    /// Directory containing enscrive-developer, enscrive-observe, and enscrive-embed
+    #[arg(long = "binary-dir")]
+    binary_dir: Option<String>,
+
+    /// Site root for the developer portal bundle (must contain pkg/)
+    #[arg(long = "site-root")]
+    site_root: Option<String>,
+
+    /// Destination for installed systemd units
+    #[arg(long = "systemd-dir")]
+    systemd_dir: Option<String>,
+
+    /// Destination for installed nginx config
+    #[arg(long = "nginx-dir")]
+    nginx_dir: Option<String>,
+
+    /// Run systemctl daemon-reload after installing units
+    #[arg(long, default_value_t = false)]
+    reload_systemd: bool,
+
+    /// Enable and start enscrive services after installation
+    #[arg(long, default_value_t = false)]
+    start_services: bool,
+
+    /// Validate nginx config and reload nginx after installation
+    #[arg(long, default_value_t = false)]
+    reload_nginx: bool,
 }
 
 #[derive(Args)]
@@ -1952,6 +1994,25 @@ async fn main() {
                     }
                 }
             }
+            DeploySubcommand::Apply(args) => {
+                match deploy::apply(DeployApplyOptions {
+                    profile_name: args.profile_name.clone(),
+                    render_dir: args.render_dir.clone(),
+                    binary_dir: args.binary_dir.clone(),
+                    site_root: args.site_root.clone(),
+                    systemd_dir: args.systemd_dir.clone(),
+                    nginx_dir: args.nginx_dir.clone(),
+                    reload_systemd: args.reload_systemd,
+                    start_services: args.start_services,
+                    reload_nginx: args.reload_nginx,
+                })
+                .await
+                {
+                    Ok(data) => CliResponse::success("deploy.apply", data).emit(fmt),
+                    Err(e) => CliResponse::fail("deploy.apply", e, FailureClass::Bug, EXIT_FAILURE)
+                        .emit(fmt),
+                }
+            }
             DeploySubcommand::Verify(args) => {
                 match deploy::verify(DeployVerifyOptions {
                     profile_name: args.profile_name.clone(),
@@ -2765,6 +2826,57 @@ mod tests {
                 assert_eq!(endpoint.as_deref(), Some("https://stage.api.enscrive.io"));
             }
             _ => panic!("expected deploy verify"),
+        }
+    }
+
+    #[test]
+    fn parse_deploy_apply_command() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "deploy",
+            "apply",
+            "--profile-name",
+            "stage",
+            "--render-dir",
+            "./enscrive-deploy/stage",
+            "--binary-dir",
+            "/tmp/bin",
+            "--site-root",
+            "/tmp/site",
+            "--systemd-dir",
+            "/tmp/systemd",
+            "--nginx-dir",
+            "/tmp/nginx",
+            "--reload-systemd",
+            "--start-services",
+            "--reload-nginx",
+        ]);
+        match args.command {
+            Commands::Deploy {
+                sub:
+                    DeploySubcommand::Apply(DeployApplyArgs {
+                        profile_name,
+                        render_dir,
+                        binary_dir,
+                        site_root,
+                        systemd_dir,
+                        nginx_dir,
+                        reload_systemd,
+                        start_services,
+                        reload_nginx,
+                    }),
+            } => {
+                assert_eq!(profile_name.as_deref(), Some("stage"));
+                assert_eq!(render_dir.as_deref(), Some("./enscrive-deploy/stage"));
+                assert_eq!(binary_dir.as_deref(), Some("/tmp/bin"));
+                assert_eq!(site_root.as_deref(), Some("/tmp/site"));
+                assert_eq!(systemd_dir.as_deref(), Some("/tmp/systemd"));
+                assert_eq!(nginx_dir.as_deref(), Some("/tmp/nginx"));
+                assert!(reload_systemd);
+                assert!(start_services);
+                assert!(reload_nginx);
+            }
+            _ => panic!("expected deploy apply"),
         }
     }
 
