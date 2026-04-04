@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use tar::Archive;
 
-const DEPLOY_PROFILE_VERSION: u32 = 2;
+const DEPLOY_PROFILE_VERSION: u32 = 3;
 const LEGACY_LOCAL_DEPLOY_ENDPOINT: &str = "http://127.0.0.1:3000";
 const DEFAULT_BOOTSTRAP_BUNDLE_SECRET_KEY: &str = "ENSCRIVE_BOOTSTRAP_BUNDLE";
 const DEFAULT_MANAGED_DEVELOPER_PRIVATE_PORT: u16 = 13000;
@@ -23,6 +23,14 @@ const DEFAULT_MANAGED_OBSERVE_GRPC_PORT: u16 = 19090;
 const DEFAULT_MANAGED_EMBED_REST_PORT: u16 = 18081;
 const DEFAULT_MANAGED_EMBED_GRPC_PORT: u16 = 15052;
 const DEFAULT_MANAGED_EMBED_METRICS_PORT: u16 = 19000;
+const DEPLOY_SERVICE_DEVELOPER: &str = "enscrive-developer";
+const DEPLOY_SERVICE_OBSERVE: &str = "enscrive-observe";
+const DEPLOY_SERVICE_EMBED: &str = "enscrive-embed";
+const DEPLOY_SERVICE_NAMES: [&str; 3] = [
+    DEPLOY_SERVICE_DEVELOPER,
+    DEPLOY_SERVICE_OBSERVE,
+    DEPLOY_SERVICE_EMBED,
+];
 
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +133,7 @@ struct DeployProfile {
     #[serde(default = "default_legacy_deploy_endpoint")]
     endpoint: String,
     esm: Option<EsmProfile>,
+    esm_services: Option<DeployServiceEsmProfiles>,
     bootstrap: Option<DeployBootstrapState>,
 }
 
@@ -133,6 +142,14 @@ struct EsmProfile {
     binary: String,
     workdir: Option<String>,
     vault_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+struct DeployServiceEsmProfiles {
+    developer: Option<EsmProfile>,
+    observe: Option<EsmProfile>,
+    embed: Option<EsmProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -196,6 +213,10 @@ struct RenderLayout {
     runtime_dir: String,
     logs_dir: String,
     site_root: String,
+    secrets_root: String,
+    developer_esm_root: String,
+    observe_esm_root: String,
+    embed_esm_root: String,
     systemd_dir: String,
     nginx_dir: String,
 }
@@ -305,6 +326,31 @@ struct LocalBuildArtifacts {
     developer_site_root: PathBuf,
 }
 
+impl DeployServiceEsmProfiles {
+    fn get(&self, service_name: &str) -> Option<&EsmProfile> {
+        match service_name {
+            DEPLOY_SERVICE_DEVELOPER => self.developer.as_ref(),
+            DEPLOY_SERVICE_OBSERVE => self.observe.as_ref(),
+            DEPLOY_SERVICE_EMBED => self.embed.as_ref(),
+            _ => None,
+        }
+    }
+
+    fn missing_services(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.developer.is_none() {
+            missing.push(DEPLOY_SERVICE_DEVELOPER);
+        }
+        if self.observe.is_none() {
+            missing.push(DEPLOY_SERVICE_OBSERVE);
+        }
+        if self.embed.is_none() {
+            missing.push(DEPLOY_SERVICE_EMBED);
+        }
+        missing
+    }
+}
+
 fn default_legacy_deploy_endpoint() -> String {
     LEGACY_LOCAL_DEPLOY_ENDPOINT.to_string()
 }
@@ -326,7 +372,7 @@ pub async fn init(opts: DeployInitOptions) -> Result<Value, String> {
     let detected_esm = discover_esm();
     let secrets_source = resolve_secrets_source(opts.secrets_source, detected_esm.as_ref())?;
 
-    let esm = if secrets_source == DeploySecretsSource::Esm {
+    let (esm, esm_services) = if secrets_source == DeploySecretsSource::Esm {
         let discovered = detected_esm.ok_or_else(|| {
             "ESM was selected but no local ESM binary/vault was detected".to_string()
         })?;
@@ -346,13 +392,21 @@ pub async fn init(opts: DeployInitOptions) -> Result<Value, String> {
             }
         }
 
-        Some(EsmProfile {
-            binary: discovered.binary,
-            workdir: discovered.workdir,
-            vault_path: discovered.vault_path,
-        })
+        let discovered_services = discover_service_esm_profiles(&discovered);
+        let missing = discovered_services.missing_services();
+        if !missing.is_empty() {
+            return Err(format!(
+                "ESM deploy requires service-scoped vault roots for developer, observe, and embed; missing {}. Run from a workspace that can discover all three service vaults.",
+                missing.join(", ")
+            ));
+        }
+
+        let developer_esm = discovered_services.developer.clone().ok_or_else(|| {
+            "service-scoped ESM discovery is missing the developer vault".to_string()
+        })?;
+        (Some(developer_esm), Some(discovered_services))
     } else {
-        None
+        (None, None)
     };
 
     let profile = DeployProfile {
@@ -361,6 +415,7 @@ pub async fn init(opts: DeployInitOptions) -> Result<Value, String> {
         secrets_source: deploy_secrets_source_name(secrets_source).to_string(),
         endpoint: configured_endpoint.clone(),
         esm,
+        esm_services,
         bootstrap: None,
     };
 
@@ -381,6 +436,7 @@ pub async fn init(opts: DeployInitOptions) -> Result<Value, String> {
         "endpoint": configured_endpoint,
         "default_profile": profiles.default_profile,
         "esm": profile.esm,
+        "esm_services": profile.esm_services,
         "note": "deploy profiles are operator-facing and separate from customer init/self-managed profiles"
     }))
 }
@@ -400,7 +456,11 @@ pub async fn status(opts: DeployStatusOptions) -> Result<Value, String> {
         "stored_endpoint": endpoint_state.stored,
         "endpoint_origin": endpoint_state.origin,
         "esm_configured": profile.esm,
+        "esm_services_configured": profile.esm_services,
         "esm_detected_now": detected_esm,
+        "esm_services_detected_now": detected_esm
+            .as_ref()
+            .map(discover_service_esm_profiles),
         "esm_master_key_present": env::var("ESM_MASTER_KEY").ok().map(|value| !value.trim().is_empty()).unwrap_or(false),
         "bootstrap": profile.bootstrap.as_ref().map(|bootstrap| json!({
             "tenant_id": bootstrap.tenant_id,
@@ -572,10 +632,16 @@ pub async fn render(opts: DeployRenderOptions) -> Result<Value, String> {
         ),
     )
     .map_err(|e| format!("write developer env: {e}"))?;
-    fs::write(&render_targets.observe_env, render_observe_env(&ports))
-        .map_err(|e| format!("write observe env: {e}"))?;
-    fs::write(&render_targets.embed_env, render_embed_env(&ports))
-        .map_err(|e| format!("write embed env: {e}"))?;
+    fs::write(
+        &render_targets.observe_env,
+        render_observe_env(&profile, &layout, &ports),
+    )
+    .map_err(|e| format!("write observe env: {e}"))?;
+    fs::write(
+        &render_targets.embed_env,
+        render_embed_env(&profile, &layout, &ports),
+    )
+    .map_err(|e| format!("write embed env: {e}"))?;
     fs::write(
         &render_targets.developer_service,
         render_developer_service(&layout),
@@ -832,13 +898,39 @@ pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
         .map_err(|e| format!("create logs dir '{}': {e}", manifest.layout.logs_dir))?;
     fs::create_dir_all(&manifest.layout.site_root)
         .map_err(|e| format!("create site root '{}': {e}", manifest.layout.site_root))?;
+    fs::create_dir_all(&manifest.layout.secrets_root).map_err(|e| {
+        format!(
+            "create secrets root '{}': {e}",
+            manifest.layout.secrets_root
+        )
+    })?;
+    fs::create_dir_all(&manifest.layout.developer_esm_root).map_err(|e| {
+        format!(
+            "create developer ESM root '{}': {e}",
+            manifest.layout.developer_esm_root
+        )
+    })?;
+    fs::create_dir_all(&manifest.layout.observe_esm_root).map_err(|e| {
+        format!(
+            "create observe ESM root '{}': {e}",
+            manifest.layout.observe_esm_root
+        )
+    })?;
+    fs::create_dir_all(&manifest.layout.embed_esm_root).map_err(|e| {
+        format!(
+            "create embed ESM root '{}': {e}",
+            manifest.layout.embed_esm_root
+        )
+    })?;
 
     let installed_binaries =
         install_binaries(&manifest.layout.bin_dir, Path::new(&sources.binary_dir))?;
+    let installed_esm_binary = install_runtime_esm_binary(&manifest.layout.bin_dir, &profile)?;
     let installed_site_root = install_site_bundle(
         Path::new(&manifest.layout.site_root),
         Path::new(&sources.site_root),
     )?;
+    let installed_secret_roots = install_service_esm_roots(&manifest.layout, &profile)?;
 
     let installed_configs =
         install_hydrated_config_files(&manifest.layout.config_dir, &render_artifacts, &profile)?;
@@ -918,7 +1010,9 @@ pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
         "sources": sources,
         "installed": {
             "binaries": installed_binaries,
+            "esm_binary": installed_esm_binary,
             "site_root": installed_site_root,
+            "secret_roots": installed_secret_roots,
             "config_files": installed_configs,
             "systemd_units": installed_units,
             "nginx_files": installed_nginx,
@@ -1077,6 +1171,10 @@ fn render_layout(host_root: &str) -> RenderLayout {
         runtime_dir: format!("{host_root}/runtime"),
         logs_dir: format!("{host_root}/logs"),
         site_root: format!("{host_root}/site/enscrive-developer"),
+        secrets_root: format!("{host_root}/secrets"),
+        developer_esm_root: format!("{host_root}/secrets/{DEPLOY_SERVICE_DEVELOPER}"),
+        observe_esm_root: format!("{host_root}/secrets/{DEPLOY_SERVICE_OBSERVE}"),
+        embed_esm_root: format!("{host_root}/secrets/{DEPLOY_SERVICE_EMBED}"),
         systemd_dir: format!("{host_root}/systemd"),
         nginx_dir: format!("{host_root}/nginx"),
         host_root,
@@ -1121,6 +1219,10 @@ before running `enscrive deploy bootstrap` and `enscrive deploy verify`.\n\n\
 - config dir: `{config_dir}`\n\
 - runtime dir: `{runtime_dir}`\n\
 - logs dir: `{logs_dir}`\n\n\
+- secrets root: `{secrets_root}`\n\
+- developer ESM root: `{developer_esm_root}`\n\
+- observe ESM root: `{observe_esm_root}`\n\
+- embed ESM root: `{embed_esm_root}`\n\n\
 ## Private Ports\n\n\
 - enscrive-developer: `{developer_port}`\n\
 - enscrive-observe REST: `{observe_rest}`\n\
@@ -1129,9 +1231,9 @@ before running `enscrive deploy bootstrap` and `enscrive deploy verify`.\n\n\
 - enscrive-embed gRPC: `{embed_grpc}`\n\
 - enscrive-embed metrics: `{embed_metrics}`\n\n\
 ## Next Steps\n\n\
-1. Copy the current `enscrive-*` binaries into `{bin_dir}`.\n\
-2. Fill the generated env files under `{config_dir}` with real secrets and host values.\n\
-3. Install the generated systemd units under `/etc/systemd/system/` and the generated nginx config under `/etc/nginx/conf.d/`.\n\
+1. Copy the current `enscrive-*` binaries and the `esm` runtime into `{bin_dir}`.\n\
+2. Ensure service-scoped ESM workdirs are available for developer, observe, and embed; `enscrive deploy apply` copies them into `{secrets_root}`.\n\
+3. Install the generated env files under `{config_dir}`, the generated systemd units under `/etc/systemd/system/`, and the generated nginx config under `/etc/nginx/conf.d/`.\n\
 4. Reload systemd and nginx, then start the three Enscrive services.\n\
 5. Run `enscrive deploy bootstrap --profile-name {profile_name}` against the managed endpoint once bootstrap is ready.\n\
 6. Run `enscrive deploy verify --profile-name {profile_name}` to verify `/health` over the managed endpoint.\n\n\
@@ -1145,6 +1247,10 @@ before running `enscrive deploy bootstrap` and `enscrive deploy verify`.\n\n\
         config_dir = layout.config_dir,
         runtime_dir = layout.runtime_dir,
         logs_dir = layout.logs_dir,
+        secrets_root = layout.secrets_root,
+        developer_esm_root = layout.developer_esm_root,
+        observe_esm_root = layout.observe_esm_root,
+        embed_esm_root = layout.embed_esm_root,
         developer_port = ports.developer_private_port,
         observe_rest = ports.observe_rest_port,
         observe_grpc = ports.observe_grpc_port,
@@ -1162,6 +1268,17 @@ fn render_developer_env(
     bootstrap_public_key: Option<&str>,
 ) -> String {
     let bootstrap_public_key = bootstrap_public_key.unwrap_or("__OPTIONAL_BOOTSTRAP_PUBLIC_KEY__");
+    let esm_runtime =
+        if profile.secrets_source == deploy_secrets_source_name(DeploySecretsSource::Esm) {
+            format!(
+                "ESM_BINARY={bin_dir}/esm\n\
+ESM_VAULT_PATH={vault_root}\n",
+                bin_dir = layout.bin_dir,
+                vault_root = layout.developer_esm_root,
+            )
+        } else {
+            String::new()
+        };
     format!(
         "ENSCRIVE_REGION={region}\n\
 DEVELOPER_PORT={developer_port}\n\
@@ -1178,26 +1295,60 @@ OBSERVE_GRPC_ADDR=http://127.0.0.1:{observe_grpc}\n\
 EBA_TRUSTED_PUBLIC_KEY={bootstrap_public_key}\n\
 LEPTOS_SITE_ROOT={site_root}\n\
 LEPTOS_OUTPUT_NAME=enscrive-developer\n\
-LEPTOS_SITE_PKG_DIR=pkg\n",
+LEPTOS_SITE_PKG_DIR=pkg\n\
+{esm_runtime}",
         region = target_region_tag(&profile.target),
         developer_port = ports.developer_private_port,
         observe_grpc = ports.observe_grpc_port,
         bootstrap_public_key = bootstrap_public_key,
         site_root = layout.site_root,
+        esm_runtime = esm_runtime,
     )
 }
 
-fn render_observe_env(ports: &ManagedPorts) -> String {
+fn render_observe_env(
+    profile: &DeployProfile,
+    layout: &RenderLayout,
+    ports: &ManagedPorts,
+) -> String {
+    let esm_runtime =
+        if profile.secrets_source == deploy_secrets_source_name(DeploySecretsSource::Esm) {
+            format!(
+                "ESM_BINARY={bin_dir}/esm\n\
+ESM_VAULT_PATH={vault_root}\n",
+                bin_dir = layout.bin_dir,
+                vault_root = layout.observe_esm_root,
+            )
+        } else {
+            String::new()
+        };
     format!(
         "LOKI_URL=http://127.0.0.1:3100\n\
 EMBED_URL=http://127.0.0.1:{embed_grpc}\n\
 DATABASE_URL=__REQUIRED__\n\
-LAB_SERVICE_SECRET=__REQUIRED__\n",
+LAB_SERVICE_SECRET=__REQUIRED__\n\
+{esm_runtime}",
         embed_grpc = ports.embed_grpc_port,
+        esm_runtime = esm_runtime,
     )
 }
 
-fn render_embed_env(ports: &ManagedPorts) -> String {
+fn render_embed_env(
+    profile: &DeployProfile,
+    layout: &RenderLayout,
+    ports: &ManagedPorts,
+) -> String {
+    let esm_runtime =
+        if profile.secrets_source == deploy_secrets_source_name(DeploySecretsSource::Esm) {
+            format!(
+                "ESM_BINARY={bin_dir}/esm\n\
+ESM_VAULT_PATH={vault_root}\n",
+                bin_dir = layout.bin_dir,
+                vault_root = layout.embed_esm_root,
+            )
+        } else {
+            String::new()
+        };
     format!(
         "SERVER_ADDR=127.0.0.1:{embed_grpc}\n\
 REST_ADDR=127.0.0.1:{embed_rest}\n\
@@ -1205,15 +1356,18 @@ METRICS_PORT={embed_metrics}\n\
 QDRANT_URL=http://127.0.0.1:6333\n\
 QDRANT_GRPC_URL=http://127.0.0.1:6334\n\
 LAB_SERVICE_SECRET=__REQUIRED__\n\
+QDRANT_API_KEY=__REQUIRED__\n\
 OPENAI_API_KEY=__OPTIONAL__\n\
 NEBIUS_API_KEY=__OPTIONAL__\n\
 VOYAGE_API_KEY=__OPTIONAL__\n\
 BGE_ENDPOINT=__OPTIONAL__\n\
 BGE_API_KEY=__OPTIONAL__\n\
-BGE_MODEL_NAME=bge-large-en-v1.5\n",
+BGE_MODEL_NAME=bge-large-en-v1.5\n\
+{esm_runtime}",
         embed_grpc = ports.embed_grpc_port,
         embed_rest = ports.embed_rest_port,
         embed_metrics = ports.embed_metrics_port,
+        esm_runtime = esm_runtime,
     )
 }
 
@@ -1874,7 +2028,11 @@ fn resolve_render_artifact_paths(
             &artifacts.observe_env,
             &expected.observe_env,
         ),
-        embed_env: resolve_render_artifact_path(render_dir, &artifacts.embed_env, &expected.embed_env),
+        embed_env: resolve_render_artifact_path(
+            render_dir,
+            &artifacts.embed_env,
+            &expected.embed_env,
+        ),
         developer_service: resolve_render_artifact_path(
             render_dir,
             &artifacts.developer_service,
@@ -1898,7 +2056,11 @@ fn resolve_render_artifact_paths(
     }
 }
 
-fn resolve_render_artifact_path(render_dir: &Path, configured: &str, expected_relative: &str) -> String {
+fn resolve_render_artifact_path(
+    render_dir: &Path,
+    configured: &str,
+    expected_relative: &str,
+) -> String {
     let configured_path = Path::new(configured);
     if configured_path.is_absolute() {
         if configured_path.exists() {
@@ -2060,6 +2222,81 @@ fn discover_site_root() -> Result<PathBuf, String> {
     )
 }
 
+fn install_runtime_esm_binary(
+    destination_dir: &str,
+    profile: &DeployProfile,
+) -> Result<Option<String>, String> {
+    if profile.secrets_source != deploy_secrets_source_name(DeploySecretsSource::Esm) {
+        return Ok(None);
+    }
+
+    let esm = primary_esm_profile(profile).ok_or_else(|| {
+        "deploy profile expects ESM but has no primary ESM configuration; rerun `enscrive deploy init`"
+            .to_string()
+    })?;
+    let source = Path::new(&esm.binary);
+    if !source.is_file() {
+        return Err(format!(
+            "ESM binary '{}' configured in deploy profile does not exist",
+            source.display()
+        ));
+    }
+
+    let destination = Path::new(destination_dir).join("esm");
+    copy_file(source, &destination)?;
+    set_executable(&destination)?;
+    Ok(Some(destination.display().to_string()))
+}
+
+fn install_service_esm_roots(
+    layout: &RenderLayout,
+    profile: &DeployProfile,
+) -> Result<Vec<String>, String> {
+    if profile.secrets_source != deploy_secrets_source_name(DeploySecretsSource::Esm) {
+        return Ok(Vec::new());
+    }
+
+    let mut installed = Vec::new();
+    for (service_name, destination_root) in [
+        (DEPLOY_SERVICE_DEVELOPER, layout.developer_esm_root.as_str()),
+        (DEPLOY_SERVICE_OBSERVE, layout.observe_esm_root.as_str()),
+        (DEPLOY_SERVICE_EMBED, layout.embed_esm_root.as_str()),
+    ] {
+        let esm = resolve_service_esm_profile(profile, service_name).ok_or_else(|| {
+            format!(
+                "deploy profile is missing ESM configuration for service '{}'; rerun `enscrive deploy init` from a workspace that can discover all service vaults",
+                service_name
+            )
+        })?;
+        let source_root = esm_workdir_root(esm).ok_or_else(|| {
+            format!(
+                "unable to determine ESM workdir root for service '{}' from vault path '{}'",
+                service_name, esm.vault_path
+            )
+        })?;
+        let source_esm_dir = source_root.join(".esm");
+        if !source_esm_dir.join("secrets.esm").is_file() {
+            return Err(format!(
+                "service '{}' is missing an ESM vault at '{}'",
+                service_name,
+                source_esm_dir.display()
+            ));
+        }
+
+        let destination_root = PathBuf::from(destination_root);
+        remove_dir_if_exists(&destination_root)?;
+        fs::create_dir_all(&destination_root).map_err(|e| {
+            format!(
+                "create destination service ESM root '{}': {e}",
+                destination_root.display()
+            )
+        })?;
+        copy_dir_recursive(&source_esm_dir, &destination_root.join(".esm"))?;
+        installed.push(destination_root.display().to_string());
+    }
+    Ok(installed)
+}
+
 fn install_binaries(destination_dir: &str, source_dir: &Path) -> Result<Vec<String>, String> {
     let mut installed = Vec::new();
     for binary_name in ["enscrive-developer", "enscrive-observe", "enscrive-embed"] {
@@ -2101,9 +2338,10 @@ fn install_hydrated_config_files(
     profile: &DeployProfile,
 ) -> Result<Vec<String>, String> {
     let mut installed = Vec::new();
-    for (name, source, required_keys, optional_keys) in [
+    for (name, service_name, source, required_keys, optional_keys) in [
         (
             "developer.env",
+            DEPLOY_SERVICE_DEVELOPER,
             artifacts.developer_env.as_str(),
             vec![
                 "DATABASE_URL",
@@ -2116,14 +2354,16 @@ fn install_hydrated_config_files(
         ),
         (
             "observe.env",
+            DEPLOY_SERVICE_OBSERVE,
             artifacts.observe_env.as_str(),
             vec!["DATABASE_URL", "LAB_SERVICE_SECRET"],
             Vec::new(),
         ),
         (
             "embed.env",
+            DEPLOY_SERVICE_EMBED,
             artifacts.embed_env.as_str(),
-            vec!["LAB_SERVICE_SECRET"],
+            vec!["LAB_SERVICE_SECRET", "QDRANT_API_KEY"],
             vec![
                 "OPENAI_API_KEY",
                 "NEBIUS_API_KEY",
@@ -2135,7 +2375,13 @@ fn install_hydrated_config_files(
     ] {
         let template = fs::read_to_string(source)
             .map_err(|e| format!("read config template '{}': {e}", source))?;
-        let rendered = hydrate_env_template(&template, profile, &required_keys, &optional_keys)?;
+        let rendered = hydrate_env_template(
+            &template,
+            profile,
+            service_name,
+            &required_keys,
+            &optional_keys,
+        )?;
         let destination = Path::new(destination_dir).join(name);
         let parent = destination.parent().ok_or_else(|| {
             format!(
@@ -2155,13 +2401,14 @@ fn install_hydrated_config_files(
 fn hydrate_env_template(
     template: &str,
     profile: &DeployProfile,
+    service_name: &str,
     required_keys: &[&str],
     optional_keys: &[&str],
 ) -> Result<String, String> {
     let required_values: HashMap<&str, String> = required_keys
         .iter()
         .map(|key| {
-            resolve_deploy_secret(profile, key, true).map(|value| {
+            resolve_deploy_secret(profile, service_name, key, true).map(|value| {
                 (
                     *key,
                     value.expect("required deploy secret resolution returned None"),
@@ -2171,7 +2418,9 @@ fn hydrate_env_template(
         .collect::<Result<HashMap<_, _>, _>>()?;
     let optional_values: HashMap<&str, Option<String>> = optional_keys
         .iter()
-        .map(|key| resolve_deploy_secret(profile, key, false).map(|value| (*key, value)))
+        .map(|key| {
+            resolve_deploy_secret(profile, service_name, key, false).map(|value| (*key, value))
+        })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
     let mut rendered_lines = Vec::new();
@@ -2203,15 +2452,18 @@ fn hydrate_env_template(
 
 fn resolve_deploy_secret(
     profile: &DeployProfile,
+    service_name: &str,
     key: &str,
     required: bool,
 ) -> Result<Option<String>, String> {
     let resolved = match profile.secrets_source.as_str() {
         "esm" => {
-            let esm = profile
-                .esm
-                .as_ref()
-                .ok_or_else(|| format!("deploy profile is missing ESM configuration for '{}'", key))?;
+            let esm = resolve_service_esm_profile(profile, service_name).ok_or_else(|| {
+                format!(
+                    "deploy profile is missing ESM configuration for service '{}' while resolving '{}'",
+                    service_name, key
+                )
+            })?;
             load_secret_from_esm_optional(esm, key)?
         }
         "env" | "prompt" => env::var(key)
@@ -2227,12 +2479,14 @@ fn resolve_deploy_secret(
     };
 
     if required {
-        resolved.ok_or_else(|| {
-            format!(
-                "required deploy secret '{}' not found in {}",
-                key, profile.secrets_source
-            )
-        }).map(Some)
+        resolved
+            .ok_or_else(|| {
+                format!(
+                    "required deploy secret '{}' not found in {} for service '{}'",
+                    key, profile.secrets_source, service_name
+                )
+            })
+            .map(Some)
     } else {
         Ok(resolved)
     }
@@ -2425,7 +2679,7 @@ fn resolve_bootstrap_bundle(
         .unwrap_or(DEFAULT_BOOTSTRAP_BUNDLE_SECRET_KEY);
 
     if profile.secrets_source == deploy_secrets_source_name(DeploySecretsSource::Esm) {
-        let esm = profile.esm.as_ref().ok_or_else(|| {
+        let esm = primary_esm_profile(profile).ok_or_else(|| {
             "deploy profile expects ESM but has no ESM configuration; rerun `enscrive deploy init`"
                 .to_string()
         })?;
@@ -2466,6 +2720,31 @@ fn resolve_bootstrap_bundle(
         "no bootstrap bundle available; pass --bundle-path or configure an ESM-backed deploy profile"
             .to_string(),
     )
+}
+
+fn primary_esm_profile(profile: &DeployProfile) -> Option<&EsmProfile> {
+    profile
+        .esm_services
+        .as_ref()
+        .and_then(|services| services.developer.as_ref())
+        .or(profile.esm.as_ref())
+}
+
+fn resolve_service_esm_profile<'a>(
+    profile: &'a DeployProfile,
+    service_name: &str,
+) -> Option<&'a EsmProfile> {
+    profile
+        .esm_services
+        .as_ref()
+        .and_then(|services| services.get(service_name))
+        .or_else(|| {
+            if service_name == DEPLOY_SERVICE_DEVELOPER {
+                profile.esm.as_ref()
+            } else {
+                None
+            }
+        })
 }
 
 fn resolve_secrets_source(
@@ -2522,12 +2801,14 @@ fn ensure_esm_master_key_if_needed() -> Result<(), String> {
 }
 
 fn load_bundle_from_esm(esm: &EsmProfile, secret_key: &str) -> Result<String, String> {
-    load_secret_from_esm_optional(esm, secret_key)?.ok_or_else(|| {
-        format!("ESM secret '{}' resolved to an empty bundle", secret_key)
-    })
+    load_secret_from_esm_optional(esm, secret_key)?
+        .ok_or_else(|| format!("ESM secret '{}' resolved to an empty bundle", secret_key))
 }
 
-fn load_secret_from_esm_optional(esm: &EsmProfile, secret_key: &str) -> Result<Option<String>, String> {
+fn load_secret_from_esm_optional(
+    esm: &EsmProfile,
+    secret_key: &str,
+) -> Result<Option<String>, String> {
     ensure_esm_master_key_if_needed()?;
 
     let mut cmd = Command::new(&esm.binary);
@@ -2649,6 +2930,109 @@ fn discover_esm() -> Option<EsmDiscovery> {
     None
 }
 
+fn discover_service_esm_profiles(primary: &EsmDiscovery) -> DeployServiceEsmProfiles {
+    DeployServiceEsmProfiles {
+        developer: discover_service_esm_profile(primary, DEPLOY_SERVICE_DEVELOPER),
+        observe: discover_service_esm_profile(primary, DEPLOY_SERVICE_OBSERVE),
+        embed: discover_service_esm_profile(primary, DEPLOY_SERVICE_EMBED),
+    }
+}
+
+fn discover_service_esm_profile(primary: &EsmDiscovery, service_name: &str) -> Option<EsmProfile> {
+    let mut candidates = Vec::<PathBuf>::new();
+    let primary_root = esm_workdir_root_from_discovery(primary)?;
+    let primary_name = primary_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    if primary_name == service_name {
+        candidates.push(primary_root.clone());
+    }
+
+    if let Some(parent) = primary_root.parent() {
+        candidates.push(parent.join(service_name));
+    }
+
+    if is_service_name(&primary_name) {
+        if let Some(repo_layout_candidate) = repo_layout_service_root(&primary_root, service_name) {
+            candidates.push(repo_layout_candidate);
+        }
+    }
+
+    candidates.push(primary_root.join(service_name));
+
+    for candidate in candidates {
+        if !candidate.join(".esm").join("secrets.esm").is_file() {
+            continue;
+        }
+        return Some(EsmProfile {
+            binary: primary.binary.clone(),
+            workdir: Some(candidate.display().to_string()),
+            vault_path: candidate
+                .join(".esm")
+                .join("secrets.esm")
+                .display()
+                .to_string(),
+        });
+    }
+
+    None
+}
+
+fn esm_workdir_root_from_discovery(primary: &EsmDiscovery) -> Option<PathBuf> {
+    primary
+        .workdir
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| esm_workdir_root_from_vault_path(&primary.vault_path))
+}
+
+fn esm_workdir_root(esm: &EsmProfile) -> Option<PathBuf> {
+    esm.workdir
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| esm_workdir_root_from_vault_path(&esm.vault_path))
+}
+
+fn esm_workdir_root_from_vault_path(vault_path: &str) -> Option<PathBuf> {
+    let vault_path = PathBuf::from(vault_path);
+    let esm_dir = vault_path.parent()?;
+    let workdir = esm_dir.parent()?;
+    Some(workdir.to_path_buf())
+}
+
+fn repo_layout_service_root(primary_root: &Path, service_name: &str) -> Option<PathBuf> {
+    let mut repo_root = None;
+    for ancestor in primary_root.ancestors() {
+        let Some(candidate_name) = ancestor.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if is_service_name(candidate_name) {
+            repo_root = Some((ancestor.to_path_buf(), candidate_name.to_string()));
+        }
+    }
+    let (repo_root, current_service_name) = repo_root?;
+    let repo_parent = repo_root.parent()?;
+    let other_repo_root = repo_parent.join(service_name);
+    let relative = primary_root.strip_prefix(&repo_root).ok()?;
+    let mut rebuilt = other_repo_root;
+    for component in relative.components() {
+        let component = component.as_os_str().to_string_lossy().to_string();
+        if component == current_service_name {
+            rebuilt.push(service_name);
+        } else {
+            rebuilt.push(component);
+        }
+    }
+    Some(rebuilt)
+}
+
+fn is_service_name(name: &str) -> bool {
+    DEPLOY_SERVICE_NAMES.contains(&name)
+}
+
 fn vault_path_for(workdir: Option<&str>) -> String {
     match workdir {
         Some(path) => PathBuf::from(path)
@@ -2745,7 +3129,10 @@ mod tests {
                 "DATABASE_URL",
                 "postgresql://enscrive:secret@db.example.com/enscrive",
             );
-            env::set_var("KEYCLOAK_ISSUER", "https://auth.example.com/realms/enscrive");
+            env::set_var(
+                "KEYCLOAK_ISSUER",
+                "https://auth.example.com/realms/enscrive",
+            );
             env::set_var("KEYCLOAK_CLIENT_SECRET", "stage-keycloak-client-secret");
             env::set_var(
                 "HMAC_PEPPER",
@@ -2759,6 +3146,67 @@ mod tests {
                 "LAB_SERVICE_SECRET",
                 "stage-lab-service-secret-0123456789abcdef",
             );
+            env::set_var("QDRANT_API_KEY", "stage-qdrant-api-key-0123456789abcdef");
+        }
+    }
+
+    fn make_fake_esm_binary(temp: &TempDir) -> PathBuf {
+        let bin_dir = temp.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let binary = bin_dir.join("esm");
+        fs::write(
+            &binary,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "--vault-path" ]]; then
+  echo "missing --vault-path" >&2
+  exit 1
+fi
+vault="$2"
+shift 2
+if [[ "${1:-}" != "get" ]]; then
+  echo "unsupported command" >&2
+  exit 1
+fi
+key="$2"
+secret_file="$(dirname "$vault")/$key"
+if [[ -f "$secret_file" ]]; then
+  cat "$secret_file"
+  exit 0
+fi
+echo "No such secret" >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(&binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&binary, perms).unwrap();
+        }
+        binary
+    }
+
+    fn write_service_esm_root(
+        root: &Path,
+        values: &[(&str, &str)],
+        sync_bucket: &str,
+        sync_prefix: &str,
+    ) {
+        let esm_dir = root.join(".esm");
+        fs::create_dir_all(&esm_dir).unwrap();
+        fs::write(esm_dir.join("secrets.esm"), b"vault").unwrap();
+        fs::write(
+            esm_dir.join("sync.toml"),
+            format!(
+                "backend = \"s3\"\nbucket = \"{}\"\nprefix = \"{}\"\nregion = \"us-east-1\"\n",
+                sync_bucket, sync_prefix
+            ),
+        )
+        .unwrap();
+        for (key, value) in values {
+            fs::write(esm_dir.join(key), value).unwrap();
         }
     }
 
@@ -3099,7 +3547,10 @@ mod tests {
 
         let mut manifest = load_render_manifest(&host_render_dir.join("manifest.json")).unwrap();
         manifest.artifacts = RenderedArtifactPaths {
-            manifest: operator_render_dir.join("manifest.json").display().to_string(),
+            manifest: operator_render_dir
+                .join("manifest.json")
+                .display()
+                .to_string(),
             readme: operator_render_dir.join("README.md").display().to_string(),
             developer_env: operator_render_dir
                 .join("config")
@@ -3177,6 +3628,311 @@ mod tests {
         assert_eq!(result["profile"].as_str(), Some("stage"));
         assert!(systemd_dir.join("enscrive-developer.service").exists());
         assert!(nginx_dir.join("stage.api.enscrive.io.conf").exists());
+    }
+
+    #[tokio::test]
+    async fn deploy_init_discovers_service_scoped_esm_roots_across_repo_layout() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        unsafe {
+            env::remove_var("ESM_BINARY");
+            env::remove_var("ESM_VAULT_PATH");
+            env::remove_var("ESM_MASTER_KEY");
+        }
+
+        let fake_esm = make_fake_esm_binary(&temp);
+        let original_path = env::var_os("PATH");
+        let original_cwd = env::current_dir().unwrap();
+
+        let workspace_root = temp.path().join("enscrive-io");
+        let stage_suffix = PathBuf::from("ESM-STAGING").join("02-STAGE");
+        let developer_root = workspace_root
+            .join(DEPLOY_SERVICE_DEVELOPER)
+            .join(&stage_suffix)
+            .join(DEPLOY_SERVICE_DEVELOPER);
+        let observe_root = workspace_root
+            .join(DEPLOY_SERVICE_OBSERVE)
+            .join(&stage_suffix)
+            .join(DEPLOY_SERVICE_OBSERVE);
+        let embed_root = workspace_root
+            .join(DEPLOY_SERVICE_EMBED)
+            .join(&stage_suffix)
+            .join(DEPLOY_SERVICE_EMBED);
+
+        write_service_esm_root(
+            &developer_root,
+            &[("DATABASE_URL", "postgresql://developer-db")],
+            "enscrive-secrets-stage",
+            "enscrive-developer",
+        );
+        write_service_esm_root(
+            &observe_root,
+            &[("LAB_SERVICE_SECRET", "observe-lab-secret-0123456789abcdef")],
+            "enscrive-secrets-stage",
+            "enscrive-observe",
+        );
+        write_service_esm_root(
+            &embed_root,
+            &[("QDRANT_API_KEY", "embed-qdrant-secret-0123456789abcdef")],
+            "enscrive-secrets-stage",
+            "enscrive-embed",
+        );
+
+        let path_prefix = fake_esm.parent().unwrap().display().to_string();
+        let updated_path = match original_path.as_ref() {
+            Some(existing) => {
+                format!("{}:{}", path_prefix, PathBuf::from(existing).display())
+            }
+            None => path_prefix,
+        };
+        unsafe {
+            env::set_var("PATH", updated_path);
+        }
+        env::set_current_dir(&developer_root).unwrap();
+
+        let result = init(DeployInitOptions {
+            target: Some(DeployTarget::Stage),
+            profile_name: Some("stage".to_string()),
+            secrets_source: Some(DeploySecretsSource::Esm),
+            endpoint_override: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let developer_root_str = developer_root.display().to_string();
+        let observe_root_str = observe_root.display().to_string();
+        let embed_root_str = embed_root.display().to_string();
+
+        assert_eq!(
+            result["esm_services"]["developer"]["workdir"].as_str(),
+            Some(developer_root_str.as_str())
+        );
+        assert_eq!(
+            result["esm_services"]["observe"]["workdir"].as_str(),
+            Some(observe_root_str.as_str())
+        );
+        assert_eq!(
+            result["esm_services"]["embed"]["workdir"].as_str(),
+            Some(embed_root_str.as_str())
+        );
+
+        let profiles = load_deploy_profiles().unwrap();
+        let profile = profiles.profiles.get("stage").unwrap();
+        assert_eq!(
+            profile
+                .esm_services
+                .as_ref()
+                .and_then(|services| services.observe.as_ref())
+                .and_then(|esm| esm.workdir.as_deref()),
+            Some(observe_root_str.as_str())
+        );
+        assert_eq!(
+            profile
+                .esm_services
+                .as_ref()
+                .and_then(|services| services.embed.as_ref())
+                .and_then(|esm| esm.workdir.as_deref()),
+            Some(embed_root_str.as_str())
+        );
+
+        env::set_current_dir(original_cwd).unwrap();
+        match original_path {
+            Some(path) => unsafe { env::set_var("PATH", path) },
+            None => unsafe { env::remove_var("PATH") },
+        }
+    }
+
+    #[tokio::test]
+    async fn deploy_apply_installs_service_scoped_esm_roots_and_runtime_wiring() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        unsafe {
+            env::remove_var("ESM_BINARY");
+            env::remove_var("ESM_VAULT_PATH");
+            env::remove_var("ESM_MASTER_KEY");
+        }
+
+        let fake_esm = make_fake_esm_binary(&temp);
+        let original_path = env::var_os("PATH");
+        let original_cwd = env::current_dir().unwrap();
+
+        let host_secrets_root = temp.path().join("host-secrets");
+        let developer_root = host_secrets_root.join(DEPLOY_SERVICE_DEVELOPER);
+        let observe_root = host_secrets_root.join(DEPLOY_SERVICE_OBSERVE);
+        let embed_root = host_secrets_root.join(DEPLOY_SERVICE_EMBED);
+
+        write_service_esm_root(
+            &developer_root,
+            &[
+                ("DATABASE_URL", "postgresql://developer-service"),
+                (
+                    "KEYCLOAK_ISSUER",
+                    "https://auth.example.com/realms/enscrive",
+                ),
+                ("KEYCLOAK_CLIENT_SECRET", "developer-keycloak-secret"),
+                (
+                    "HMAC_PEPPER",
+                    "developer-hmac-pepper-0123456789abcdef0123456789",
+                ),
+                (
+                    "AES_KEY",
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                ),
+                ("OPENAI_API_KEY", "sk-stage-openai"),
+                ("ANTHROPIC_API_KEY", "anth-stage"),
+            ],
+            "enscrive-secrets-stage",
+            "enscrive-developer",
+        );
+        write_service_esm_root(
+            &observe_root,
+            &[
+                ("DATABASE_URL", "postgresql://observe-service"),
+                ("LAB_SERVICE_SECRET", "observe-lab-secret-0123456789abcdef"),
+            ],
+            "enscrive-secrets-stage",
+            "enscrive-observe",
+        );
+        write_service_esm_root(
+            &embed_root,
+            &[
+                ("LAB_SERVICE_SECRET", "embed-lab-secret-0123456789abcdef"),
+                ("QDRANT_API_KEY", "embed-qdrant-secret-0123456789abcdef"),
+                ("OPENAI_API_KEY", "sk-embed-openai"),
+                ("NEBIUS_API_KEY", "embed-nebius"),
+                ("VOYAGE_API_KEY", "embed-voyage"),
+            ],
+            "enscrive-secrets-stage",
+            "enscrive-embed",
+        );
+
+        let path_prefix = fake_esm.parent().unwrap().display().to_string();
+        let updated_path = match original_path.as_ref() {
+            Some(existing) => {
+                format!("{}:{}", path_prefix, PathBuf::from(existing).display())
+            }
+            None => path_prefix,
+        };
+        unsafe {
+            env::set_var("PATH", updated_path);
+        }
+        env::set_current_dir(&developer_root).unwrap();
+
+        init(DeployInitOptions {
+            target: Some(DeployTarget::Stage),
+            profile_name: Some("stage".to_string()),
+            secrets_source: Some(DeploySecretsSource::Esm),
+            endpoint_override: None,
+            set_default: true,
+        })
+        .await
+        .unwrap();
+
+        let host_root = temp.path().join("host");
+        let render_dir = temp.path().join("rendered");
+        render(DeployRenderOptions {
+            profile_name: Some("stage".to_string()),
+            output_dir: Some(render_dir.display().to_string()),
+            host_root: Some(host_root.display().to_string()),
+            bootstrap_public_key: Some("test-bootstrap-public-key".to_string()),
+        })
+        .await
+        .unwrap();
+
+        let binary_dir = temp.path().join("bin-src");
+        fs::create_dir_all(&binary_dir).unwrap();
+        for binary_name in ["enscrive-developer", "enscrive-observe", "enscrive-embed"] {
+            fs::write(binary_dir.join(binary_name), format!("{binary_name}-bytes")).unwrap();
+        }
+
+        let site_root = temp.path().join("site-src");
+        fs::create_dir_all(site_root.join("pkg")).unwrap();
+        fs::write(
+            site_root.join("pkg").join("enscrive-developer.css"),
+            "body{}",
+        )
+        .unwrap();
+
+        let systemd_dir = temp.path().join("systemd");
+        let nginx_dir = temp.path().join("nginx");
+
+        let result = apply(DeployApplyOptions {
+            profile_name: Some("stage".to_string()),
+            render_dir: Some(render_dir.display().to_string()),
+            binary_dir: Some(binary_dir.display().to_string()),
+            site_root: Some(site_root.display().to_string()),
+            systemd_dir: Some(systemd_dir.display().to_string()),
+            nginx_dir: Some(nginx_dir.display().to_string()),
+            reload_systemd: false,
+            start_services: false,
+            reload_nginx: false,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["profile"].as_str(), Some("stage"));
+        assert!(host_root.join("bin").join("esm").exists());
+        assert!(
+            host_root
+                .join("secrets")
+                .join(DEPLOY_SERVICE_DEVELOPER)
+                .join(".esm")
+                .join("secrets.esm")
+                .exists()
+        );
+        assert!(
+            host_root
+                .join("secrets")
+                .join(DEPLOY_SERVICE_OBSERVE)
+                .join(".esm")
+                .join("sync.toml")
+                .exists()
+        );
+        assert!(
+            host_root
+                .join("secrets")
+                .join(DEPLOY_SERVICE_EMBED)
+                .join(".esm")
+                .join("QDRANT_API_KEY")
+                .exists()
+        );
+
+        let developer_env =
+            fs::read_to_string(host_root.join("config").join("developer.env")).unwrap();
+        assert!(developer_env.contains("DATABASE_URL=postgresql://developer-service"));
+        assert!(developer_env.contains(&format!(
+            "ESM_VAULT_PATH={}",
+            host_root
+                .join("secrets")
+                .join(DEPLOY_SERVICE_DEVELOPER)
+                .display()
+        )));
+        assert!(developer_env.contains(&format!(
+            "ESM_BINARY={}",
+            host_root.join("bin").join("esm").display()
+        )));
+
+        let observe_env = fs::read_to_string(host_root.join("config").join("observe.env")).unwrap();
+        assert!(observe_env.contains("DATABASE_URL=postgresql://observe-service"));
+        assert!(observe_env.contains("LAB_SERVICE_SECRET=observe-lab-secret-0123456789abcdef"));
+
+        let embed_env = fs::read_to_string(host_root.join("config").join("embed.env")).unwrap();
+        assert!(embed_env.contains("QDRANT_API_KEY=embed-qdrant-secret-0123456789abcdef"));
+        assert!(embed_env.contains("LAB_SERVICE_SECRET=embed-lab-secret-0123456789abcdef"));
+        assert!(embed_env.contains("OPENAI_API_KEY=sk-embed-openai"));
+        assert!(embed_env.contains(&format!(
+            "ESM_VAULT_PATH={}",
+            host_root.join("secrets").join(DEPLOY_SERVICE_EMBED).display()
+        )));
+
+        env::set_current_dir(original_cwd).unwrap();
+        match original_path {
+            Some(path) => unsafe { env::set_var("PATH", path) },
+            None => unsafe { env::remove_var("PATH") },
+        }
     }
 
     #[tokio::test]
@@ -3597,6 +4353,7 @@ mod tests {
             secrets_source: "esm".to_string(),
             endpoint: LEGACY_LOCAL_DEPLOY_ENDPOINT.to_string(),
             esm: None,
+            esm_services: None,
             bootstrap: None,
         });
 

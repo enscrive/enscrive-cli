@@ -160,6 +160,18 @@ steady-state operator endpoint for that profile.
 `DEV`, `STAGE`, `US`, `EU`, and `AP`. It is intentionally separate from customer
 `init` so local/self-managed onboarding does not inherit ESM/operator assumptions.
 
+For managed ESM-backed environments, `deploy init` now models the real stack as
+three service-scoped vault roots:
+
+- `enscrive-developer`
+- `enscrive-observe`
+- `enscrive-embed`
+
+Run it from the developer STAGE vault workspace on the operator machine or from
+the developer secret root on the target host. The CLI discovers the companion
+observe and embed roots automatically when they exist in the expected repo-style
+or host-style layout.
+
 `deploy render` is the first honest STAGE host-delivery step. It generates a
 deterministic managed-host bundle under `./enscrive-deploy/<profile>/` by
 default, including:
@@ -169,6 +181,8 @@ default, including:
 - an nginx reverse-proxy config targeting the private developer port
 - a machine-readable `manifest.json`
 - a rendered `README.md` with operator next steps
+- service-scoped installed secret roots under `/opt/enscrive/<target>/secrets/...`
+- runtime `ESM_BINARY` / `ESM_VAULT_PATH` wiring for services that already read from ESM at runtime
 
 Example:
 
@@ -239,9 +253,17 @@ enscrive deploy verify --profile-name stage
 after rendering. It stages:
 
 - `enscrive-developer`, `enscrive-observe`, and `enscrive-embed` into the managed host `bin/`
+- `esm` into the managed host `bin/`
 - the developer portal site bundle into the managed host `site/`
+- the discovered developer, observe, and embed vault roots into the managed host `secrets/`
 - rendered env files into the managed host `config/`
 - systemd units and nginx config into operator-selected destinations
+
+Config hydration is now service-scoped:
+
+- `developer.env` is hydrated from the developer vault
+- `observe.env` is hydrated from the observe vault
+- `embed.env` is hydrated from the embed vault
 
 By default it only installs files. Use `--reload-systemd`, `--start-services`,
 and `--reload-nginx` when you want the CLI to reconcile the live host too.
