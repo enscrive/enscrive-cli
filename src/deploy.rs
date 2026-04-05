@@ -1197,6 +1197,27 @@ fn target_region_tag(target: &str) -> String {
     target.trim().to_ascii_uppercase()
 }
 
+fn target_environment_name(target: &str) -> String {
+    target.trim().to_ascii_lowercase()
+}
+
+fn target_customer_region(target: &str) -> Option<&'static str> {
+    match target.trim().to_ascii_lowercase().as_str() {
+        "stage" | "us" | "dev" => Some("us"),
+        "eu" => Some("eu"),
+        "ap" => Some("ap"),
+        _ => None,
+    }
+}
+
+fn target_cloud_provider(_target: &str) -> &'static str {
+    "aws"
+}
+
+fn target_stack_id(profile: &DeployProfile) -> String {
+    format!("{}-0", profile.aws_region.trim())
+}
+
 fn render_readme(
     profile_name: &str,
     profile: &DeployProfile,
@@ -1282,6 +1303,11 @@ ESM_VAULT_PATH={vault_root}\n",
         };
     format!(
         "ENSCRIVE_REGION={region}\n\
+ENSCRIVE_ENVIRONMENT={environment_name}\n\
+CUSTOMER_REGION={customer_region}\n\
+CLOUD_PROVIDER={cloud_provider}\n\
+PROVIDER_REGION={provider_region}\n\
+STACK_ID={stack_id}\n\
 DEVELOPER_PORT={developer_port}\n\
 DATABASE_URL=__REQUIRED__\n\
 KEYCLOAK_ISSUER=__REQUIRED__\n\
@@ -1299,6 +1325,11 @@ LEPTOS_OUTPUT_NAME=enscrive-developer\n\
 LEPTOS_SITE_PKG_DIR=pkg\n\
 {esm_runtime}",
         region = target_region_tag(&profile.target),
+        environment_name = target_environment_name(&profile.target),
+        customer_region = target_customer_region(&profile.target).unwrap_or("us"),
+        cloud_provider = target_cloud_provider(&profile.target),
+        provider_region = profile.aws_region,
+        stack_id = target_stack_id(profile),
         developer_port = ports.developer_private_port,
         observe_grpc = ports.observe_grpc_port,
         bootstrap_public_key = bootstrap_public_key,
@@ -3390,6 +3421,11 @@ exit 1
             developer_env
                 .contains("PORTAL_OIDC_REDIRECT_URI=https://stage.api.enscrive.io/auth/callback")
         );
+        assert!(developer_env.contains("ENSCRIVE_ENVIRONMENT=stage"));
+        assert!(developer_env.contains("CUSTOMER_REGION=us"));
+        assert!(developer_env.contains("CLOUD_PROVIDER=aws"));
+        assert!(developer_env.contains("PROVIDER_REGION=us-east-2"));
+        assert!(developer_env.contains("STACK_ID=us-east-2-0"));
         assert!(developer_env.contains("DEVELOPER_PORT=13000"));
         assert!(developer_env.contains("EBA_TRUSTED_PUBLIC_KEY=test-bootstrap-public-key"));
         assert_eq!(
@@ -3921,6 +3957,11 @@ exit 1
 
         let developer_env =
             fs::read_to_string(host_root.join("config").join("developer.env")).unwrap();
+        assert!(developer_env.contains("ENSCRIVE_ENVIRONMENT=stage"));
+        assert!(developer_env.contains("CUSTOMER_REGION=us"));
+        assert!(developer_env.contains("CLOUD_PROVIDER=aws"));
+        assert!(developer_env.contains("PROVIDER_REGION=us-east-2"));
+        assert!(developer_env.contains("STACK_ID=us-east-2-0"));
         assert!(developer_env.contains("DATABASE_URL=postgresql://developer-service"));
         assert!(developer_env.contains(&format!(
             "ESM_VAULT_PATH={}",
