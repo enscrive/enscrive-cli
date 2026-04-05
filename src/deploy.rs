@@ -12,6 +12,7 @@ use std::io::{self, IsTerminal, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tar::Archive;
 
 const DEPLOY_PROFILE_VERSION: u32 = 3;
@@ -2501,13 +2502,31 @@ fn copy_file(source: &Path, destination: &Path) -> Result<(), String> {
     })?;
     fs::create_dir_all(parent)
         .map_err(|e| format!("create destination dir '{}': {e}", parent.display()))?;
-    fs::copy(source, destination).map_err(|e| {
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| format!("destination '{}' has no valid file name", destination.display()))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let staging_name = format!(".{file_name}.tmp-{}-{nonce}", std::process::id());
+    let staging_path = parent.join(staging_name);
+    fs::copy(source, &staging_path).map_err(|e| {
         format!(
-            "copy '{}' to '{}': {e}",
+            "copy '{}' to staging path '{}': {e}",
             source.display(),
-            destination.display()
+            staging_path.display()
         )
     })?;
+    if let Err(e) = fs::rename(&staging_path, destination) {
+        let _ = fs::remove_file(&staging_path);
+        return Err(format!(
+            "replace '{}' with staged file '{}': {e}",
+            destination.display(),
+            staging_path.display()
+        ));
+    }
     Ok(())
 }
 
@@ -4275,6 +4294,28 @@ exit 1
         let destination = release_dir.join("server");
         assert!(destination.is_file());
         assert_eq!(fs::read(destination).unwrap(), b"developer-binary");
+    }
+
+    #[test]
+    fn copy_file_replaces_existing_destination_via_staging_path() {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("source.txt");
+        let destination = temp.path().join("nested").join("destination.txt");
+
+        fs::write(&source, b"new-contents").unwrap();
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"old-contents").unwrap();
+
+        copy_file(&source, &destination).unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"new-contents");
+
+        let leftover_tmp = fs::read_dir(destination.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .any(|name| name.to_string_lossy().contains(".tmp-"));
+        assert!(!leftover_tmp);
     }
 
     #[tokio::test]
