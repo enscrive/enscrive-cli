@@ -24,6 +24,7 @@ const DEFAULT_MANAGED_OBSERVE_GRPC_PORT: u16 = 19090;
 const DEFAULT_MANAGED_EMBED_REST_PORT: u16 = 18081;
 const DEFAULT_MANAGED_EMBED_GRPC_PORT: u16 = 15052;
 const DEFAULT_MANAGED_EMBED_METRICS_PORT: u16 = 19000;
+const DEFAULT_MANAGED_KEYCLOAK_HTTP_PORT: u16 = 8180;
 const DEPLOY_SERVICE_DEVELOPER: &str = "enscrive-developer";
 const DEPLOY_SERVICE_OBSERVE: &str = "enscrive-observe";
 const DEPLOY_SERVICE_EMBED: &str = "enscrive-embed";
@@ -220,6 +221,7 @@ struct RenderLayout {
     embed_esm_root: String,
     systemd_dir: String,
     nginx_dir: String,
+    keycloak_theme_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -230,6 +232,7 @@ struct ManagedPorts {
     embed_rest_port: u16,
     embed_grpc_port: u16,
     embed_metrics_port: u16,
+    keycloak_http_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +328,7 @@ struct LocalBuildArtifacts {
     observe_binary: PathBuf,
     embed_binary: PathBuf,
     developer_site_root: PathBuf,
+    keycloak_theme_root: PathBuf,
 }
 
 impl DeployServiceEsmProfiles {
@@ -841,7 +845,8 @@ pub async fn fetch(opts: DeployFetchOptions) -> Result<Value, String> {
                     artifacts.developer_binary.display().to_string(),
                     artifacts.observe_binary.display().to_string(),
                     artifacts.embed_binary.display().to_string(),
-                    artifacts.developer_site_root.display().to_string()
+                    artifacts.developer_site_root.display().to_string(),
+                    artifacts.keycloak_theme_root.display().to_string()
                 ],
                 "note": "fetch staged locally built Enscrive artifacts into the managed apply layout; use the returned binary_dir and site_root with `enscrive deploy apply`"
             }))
@@ -936,6 +941,21 @@ pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
     let installed_configs =
         install_hydrated_config_files(&manifest.layout.config_dir, &render_artifacts, &profile)?;
 
+    // Install Keycloak theme if staged alongside artifacts
+    let keycloak_theme_source = Path::new(&sources.binary_dir)
+        .parent()
+        .unwrap_or(Path::new(&sources.binary_dir))
+        .join("keycloak-theme")
+        .join("enscrive");
+    let installed_keycloak_theme = if keycloak_theme_source.join("login").is_dir() {
+        let theme_dest = Path::new(&manifest.layout.keycloak_theme_dir);
+        remove_dir_if_exists(theme_dest)?;
+        copy_dir_recursive(&keycloak_theme_source, theme_dest)?;
+        Some(manifest.layout.keycloak_theme_dir.clone())
+    } else {
+        None
+    };
+
     let systemd_dir = opts
         .systemd_dir
         .map(|value| value.trim().to_string())
@@ -1017,6 +1037,7 @@ pub async fn apply(opts: DeployApplyOptions) -> Result<Value, String> {
             "config_files": installed_configs,
             "systemd_units": installed_units,
             "nginx_files": installed_nginx,
+            "keycloak_theme": installed_keycloak_theme,
         },
         "actions_run": actions_run,
         "next_steps": [
@@ -1178,6 +1199,7 @@ fn render_layout(host_root: &str) -> RenderLayout {
         embed_esm_root: format!("{host_root}/secrets/{DEPLOY_SERVICE_EMBED}"),
         systemd_dir: format!("{host_root}/systemd"),
         nginx_dir: format!("{host_root}/nginx"),
+        keycloak_theme_dir: format!("{host_root}/keycloak-theme/enscrive"),
         host_root,
     }
 }
@@ -1190,6 +1212,7 @@ fn managed_ports() -> ManagedPorts {
         embed_rest_port: DEFAULT_MANAGED_EMBED_REST_PORT,
         embed_grpc_port: DEFAULT_MANAGED_EMBED_GRPC_PORT,
         embed_metrics_port: DEFAULT_MANAGED_EMBED_METRICS_PORT,
+        keycloak_http_port: DEFAULT_MANAGED_KEYCLOAK_HTTP_PORT,
     }
 }
 
@@ -1522,22 +1545,54 @@ WantedBy=multi-user.target\n",
 }
 
 fn render_nginx_config(public_hostname: &str, ports: &ManagedPorts) -> String {
-    format!(
-        "server {{\n\
-    listen 443 ssl http2;\n\
-    server_name {public_hostname};\n\n\
-    ssl_certificate /etc/letsencrypt/live/{public_hostname}/fullchain.pem;\n\
-    ssl_certificate_key /etc/letsencrypt/live/{public_hostname}/privkey.pem;\n\n\
-    location / {{\n\
-        proxy_pass http://127.0.0.1:{developer_port};\n\
-        proxy_http_version 1.1;\n\
+    // Auth split: /auth/login, /auth/callback, /auth/logout stay on enscrive-developer
+    // (Axum routes). All other /auth/* traffic goes to Keycloak for OIDC discovery,
+    // login pages, token endpoints, etc.
+    //
+    // This config is designed for ALB-fronted deployments where the ALB terminates
+    // TLS and forwards HTTP to port 80 on the host. X-Forwarded-Proto is preserved
+    // from the upstream ALB, not hardcoded, so OIDC redirect URIs generate correctly.
+    //
+    // The listen 80 default_server allows ALB health checks by IP to succeed.
+    let proxy_headers = "        proxy_http_version 1.1;\n\
         proxy_set_header Host $host;\n\
-        proxy_set_header X-Forwarded-Proto https;\n\
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;\n\
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n\
         proxy_set_header X-Real-IP $remote_addr;\n\
+        proxy_set_header X-Forwarded-Host $host;\n\
+        proxy_set_header X-Forwarded-Port $http_x_forwarded_port;";
+
+    format!(
+        "server {{\n\
+    listen 80 default_server;\n\
+    server_name _ {public_hostname};\n\n\
+    # Developer-owned auth routes (Axum handlers)\n\
+    location = /auth/login {{\n\
+        proxy_pass http://127.0.0.1:{developer_port};\n\
+{proxy_headers}\n\
+    }}\n\n\
+    location = /auth/callback {{\n\
+        proxy_pass http://127.0.0.1:{developer_port};\n\
+{proxy_headers}\n\
+    }}\n\n\
+    location = /auth/logout {{\n\
+        proxy_pass http://127.0.0.1:{developer_port};\n\
+{proxy_headers}\n\
+    }}\n\n\
+    # Keycloak OIDC (realms, discovery, token endpoints, login pages)\n\
+    location /auth/ {{\n\
+        proxy_pass http://127.0.0.1:{keycloak_port};\n\
+{proxy_headers}\n\
+    }}\n\n\
+    # Everything else → enscrive-developer\n\
+    location / {{\n\
+        proxy_pass http://127.0.0.1:{developer_port};\n\
+{proxy_headers}\n\
     }}\n\
 }}\n",
         developer_port = ports.developer_private_port,
+        keycloak_port = ports.keycloak_http_port,
+        proxy_headers = proxy_headers,
     )
 }
 
@@ -1710,6 +1765,15 @@ fn stage_local_build_artifacts(
         ));
     }
 
+    // Stage Keycloak theme alongside other artifacts
+    let theme_staging_dir = bin_dir
+        .parent()
+        .unwrap_or(bin_dir)
+        .join("keycloak-theme")
+        .join("enscrive");
+    remove_dir_if_exists(&theme_staging_dir)?;
+    copy_dir_recursive(&artifacts.keycloak_theme_root, &theme_staging_dir)?;
+
     Ok(artifacts)
 }
 
@@ -1787,6 +1851,18 @@ fn resolve_local_build_artifacts(
         ));
     }
 
+    let keycloak_theme_root = workspace_root
+        .join("enscrive-developer")
+        .join("deploy")
+        .join("keycloak-theme")
+        .join("enscrive");
+    if !keycloak_theme_root.join("login").is_dir() {
+        return Err(format!(
+            "Keycloak theme not found at '{}'; expected login/ subdirectory",
+            keycloak_theme_root.display()
+        ));
+    }
+
     Ok(LocalBuildArtifacts {
         workspace_root,
         cli_binary,
@@ -1794,6 +1870,7 @@ fn resolve_local_build_artifacts(
         observe_binary,
         embed_binary,
         developer_site_root,
+        keycloak_theme_root,
     })
 }
 
@@ -2631,20 +2708,16 @@ fn run_command_in_dir(
     program: &str,
     args: &[&str],
 ) -> Result<(), String> {
-    let output = Command::new(program)
+    eprintln!("[deploy] {label}");
+    let status = Command::new(program)
         .args(args)
         .current_dir(working_dir)
-        .output()
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
         .map_err(|e| format!("run '{}': {e}", label))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() { stderr } else { stdout };
-        return Err(if detail.is_empty() {
-            format!("'{}' exited with {}", label, output.status)
-        } else {
-            format!("{} (exit {})", detail, output.status)
-        });
+    if !status.success() {
+        return Err(format!("'{}' exited with {}", label, status));
     }
     Ok(())
 }
@@ -4246,6 +4319,28 @@ exit 1
         )
         .unwrap();
 
+        // Keycloak theme fixture
+        fs::create_dir_all(
+            workspace_root
+                .join("enscrive-developer")
+                .join("deploy")
+                .join("keycloak-theme")
+                .join("enscrive")
+                .join("login"),
+        )
+        .unwrap();
+        fs::write(
+            workspace_root
+                .join("enscrive-developer")
+                .join("deploy")
+                .join("keycloak-theme")
+                .join("enscrive")
+                .join("login")
+                .join("template.ftl"),
+            "test",
+        )
+        .unwrap();
+
         let output_dir = temp.path().join("local-build-staged");
         let result = fetch(DeployFetchOptions {
             profile_name: Some("stage".to_string()),
@@ -4274,6 +4369,14 @@ exit 1
                 .join("enscrive-developer")
                 .join("pkg")
                 .join("enscrive-developer.css")
+                .exists()
+        );
+        assert!(
+            output_dir
+                .join("keycloak-theme")
+                .join("enscrive")
+                .join("login")
+                .join("template.ftl")
                 .exists()
         );
     }

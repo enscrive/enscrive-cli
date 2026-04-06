@@ -2828,9 +2828,9 @@ mod tests {
             .join("custom");
         let developer_env = fs::read_to_string(config_dir.join("developer.env")).unwrap();
         assert!(developer_env.contains("DEVELOPER_PORT=36300"));
-        assert!(developer_env.contains(
-            "PORTAL_OIDC_REDIRECT_URI=http://127.0.0.1:36300/auth/callback"
-        ));
+        assert!(
+            developer_env.contains("PORTAL_OIDC_REDIRECT_URI=http://127.0.0.1:36300/auth/callback")
+        );
     }
 
     #[test]
