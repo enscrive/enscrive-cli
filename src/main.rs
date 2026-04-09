@@ -452,6 +452,14 @@ struct SearchArgs {
     /// Metadata filter in key=value form. Pass multiple times as needed.
     #[arg(long = "metadata")]
     filter_metadata: Vec<String>,
+
+    /// Hybrid search alpha: 0.0 = pure dense, 1.0 = pure BM25 sparse
+    #[arg(long)]
+    hybrid_alpha: Option<f32>,
+
+    /// Target named vector resolution (e.g. "dense_256", "dense_512")
+    #[arg(long)]
+    resolution: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -699,9 +707,6 @@ Example query item:
     "collection_id": "collection-uuid",
     "match_mode": "document_prefix"
   }"#;
-const RUN_BEIR_AFTER_HELP: &str = r#"Self-managed local note:
-  BeIR benchmarking requires pre-loaded datasets on the target stack.
-  Run `enscrive --output json evals beir-datasets` to inspect availability and support fields before attempting run-beir."#;
 
 #[derive(Args)]
 #[command(after_long_help = CREATE_VOICE_AFTER_HELP)]
@@ -831,13 +836,18 @@ struct VoiceSearchArgs {
     /// Metadata filter in key=value form. Pass multiple times as needed.
     #[arg(long = "metadata")]
     filter_metadata: Vec<String>,
+
+    /// Hybrid search alpha: 0.0 = pure dense, 1.0 = pure BM25 sparse
+    #[arg(long)]
+    hybrid_alpha: Option<f32>,
+
+    /// Target named vector resolution (e.g. "dense_256", "dense_512")
+    #[arg(long)]
+    resolution: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum EvalsSubcommand {
-    /// List available BEIR benchmark datasets
-    BeirDatasets,
-
     /// Eval campaign commands
     Campaigns {
         #[command(subcommand)]
@@ -850,11 +860,8 @@ enum EvalsSubcommand {
     /// Run an eval campaign with SSE streaming
     RunCampaignStream(RunEvalCampaignArgs),
 
-    /// Run BEIR benchmark evaluation
-    RunBeir(RunBeirArgs),
-
-    /// Run BEIR benchmark evaluation with SSE streaming
-    RunBeirStream(RunBeirArgs),
+    /// Import benchmark data from standard formats (BEIR, MTEB, etc.)
+    Import(ImportEvalsArgs),
 
     /// Eval dataset commands
     Datasets {
@@ -1131,17 +1138,36 @@ struct RunEvalCampaignArgs {
     match_mode: Option<String>,
 }
 
+
 #[derive(Args)]
-#[command(after_long_help = RUN_BEIR_AFTER_HELP)]
-struct RunBeirArgs {
+struct ImportEvalsArgs {
+    /// Import format (currently: "beir")
+    #[arg(long, default_value = "beir")]
+    format: String,
+
+    /// Name for the created eval dataset
+    #[arg(long = "dataset-name")]
+    dataset_name: String,
+
+    /// Path to queries file (BEIR: queries.jsonl)
+    #[arg(long = "queries-file")]
+    queries_file: String,
+
+    /// Path to relevance judgments file (BEIR: qrels/test.tsv)
+    #[arg(long = "qrels-file")]
+    qrels_file: String,
+
+    /// Optional: also ingest corpus into a collection
+    #[arg(long = "corpus-file")]
+    corpus_file: Option<String>,
+
+    /// Collection ID for corpus ingestion (required if --corpus-file is provided)
+    #[arg(long = "collection-id")]
+    collection_id: Option<String>,
+
+    /// Voice ID for corpus ingestion (optional, determines chunking strategy)
     #[arg(long = "voice-id")]
-    voice_id: String,
-
-    #[arg(long = "dataset", required = true)]
-    datasets: Vec<String>,
-
-    #[arg(long = "metric", required = true)]
-    metrics: Vec<String>,
+    voice_id: Option<String>,
 }
 
 #[derive(Args)]
@@ -1226,8 +1252,6 @@ fn request_failure(command: &str, error: String) -> CliResponse {
         || lower.contains("not yet supported")
         || lower.contains("not yet available on public /v1")
         || lower.contains("unsupported")
-        || lower.contains("pre-loaded datasets")
-        || lower.contains("beir_helper_v2.py")
     {
         CliResponse::fail(command, error, FailureClass::Unsupported, EXIT_UNSUPPORTED)
     } else {
@@ -1235,19 +1259,8 @@ fn request_failure(command: &str, error: String) -> CliResponse {
     }
 }
 
-fn augment_request_error(command: &str, error: String) -> String {
-    let lower = error.to_lowercase();
-    let beir_dataset_hint = "Run `enscrive --output json evals beir-datasets` to inspect dataset availability and support fields.";
-    let self_managed_hint = "Self-managed local does not ship a public BEIR dataset-load path yet.";
-
-    if command.starts_with("evals run-beir")
-        && (lower.contains("pre-loaded datasets") || lower.contains("beir_helper_v2.py"))
-        && !lower.contains("self-managed local does not ship a public beir dataset-load path yet")
-    {
-        format!("{error} {self_managed_hint} {beir_dataset_hint}")
-    } else {
-        error
-    }
+fn augment_request_error(_command: &str, error: String) -> String {
+    error
 }
 
 fn local_runtime_failure(command: &str, error: String) -> CliResponse {
@@ -1609,32 +1622,6 @@ fn build_eval_campaign_body(args: &RunEvalCampaignArgs) -> Result<Value, String>
     }))
 }
 
-fn build_beir_body(args: &RunBeirArgs) -> Value {
-    json!({
-        "voice_id": args.voice_id,
-        "datasets": args.datasets,
-        "metrics": args.metrics,
-    })
-}
-
-fn extract_sse_error_message(body: &str) -> Option<String> {
-    for line in body.lines() {
-        let Some(payload) = line.strip_prefix("data: ") else {
-            continue;
-        };
-        let value: Value = match serde_json::from_str(payload) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if let Some(message) = value.get("error_message").and_then(|v| v.as_str()) {
-            if !message.is_empty() {
-                return Some(message.to_string());
-            }
-        }
-    }
-    None
-}
-
 fn parse_metadata_filters(entries: &[String]) -> Result<Map<String, Value>, String> {
     let mut metadata = Map::new();
     for entry in entries {
@@ -1679,6 +1666,8 @@ fn build_search_body(args: &SearchArgs) -> Result<Value, String> {
         "oversample_factor": args.oversample_factor,
         "extended_results": args.extended_results,
         "score_floor": args.score_floor,
+        "hybrid_alpha": args.hybrid_alpha,
+        "resolution": args.resolution,
     }))
 }
 
@@ -1713,6 +1702,8 @@ fn build_voice_search_body(args: &VoiceSearchArgs) -> Result<Value, String> {
         "score_threshold": args.score_threshold,
         "extended_results": args.extended_results,
         "score_floor": args.score_floor,
+        "hybrid_alpha": args.hybrid_alpha,
+        "resolution": args.resolution,
     }))
 }
 
@@ -2399,14 +2390,6 @@ async fn main() {
             }
         }
         Commands::Evals { sub } => match sub {
-            EvalsSubcommand::BeirDatasets => {
-                let ctx = api_context.clone().unwrap();
-                let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
-                match client.get_json("/v1/evals/beir-datasets").await {
-                    Ok(data) => CliResponse::success("evals beir-datasets", data).emit(fmt),
-                    Err(e) => request_failure("evals beir-datasets", e).emit(fmt),
-                }
-            }
             EvalsSubcommand::Campaigns { sub } => {
                 let ctx = api_context.clone().unwrap();
                 let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
@@ -2465,31 +2448,256 @@ async fn main() {
                     .emit(fmt),
                 }
             }
-            EvalsSubcommand::RunBeir(args) => {
+            EvalsSubcommand::Import(args) => {
                 let ctx = api_context.clone().unwrap();
-                let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
-                let body = build_beir_body(args);
-                match client.post_json("/v1/evals/run-beir", body).await {
-                    Ok(data) => CliResponse::success("evals run-beir", data).emit(fmt),
-                    Err(e) => request_failure("evals run-beir", e).emit(fmt),
+                let client = make_client(ctx.endpoint.clone(), require_api_key(ctx.api_key, fmt));
+
+                if args.format != "beir" {
+                    CliResponse::fail(
+                        "evals import",
+                        format!("unsupported import format '{}': currently only 'beir' is supported", args.format),
+                        FailureClass::Bug,
+                        EXIT_CONFIG,
+                    )
+                    .emit(fmt);
                 }
-            }
-            EvalsSubcommand::RunBeirStream(args) => {
-                let ctx = api_context.clone().unwrap();
-                let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
-                let body = build_beir_body(args);
-                match client
-                    .post_text("/v1/evals/run-beir-stream", body, "text/event-stream")
-                    .await
-                {
-                    Ok(data) => match extract_sse_error_message(&data) {
-                        Some(message) => {
-                            request_failure("evals run-beir-stream", message).emit(fmt)
+
+                // Parse BEIR queries file (queries.jsonl)
+                let queries_raw = match fs::read_to_string(&args.queries_file) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        CliResponse::fail(
+                            "evals import",
+                            format!("read queries file '{}': {e}", args.queries_file),
+                            FailureClass::Bug,
+                            EXIT_CONFIG,
+                        )
+                        .emit(fmt)
+                    }
+                };
+
+                let mut queries_map: HashMap<String, String> = HashMap::new();
+                for line in queries_raw.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let parsed: Value = match serde_json::from_str(line) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            CliResponse::fail(
+                                "evals import",
+                                format!("parse queries line: {e}"),
+                                FailureClass::Bug,
+                                EXIT_CONFIG,
+                            )
+                            .emit(fmt)
                         }
-                        None => CliResponse::success("evals run-beir-stream", Value::String(data))
-                            .emit(fmt),
-                    },
-                    Err(e) => request_failure("evals run-beir-stream", e).emit(fmt),
+                    };
+                    let id = parsed["_id"].as_str().unwrap_or("").to_string();
+                    let text = parsed["text"].as_str().unwrap_or("").to_string();
+                    if !id.is_empty() && !text.is_empty() {
+                        queries_map.insert(id, text);
+                    }
+                }
+
+                // Parse BEIR qrels file (TSV)
+                let qrels_raw = match fs::read_to_string(&args.qrels_file) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        CliResponse::fail(
+                            "evals import",
+                            format!("read qrels file '{}': {e}", args.qrels_file),
+                            FailureClass::Bug,
+                            EXIT_CONFIG,
+                        )
+                        .emit(fmt)
+                    }
+                };
+
+                // qrels: query_id -> { doc_id -> score }
+                let mut qrels: HashMap<String, HashMap<String, i64>> = HashMap::new();
+                for (i, line) in qrels_raw.lines().enumerate() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    // Skip header line
+                    if i == 0 && (line.starts_with("query-id") || line.starts_with("query_id")) {
+                        continue;
+                    }
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    if parts.len() < 3 {
+                        continue;
+                    }
+                    let query_id = parts[0].to_string();
+                    let doc_id = parts[1].to_string();
+                    let score: i64 = parts[parts.len() - 1].trim().parse().unwrap_or(0);
+                    qrels.entry(query_id).or_default().insert(doc_id, score);
+                }
+
+                // Join queries + qrels into eval dataset format
+                let mut eval_queries: Vec<Value> = Vec::new();
+                for (query_id, judgments) in &qrels {
+                    let query_text = match queries_map.get(query_id) {
+                        Some(text) => text.clone(),
+                        None => continue, // skip qrels without matching query
+                    };
+                    let relevant_doc_ids: Vec<String> = judgments
+                        .iter()
+                        .filter(|(_, score)| **score > 0)
+                        .map(|(doc_id, _)| doc_id.clone())
+                        .collect();
+                    if relevant_doc_ids.is_empty() {
+                        continue;
+                    }
+                    let relevance_scores: serde_json::Map<String, Value> = judgments
+                        .iter()
+                        .map(|(doc_id, &score)| (doc_id.clone(), json!(score)))
+                        .collect();
+                    eval_queries.push(json!({
+                        "query_id": query_id,
+                        "query_text": query_text,
+                        "relevant_doc_ids": relevant_doc_ids,
+                        "relevance_scores": relevance_scores,
+                    }));
+                }
+
+                if eval_queries.is_empty() {
+                    CliResponse::fail(
+                        "evals import",
+                        "no valid query-relevance pairs found after joining queries and qrels".to_string(),
+                        FailureClass::Bug,
+                        EXIT_CONFIG,
+                    )
+                    .emit(fmt);
+                }
+
+                let queries_json_str = serde_json::to_string(&eval_queries).unwrap_or_default();
+
+                // Create the eval dataset via API
+                let body = json!({
+                    "name": args.dataset_name,
+                    "queries_json": queries_json_str,
+                });
+                let dataset_result = match client.post_json("/v1/evals/datasets", body).await {
+                    Ok(data) => data,
+                    Err(e) => {
+                        request_failure("evals import", e).emit(fmt)
+                    }
+                };
+
+                let query_count = eval_queries.len();
+
+                // Optionally ingest corpus
+                if let Some(corpus_path) = &args.corpus_file {
+                    let collection_id = match &args.collection_id {
+                        Some(id) => id.clone(),
+                        None => {
+                            CliResponse::fail(
+                                "evals import",
+                                "--collection-id is required when --corpus-file is provided".to_string(),
+                                FailureClass::Bug,
+                                EXIT_CONFIG,
+                            )
+                            .emit(fmt)
+                        }
+                    };
+
+                    let corpus_raw = match fs::read_to_string(corpus_path) {
+                        Ok(data) => data,
+                        Err(e) => {
+                            CliResponse::fail(
+                                "evals import",
+                                format!("read corpus file '{}': {e}", corpus_path),
+                                FailureClass::Bug,
+                                EXIT_CONFIG,
+                            )
+                            .emit(fmt)
+                        }
+                    };
+
+                    let mut documents: Vec<Value> = Vec::new();
+                    for line in corpus_raw.lines() {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let parsed: Value = match serde_json::from_str(line) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                CliResponse::fail(
+                                    "evals import",
+                                    format!("parse corpus line: {e}"),
+                                    FailureClass::Bug,
+                                    EXIT_CONFIG,
+                                )
+                                .emit(fmt)
+                            }
+                        };
+                        let id = parsed["_id"].as_str().unwrap_or("").to_string();
+                        let title = parsed["title"].as_str().unwrap_or("").to_string();
+                        let text = parsed["text"].as_str().unwrap_or("").to_string();
+                        let content = if title.is_empty() {
+                            text
+                        } else {
+                            format!("{title} {text}")
+                        };
+                        if !id.is_empty() && !content.is_empty() {
+                            documents.push(json!({
+                                "id": id,
+                                "content": content,
+                                "metadata": {},
+                            }));
+                        }
+                    }
+
+                    let batch_size = 50;
+                    let total_batches = documents.len().div_ceil(batch_size);
+                    let mut ingested = 0;
+
+                    for (batch_idx, batch) in documents.chunks(batch_size).enumerate() {
+                        eprintln!("Ingesting batch {}/{}...", batch_idx + 1, total_batches);
+                        let body = json!({
+                            "collection_id": collection_id,
+                            "voice_id": args.voice_id,
+                            "documents": batch,
+                        });
+                        match client.post_json("/v1/ingest", body).await {
+                            Ok(_) => {
+                                ingested += batch.len();
+                            }
+                            Err(e) => {
+                                CliResponse::fail(
+                                    "evals import",
+                                    format!("ingest batch {}: {e}", batch_idx + 1),
+                                    FailureClass::Bug,
+                                    EXIT_FAILURE,
+                                )
+                                .emit(fmt);
+                            }
+                        }
+                    }
+
+                    CliResponse::success(
+                        "evals import",
+                        json!({
+                            "dataset": dataset_result,
+                            "query_count": query_count,
+                            "corpus_ingested": true,
+                            "documents_ingested": ingested,
+                        }),
+                    )
+                    .emit(fmt);
+                } else {
+                    CliResponse::success(
+                        "evals import",
+                        json!({
+                            "dataset": dataset_result,
+                            "query_count": query_count,
+                        }),
+                    )
+                    .emit(fmt);
                 }
             }
             EvalsSubcommand::Datasets { sub } => {
@@ -3447,6 +3655,8 @@ mod tests {
             filter_layer: Some("baseline".to_string()),
             filter_strategy: Some("baseline".to_string()),
             filter_metadata: vec!["tag=alpha".to_string(), "color=red".to_string()],
+            hybrid_alpha: None,
+            resolution: None,
         })
         .unwrap();
 
@@ -3823,31 +4033,6 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         assert!(err.contains("expected key=value"));
     }
 
-    #[test]
-    fn extract_sse_error_message_finds_error_event() {
-        let body = "data: {\"progress_percent\":0.0,\"queries_completed\":0,\"queries_total\":0,\"partial_metrics\":null,\"error_message\":\"BEIR benchmark requires pre-loaded datasets.\"}\nevent: eval-progress\n\n";
-        assert_eq!(
-            extract_sse_error_message(body).as_deref(),
-            Some("BEIR benchmark requires pre-loaded datasets.")
-        );
-    }
-
-    #[test]
-    fn request_failure_classifies_preloaded_datasets_as_unsupported() {
-        let response = request_failure(
-            "evals run-beir",
-            "BEIR benchmark requires pre-loaded datasets. Use beir_helper_v2.py".to_string(),
-        );
-        let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["failure_class"], "FAIL_UNSUPPORTED");
-        assert_eq!(json["exit_code"], 2);
-        assert!(
-            json["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("Self-managed local does not ship a public BEIR dataset-load path yet.")
-        );
-    }
 
     #[test]
     fn collections_get_unsupported_response() {
@@ -3861,33 +4046,63 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     }
 
     #[test]
-    fn parse_evals_run_beir() {
+    fn parse_evals_import() {
         let args = Cli::parse_from([
             "enscrive",
-            "--api-key",
-            "test-key",
             "evals",
-            "run-beir",
-            "--voice-id",
-            "voice-1",
-            "--dataset",
-            "scifact",
-            "--dataset",
-            "fiqa",
-            "--metric",
-            "ndcg@10",
-            "--metric",
-            "mrr",
+            "import",
+            "--dataset-name",
+            "beir-scifact",
+            "--queries-file",
+            "queries.jsonl",
+            "--qrels-file",
+            "qrels/test.tsv",
         ]);
         match args.command {
             Commands::Evals {
-                sub: EvalsSubcommand::RunBeir(run),
+                sub: EvalsSubcommand::Import(import),
             } => {
-                assert_eq!(run.voice_id, "voice-1");
-                assert_eq!(run.datasets, vec!["scifact", "fiqa"]);
-                assert_eq!(run.metrics, vec!["ndcg@10", "mrr"]);
+                assert_eq!(import.dataset_name, "beir-scifact");
+                assert_eq!(import.format, "beir");
+                assert_eq!(import.queries_file, "queries.jsonl");
+                assert_eq!(import.qrels_file, "qrels/test.tsv");
+                assert!(import.corpus_file.is_none());
+                assert!(import.collection_id.is_none());
+                assert!(import.voice_id.is_none());
             }
-            _ => panic!("expected evals run-beir"),
+            _ => panic!("expected evals import"),
+        }
+    }
+
+    #[test]
+    fn parse_evals_import_with_corpus() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "evals",
+            "import",
+            "--dataset-name",
+            "beir-scifact",
+            "--queries-file",
+            "queries.jsonl",
+            "--qrels-file",
+            "qrels/test.tsv",
+            "--corpus-file",
+            "corpus.jsonl",
+            "--collection-id",
+            "col-1",
+            "--voice-id",
+            "voice-1",
+        ]);
+        match args.command {
+            Commands::Evals {
+                sub: EvalsSubcommand::Import(import),
+            } => {
+                assert_eq!(import.dataset_name, "beir-scifact");
+                assert_eq!(import.corpus_file.as_deref(), Some("corpus.jsonl"));
+                assert_eq!(import.collection_id.as_deref(), Some("col-1"));
+                assert_eq!(import.voice_id.as_deref(), Some("voice-1"));
+            }
+            _ => panic!("expected evals import"),
         }
     }
 
@@ -4032,30 +4247,6 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         assert_eq!(body["collection_id"], "collection-1");
     }
 
-    #[test]
-    fn parse_evals_run_beir_stream() {
-        let args = Cli::parse_from([
-            "enscrive",
-            "evals",
-            "run-beir-stream",
-            "--voice-id",
-            "voice-1",
-            "--dataset",
-            "scifact",
-            "--metric",
-            "ndcg@10",
-        ]);
-        match args.command {
-            Commands::Evals {
-                sub: EvalsSubcommand::RunBeirStream(run),
-            } => {
-                assert_eq!(run.voice_id, "voice-1");
-                assert_eq!(run.datasets, vec!["scifact"]);
-                assert_eq!(run.metrics, vec!["ndcg@10"]);
-            }
-            _ => panic!("expected evals run-beir-stream"),
-        }
-    }
 
     #[test]
     fn parse_backup_create_command() {
