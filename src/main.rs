@@ -2573,12 +2573,10 @@ async fn main() {
                     .emit(fmt);
                 }
 
-                let queries_json_str = serde_json::to_string(&eval_queries).unwrap_or_default();
-
                 // Create the eval dataset via API
                 let body = json!({
                     "name": args.dataset_name,
-                    "queries_json": queries_json_str,
+                    "queries": eval_queries,
                 });
                 let dataset_result = match client.post_json("/v1/evals/datasets", body).await {
                     Ok(data) => data,
@@ -2662,6 +2660,7 @@ async fn main() {
                             "collection_id": collection_id,
                             "voice_id": args.voice_id,
                             "documents": batch,
+                            "dry_run": false,
                         });
                         match client.post_json("/v1/ingest", body).await {
                             Ok(_) => {
