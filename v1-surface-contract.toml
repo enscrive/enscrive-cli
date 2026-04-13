@@ -1,0 +1,473 @@
+# Enscrive CLI Surface Contract
+#
+# This file maps every /v1 API endpoint to its CLI command.
+# When adding a new /v1 endpoint to enscrive-developer, you MUST add an entry here.
+# When implementing a CLI command, update the status from "missing" to "implemented".
+#
+# A CI check (tests/surface_contract.rs) verifies that:
+# 1. Every endpoint listed here has status = "implemented" or an explicit "deferred" with a reason
+# 2. No "missing" entries exist without a tracking issue
+#
+# Status values:
+#   "implemented" — CLI command exists and works
+#   "missing"     — no CLI command yet (fails CI)
+#   "deferred"    — intentionally not implemented yet, requires reason field
+
+# ── Search ──────────────────────────────────────────────
+
+[[endpoint]]
+method = "POST"
+path = "/v1/search"
+cli_command = "search"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/query-embeddings"
+cli_command = "embeddings query"
+status = "implemented"
+
+# ── Collections ─────────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/collections"
+cli_command = "collections list"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/collections"
+cli_command = "collections create"
+status = "implemented"
+
+[[endpoint]]
+method = "PATCH"
+path = "/v1/collections/{id}"
+cli_command = "collections update"
+status = "implemented"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/collections/{id}"
+cli_command = "collections delete"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/collections/{id}/stats"
+cli_command = "collections stats"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/collections/{id}/documents"
+cli_command = "collections documents"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/collections/{id}/documents/{doc_id}/chunks"
+cli_command = "collections chunks"
+status = "implemented"
+
+# ── Collection Staging ──────────────────────────────────
+
+[[endpoint]]
+method = "POST"
+path = "/v1/collections/{id}/stage"
+cli_command = "collections stage"
+status = "implemented"
+note = "P0 gap closure — client method added this session"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/collections/{id}/commit"
+cli_command = "collections commit"
+status = "implemented"
+note = "P0 gap closure — client method added this session"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/collections/{id}/pending"
+cli_command = "collections pending"
+status = "implemented"
+note = "P0 gap closure — client method added this session"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/collections/{id}/pending/{doc_id}"
+cli_command = "collections pending-delete"
+status = "implemented"
+note = "P0 gap closure — client method added this session"
+
+# ── Ingestion ───────────────────────────────────────────
+
+[[endpoint]]
+method = "POST"
+path = "/v1/ingest"
+cli_command = "ingest documents"
+status = "implemented"
+note = "P0 gap closure — client method added this session"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/ingest-prepared"
+cli_command = "ingest prepared"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/segment-document"
+cli_command = "segment document"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/preview-chunking"
+cli_command = "segment preview-chunking"
+status = "deferred"
+reason = "Chunking preview is a developer-portal convenience; low CLI priority until voice-builder workflow lands"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/preview-with-template"
+cli_command = "segment preview-with-template"
+status = "deferred"
+reason = "Template-driven preview is a developer-portal convenience; low CLI priority until segmentation-template workflow lands"
+
+# ── Jobs ────────────────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/jobs"
+cli_command = "jobs list"
+status = "implemented"
+note = "P0 gap closure — client method added this session"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/jobs/{id}"
+cli_command = "jobs get"
+status = "implemented"
+note = "P0 gap closure — client method added this session"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/jobs/{id}/cancel"
+cli_command = "jobs cancel"
+status = "implemented"
+note = "P0 gap closure — client method added this session"
+
+# ── Content Analysis ────────────────────────────────────
+
+[[endpoint]]
+method = "POST"
+path = "/v1/analyze-content"
+cli_command = "analyze content"
+status = "implemented"
+
+# ── Models ──────────────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/models"
+cli_command = "models list"
+status = "implemented"
+
+# ── Voices ──────────────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/voices"
+cli_command = "voices list"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/voices"
+cli_command = "voices create"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/voices/{id}"
+cli_command = "voices get"
+status = "implemented"
+
+[[endpoint]]
+method = "PUT"
+path = "/v1/voices/{id}"
+cli_command = "voices update"
+status = "deferred"
+reason = "Voice update requires config schema alignment; tracked for next voice-builder sprint"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/voices/{id}"
+cli_command = "voices delete"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/voices/compare"
+cli_command = "voices compare"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/voices/search"
+cli_command = "voices search"
+status = "implemented"
+
+# ── Voice Versions ──────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/voices/{id}/versions"
+cli_command = "voices versions list"
+status = "deferred"
+reason = "Voice version history is a post-launch audit feature; requires version-aware voice model"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/voices/{id}/versions/{version}"
+cli_command = "voices versions get"
+status = "deferred"
+reason = "Voice version history is a post-launch audit feature; requires version-aware voice model"
+
+# ── Voice Promotion & Gates ─────────────────────────────
+
+[[endpoint]]
+method = "POST"
+path = "/v1/voices/{id}/promote"
+cli_command = "voices promote"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/voices/{id}/gates"
+cli_command = "voices gates list"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/voices/{id}/gates"
+cli_command = "voices gates set"
+status = "implemented"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/voices/{id}/gates/{metric}"
+cli_command = "voices gates delete"
+status = "implemented"
+
+# ── Segmentation Templates ─────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/segmentation-templates"
+cli_command = "templates list"
+status = "deferred"
+reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/segmentation-templates"
+cli_command = "templates create"
+status = "deferred"
+reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/segmentation-templates/{id}"
+cli_command = "templates get"
+status = "deferred"
+reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+
+[[endpoint]]
+method = "PUT"
+path = "/v1/segmentation-templates/{id}"
+cli_command = "templates update"
+status = "deferred"
+reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/segmentation-templates/{id}"
+cli_command = "templates delete"
+status = "deferred"
+reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/segmentation-templates/{id}/clone"
+cli_command = "templates clone"
+status = "deferred"
+reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+
+# ── Evals: Datasets ─────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/evals/datasets"
+cli_command = "evals datasets list"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/evals/datasets"
+cli_command = "evals datasets create"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/evals/datasets/{id}"
+cli_command = "evals datasets get"
+status = "implemented"
+
+[[endpoint]]
+method = "PUT"
+path = "/v1/evals/datasets/{id}"
+cli_command = "evals datasets update"
+status = "implemented"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/evals/datasets/{id}"
+cli_command = "evals datasets delete"
+status = "implemented"
+
+# ── Evals: Campaigns ───────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/evals/campaigns"
+cli_command = "evals campaigns list"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/evals/{id}"
+cli_command = "evals campaigns get"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/evals/run-campaign"
+cli_command = "evals run-campaign"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/evals/run-campaign-stream"
+cli_command = "evals run-campaign-stream"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/evals/import"
+cli_command = "evals import"
+status = "implemented"
+
+# ── Evals: Advanced ────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/evals/voice-status/{voice_id}"
+cli_command = "evals voice-status"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/evals/convergence"
+cli_command = "evals convergence"
+status = "deferred"
+reason = "Convergence analysis requires multi-campaign history; deferred until eval maturity milestone"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/evals/from-url"
+cli_command = "evals from-url"
+status = "deferred"
+reason = "URL-based dataset import is a background-job feature; deferred until jobs workflow is validated end-to-end"
+
+# ── Logs & Observability ───────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/logs/stream"
+cli_command = "logs stream"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/logs/search"
+cli_command = "logs search"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/logs/metrics"
+cli_command = "logs metrics"
+status = "implemented"
+
+# ── Usage ───────────────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/usage"
+cli_command = "usage"
+status = "implemented"
+
+# ── Admin: Export ───────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/export"
+cli_command = "export tenant"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/export/embeddings"
+cli_command = "export embeddings"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/export/token-usage"
+cli_command = "export token-usage"
+status = "implemented"
+
+# ── Admin: Backup & Restore ────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/backups"
+cli_command = "backup list"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/backups"
+cli_command = "backup create"
+status = "implemented"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/backups/{backup_id}"
+cli_command = "backup get"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/restore"
+cli_command = "backup restore"
+status = "implemented"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/restore/dry-run"
+cli_command = "backup dry-run"
+status = "implemented"

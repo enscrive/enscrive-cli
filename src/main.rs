@@ -152,6 +152,12 @@ enum Commands {
 
     /// Usage and metering commands
     Usage(UsageArgs),
+
+    /// Background job management commands
+    Jobs {
+        #[command(subcommand)]
+        sub: JobsSubcommand,
+    },
 }
 
 #[derive(Args)]
@@ -472,6 +478,9 @@ enum EmbeddingsSubcommand {
 enum IngestSubcommand {
     /// Ingest pre-segmented documents
     Prepared(IngestPreparedArgs),
+
+    /// Ingest documents with automatic segmentation and embedding
+    Documents(IngestDocumentsArgs),
 }
 
 #[derive(Subcommand)]
@@ -525,6 +534,47 @@ struct IngestPreparedArgs {
     /// Path to a JSON file containing an array of PreparedSegment objects
     #[arg(long, conflicts_with = "segments_json")]
     segments_file: Option<String>,
+}
+
+#[derive(Args)]
+struct IngestDocumentsArgs {
+    #[arg(long = "collection-id")]
+    collection_id: String,
+
+    /// Single document ID (for single-document ingest)
+    #[arg(long = "document-id")]
+    document_id: Option<String>,
+
+    /// Content as inline text (single doc)
+    #[arg(long, conflicts_with = "content_file", conflicts_with = "documents_json", conflicts_with = "documents_file")]
+    content: Option<String>,
+
+    /// Content from file (single doc)
+    #[arg(long = "content-file", conflicts_with = "content", conflicts_with = "documents_json", conflicts_with = "documents_file")]
+    content_file: Option<String>,
+
+    /// Multiple documents as inline JSON array
+    #[arg(long = "documents-json", conflicts_with = "content", conflicts_with = "content_file", conflicts_with = "documents_file")]
+    documents_json: Option<String>,
+
+    /// Multiple documents from JSON file
+    #[arg(long = "documents-file", conflicts_with = "content", conflicts_with = "content_file", conflicts_with = "documents_json")]
+    documents_file: Option<String>,
+
+    #[arg(long = "voice-id")]
+    voice_id: Option<String>,
+
+    /// Run synchronously instead of as background job
+    #[arg(long)]
+    sync: bool,
+
+    /// Disable batch embedding (force synchronous embedding)
+    #[arg(long = "no-batch")]
+    no_batch: bool,
+
+    /// Preview without actually ingesting
+    #[arg(long = "dry-run")]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -601,6 +651,64 @@ enum CollectionsSubcommand {
         #[arg(long)]
         id: String,
     },
+
+    /// Stage document changes for later commit
+    Stage(CollectionsStageArgs),
+
+    /// Commit staged changes to the collection
+    Commit(CollectionsCommitArgs),
+
+    /// List pending staged changes
+    Pending(CollectionsPendingArgs),
+
+    /// Delete a specific pending staged change
+    PendingDelete(CollectionsPendingDeleteArgs),
+}
+
+#[derive(Args)]
+struct CollectionsStageArgs {
+    #[arg(long)]
+    id: String,
+
+    /// Documents to stage as inline JSON
+    #[arg(long = "documents-json", conflicts_with = "documents_file")]
+    documents_json: Option<String>,
+
+    /// Documents to stage from JSON file
+    #[arg(long = "documents-file", conflicts_with = "documents_json")]
+    documents_file: Option<String>,
+
+    /// Document IDs to delete (repeatable)
+    #[arg(long = "delete")]
+    deletes: Vec<String>,
+
+    #[arg(long = "voice-id")]
+    voice_id: Option<String>,
+}
+
+#[derive(Args)]
+struct CollectionsCommitArgs {
+    #[arg(long)]
+    id: String,
+
+    /// Force synchronous execution
+    #[arg(long = "force-sync")]
+    force_sync: bool,
+}
+
+#[derive(Args)]
+struct CollectionsPendingArgs {
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Args)]
+struct CollectionsPendingDeleteArgs {
+    #[arg(long)]
+    id: String,
+
+    #[arg(long = "document-id")]
+    document_id: String,
 }
 
 #[derive(Args)]
@@ -1228,6 +1336,39 @@ struct UsageArgs {
 
     #[arg(long)]
     page_token: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum JobsSubcommand {
+    /// List background jobs
+    List(JobsListArgs),
+
+    /// Get details of a specific job
+    Get(JobsGetArgs),
+
+    /// Cancel a running job
+    Cancel(JobsCancelArgs),
+}
+
+#[derive(Args)]
+struct JobsListArgs {
+    /// Filter by job status
+    #[arg(long)]
+    status: Option<String>,
+}
+
+#[derive(Args)]
+struct JobsGetArgs {
+    /// Job ID
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Args)]
+struct JobsCancelArgs {
+    /// Job ID
+    #[arg(long)]
+    id: String,
 }
 
 fn require_api_key(api_key: Option<String>, fmt: OutputFormat) -> String {
@@ -2151,6 +2292,56 @@ async fn main() {
                             .emit(fmt)
                     }
                 },
+                IngestSubcommand::Documents(args) => {
+                    let documents = if let Some(ref content) = args.content {
+                        let doc_id = args.document_id.clone().unwrap_or_default();
+                        json!([{ "id": doc_id, "content": content, "metadata": {}, "fingerprint": "" }])
+                    } else if let Some(ref content_file) = args.content_file {
+                        match fs::read_to_string(content_file) {
+                            Ok(content) => {
+                                let doc_id = args.document_id.clone().unwrap_or_default();
+                                json!([{ "id": doc_id, "content": content, "metadata": {}, "fingerprint": "" }])
+                            }
+                            Err(e) => {
+                                CliResponse::fail(
+                                    "ingest documents",
+                                    format!("read content file '{}': {e}", content_file),
+                                    FailureClass::Bug,
+                                    EXIT_CONFIG,
+                                )
+                                .emit(fmt)
+                            }
+                        }
+                    } else if args.documents_json.is_some() || args.documents_file.is_some() {
+                        match parse_json_source(&args.documents_json, &args.documents_file, "documents") {
+                            Ok(docs) => docs,
+                            Err(e) => {
+                                CliResponse::fail("ingest documents", e, FailureClass::Bug, EXIT_CONFIG)
+                                    .emit(fmt)
+                            }
+                        }
+                    } else {
+                        CliResponse::fail(
+                            "ingest documents",
+                            "provide one of --content, --content-file, --documents-json, or --documents-file".to_string(),
+                            FailureClass::Bug,
+                            EXIT_CONFIG,
+                        )
+                        .emit(fmt)
+                    };
+                    let body = json!({
+                        "collection_id": args.collection_id,
+                        "documents": documents,
+                        "voice_id": args.voice_id,
+                        "dry_run": args.dry_run,
+                        "sync": if args.sync { Some(true) } else { None::<bool> },
+                        "no_batch": if args.no_batch { Some(true) } else { None::<bool> },
+                    });
+                    match client.post_json("/v1/ingest", body).await {
+                        Ok(data) => CliResponse::success("ingest documents", data).emit(fmt),
+                        Err(e) => request_failure("ingest documents", e).emit(fmt),
+                    }
+                }
             }
         }
         Commands::Segment { sub } => {
@@ -2285,6 +2476,55 @@ async fn main() {
                         "GET /v1/collections/{id} is not yet available on public /v1; use collections list or collections stats",
                     )
                     .emit(fmt);
+                }
+                CollectionsSubcommand::Stage(args) => {
+                    let documents = if args.documents_json.is_some() || args.documents_file.is_some() {
+                        match parse_json_source(&args.documents_json, &args.documents_file, "documents") {
+                            Ok(docs) => docs,
+                            Err(e) => {
+                                CliResponse::fail("collections stage", e, FailureClass::Bug, EXIT_CONFIG)
+                                    .emit(fmt)
+                            }
+                        }
+                    } else {
+                        json!([])
+                    };
+                    let body = json!({
+                        "documents": documents,
+                        "deletes": args.deletes,
+                        "voice_id": args.voice_id,
+                    });
+                    let path = format!("/v1/collections/{}/stage", args.id);
+                    match client.post_json(&path, body).await {
+                        Ok(data) => CliResponse::success("collections stage", data).emit(fmt),
+                        Err(e) => request_failure("collections stage", e).emit(fmt),
+                    }
+                }
+                CollectionsSubcommand::Commit(args) => {
+                    let body = if args.force_sync {
+                        json!({ "force_sync": true })
+                    } else {
+                        json!({})
+                    };
+                    let path = format!("/v1/collections/{}/commit", args.id);
+                    match client.post_json(&path, body).await {
+                        Ok(data) => CliResponse::success("collections commit", data).emit(fmt),
+                        Err(e) => request_failure("collections commit", e).emit(fmt),
+                    }
+                }
+                CollectionsSubcommand::Pending(args) => {
+                    let path = format!("/v1/collections/{}/pending", args.id);
+                    match client.get_json(&path).await {
+                        Ok(data) => CliResponse::success("collections pending", data).emit(fmt),
+                        Err(e) => request_failure("collections pending", e).emit(fmt),
+                    }
+                }
+                CollectionsSubcommand::PendingDelete(args) => {
+                    let path = format!("/v1/collections/{}/pending/{}", args.id, args.document_id);
+                    match client.delete_json(&path).await {
+                        Ok(data) => CliResponse::success("collections pending delete", data).emit(fmt),
+                        Err(e) => request_failure("collections pending delete", e).emit(fmt),
+                    }
                 }
             }
         }
@@ -2943,6 +3183,36 @@ async fn main() {
             match client.get_json_with_query("/v1/usage", &query).await {
                 Ok(data) => CliResponse::success("usage", data).emit(fmt),
                 Err(e) => request_failure("usage", e).emit(fmt),
+            }
+        }
+        Commands::Jobs { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            match sub {
+                JobsSubcommand::List(args) => {
+                    let mut query = vec![];
+                    if let Some(ref s) = args.status {
+                        query.push(("status", s.clone()));
+                    }
+                    match client.get_json_with_query("/v1/jobs", &query).await {
+                        Ok(data) => CliResponse::success("jobs list", data).emit(fmt),
+                        Err(e) => request_failure("jobs list", e).emit(fmt),
+                    }
+                }
+                JobsSubcommand::Get(args) => {
+                    let path = format!("/v1/jobs/{}", args.id);
+                    match client.get_json(&path).await {
+                        Ok(data) => CliResponse::success("jobs get", data).emit(fmt),
+                        Err(e) => request_failure("jobs get", e).emit(fmt),
+                    }
+                }
+                JobsSubcommand::Cancel(args) => {
+                    let path = format!("/v1/jobs/{}/cancel", args.id);
+                    match client.post_json(&path, json!({})).await {
+                        Ok(data) => CliResponse::success("jobs cancel", data).emit(fmt),
+                        Err(e) => request_failure("jobs cancel", e).emit(fmt),
+                    }
+                }
             }
         }
     }
