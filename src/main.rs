@@ -971,6 +971,10 @@ enum EvalsSubcommand {
     /// Import benchmark data from standard formats (BEIR, MTEB, etc.)
     Import(ImportEvalsArgs),
 
+    /// Import a HuggingFace benchmark via background job and poll to completion
+    /// (`POST /v1/evals/from-url` + `GET /v1/jobs/{id}`)
+    FromUrl(FromUrlArgs),
+
     /// Eval dataset commands
     Datasets {
         #[command(subcommand)]
@@ -982,6 +986,37 @@ enum EvalsSubcommand {
         #[arg(long = "voice-id")]
         voice_id: String,
     },
+}
+
+#[derive(Args)]
+struct FromUrlArgs {
+    /// HuggingFace dataset plain ID (`BeIR/scifact`) or full URL
+    /// (`https://huggingface.co/datasets/BeIR/scifact`). The `hf://` scheme
+    /// is NOT supported by the developer parser.
+    dataset: String,
+
+    /// Name for the created eval dataset (defaults to
+    /// `<slugified-dataset>-<timestamp>`)
+    #[arg(long = "name")]
+    name: Option<String>,
+
+    /// Collection ID to ingest corpus into. Optional: a throwaway uuid is
+    /// sent when omitted, which is sufficient for phase-1 materialization
+    /// (dataset row + queries + qrels) when embed/ingest is unhealthy.
+    #[arg(long = "collection-id")]
+    collection_id: Option<String>,
+
+    /// Optional explicit qrels dataset URL or ID (auto-discovered when omitted)
+    #[arg(long = "qrels-url")]
+    qrels_url: Option<String>,
+
+    /// Optional voice ID to use for chunking during ingest
+    #[arg(long = "voice-id")]
+    voice_id: Option<String>,
+
+    /// Poll timeout in seconds (default 300)
+    #[arg(long = "timeout", default_value_t = 300u64)]
+    timeout_secs: u64,
 }
 
 #[derive(Subcommand)]
@@ -1768,6 +1803,230 @@ fn build_eval_campaign_body(args: &RunEvalCampaignArgs) -> Result<Value, String>
         "queries": queries,
         "match_mode": match_mode,
     }))
+}
+
+/// Normalize an HF dataset reference into a plain `namespace/name` ID.
+///
+/// The developer-side parser at
+/// `enscrive-developer/crates/server/src/api/dataset_import.rs::parse_hf_dataset_id`
+/// accepts plain IDs and full https URLs but rejects the `hf://` scheme. This
+/// helper mirrors that and rejects `hf://` up-front with a clear message.
+fn normalize_hf_dataset_ref(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("dataset reference cannot be empty".into());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("hf://") {
+        return Err(
+            "hf:// scheme is not supported by the developer parser; use plain 'namespace/name' or the full https://huggingface.co/datasets/<id> URL"
+                .into(),
+        );
+    }
+    if let Some(rest) = trimmed.strip_prefix("https://huggingface.co/datasets/") {
+        return Ok(rest.trim_end_matches('/').to_string());
+    }
+    if let Some(rest) = trimmed.strip_prefix("http://huggingface.co/datasets/") {
+        return Ok(rest.trim_end_matches('/').to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Slugify an HF dataset ID for use in a default eval dataset name.
+fn slugify_dataset_id(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+async fn run_evals_from_url(client: &client::EnscriveClient, args: &FromUrlArgs, fmt: OutputFormat) {
+    let command = "evals from-url";
+
+    let dataset_id = match normalize_hf_dataset_ref(&args.dataset) {
+        Ok(v) => v,
+        Err(e) => CliResponse::fail(command, e, FailureClass::Bug, EXIT_CONFIG).emit(fmt),
+    };
+
+    let dataset_name = args.name.clone().unwrap_or_else(|| {
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+        format!("{}-{}", slugify_dataset_id(&dataset_id), stamp)
+    });
+
+    // collection_id is required by the developer handler (BadRequest when
+    // empty). When the caller omits it we send a throwaway v4 uuid so
+    // phase-1 materialization (dataset + queries + qrels rows) still succeeds
+    // even when embed/ingest is unhealthy; the job will fail at the ingest
+    // phase in that case but the dataset_id is already populated on the job
+    // row before any embed RPC (W-001 confirmed this at job_runner.rs:603-624).
+    let collection_id = args.collection_id.clone().unwrap_or_else(|| {
+        uuid_v4_simple()
+    });
+
+    let mut launch_body = json!({
+        "dataset_url": dataset_id,
+        "dataset_name": dataset_name,
+        "collection_id": collection_id,
+    });
+    if let Some(ref q) = args.qrels_url {
+        launch_body["qrels_url"] = Value::String(q.clone());
+    }
+    if let Some(ref v) = args.voice_id {
+        launch_body["voice_id"] = Value::String(v.clone());
+    }
+
+    let launch = match client.post_json("/v1/evals/from-url", launch_body).await {
+        Ok(v) => v,
+        Err(e) => request_failure(command, e).emit(fmt),
+    };
+
+    let job_id = match launch.get("job_id").and_then(Value::as_str) {
+        Some(id) => id.to_string(),
+        None => CliResponse::fail(
+            command,
+            format!("launch response missing job_id: {launch}"),
+            FailureClass::FalseClaim,
+            EXIT_FAILURE,
+        )
+        .emit(fmt),
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.timeout_secs);
+    let mut delay = std::time::Duration::from_secs(2);
+    let max_delay = std::time::Duration::from_secs(15);
+    let job_path = format!("/v1/jobs/{}", job_id);
+    let mut last_job = Value::Null;
+
+    loop {
+        match client.get_json(&job_path).await {
+            Ok(job) => {
+                last_job = job.clone();
+                let status = job
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                match status.as_str() {
+                    "completed" | "succeeded" => {
+                        let data = build_from_url_success_data(&launch, &job);
+                        CliResponse::success(command, data).emit(fmt);
+                    }
+                    "failed" | "cancelled" => {
+                        let error_message = job
+                            .get("error_message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("job terminated without error_message")
+                            .to_string();
+                        let mut data = build_from_url_success_data(&launch, &job);
+                        data["terminal_status"] = Value::String(status.clone());
+                        let err = format!("job {} {}: {}", job_id, status, error_message);
+                        let mut resp = CliResponse::fail(
+                            command,
+                            err,
+                            FailureClass::Bug,
+                            EXIT_FAILURE,
+                        );
+                        resp.data = Some(data);
+                        resp.emit(fmt);
+                    }
+                    _ => {
+                        if std::time::Instant::now() >= deadline {
+                            let mut data = build_from_url_success_data(&launch, &job);
+                            data["terminal_status"] = Value::String(status.clone());
+                            let mut resp = CliResponse::fail(
+                                command,
+                                format!(
+                                    "timed out after {}s polling job {} (last status: {})",
+                                    args.timeout_secs, job_id, status
+                                ),
+                                FailureClass::Unimplemented,
+                                EXIT_FAILURE,
+                            );
+                            resp.data = Some(data);
+                            resp.emit(fmt);
+                        }
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(max_delay);
+                    }
+                }
+            }
+            Err(e) => {
+                // Transient poll failure: if we still have budget, keep trying
+                // rather than exiting. On deadline, surface the error.
+                if std::time::Instant::now() >= deadline {
+                    let mut resp = CliResponse::fail(
+                        command,
+                        format!("poll failed after timeout: {e}"),
+                        FailureClass::Bug,
+                        EXIT_FAILURE,
+                    );
+                    resp.data = Some(json!({
+                        "launch": launch,
+                        "last_job": last_job,
+                    }));
+                    resp.emit(fmt);
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(max_delay);
+            }
+        }
+    }
+}
+
+fn build_from_url_success_data(launch: &Value, job: &Value) -> Value {
+    let dataset_id = job
+        .get("dataset_id")
+        .and_then(Value::as_str)
+        .map(String::from);
+    let job_id = job
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| launch.get("job_id").and_then(Value::as_str))
+        .map(String::from);
+    let corpus_count = job
+        .get("total_documents")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let documents_ingested = job
+        .get("documents_ingested")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    json!({
+        "dataset_id": dataset_id,
+        "job_id": job_id,
+        "corpus_count": corpus_count,
+        "documents_ingested": documents_ingested,
+        "status": job.get("status").cloned().unwrap_or(Value::Null),
+        "phase": job.get("phase").cloned().unwrap_or(Value::Null),
+        "progress_percent": job.get("progress_percent").cloned().unwrap_or(Value::Null),
+        "launch": launch,
+        "job": job,
+    })
+}
+
+/// Generate a v4-shaped UUID string without pulling in the `uuid` crate.
+fn uuid_v4_simple() -> String {
+    use rand::Rng;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill(&mut bytes);
+    // Set version 4 and variant bits
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
 }
 
 fn parse_metadata_filters(entries: &[String]) -> Result<Map<String, Value>, String> {
@@ -2946,6 +3205,11 @@ async fn main() {
                     .emit(fmt);
                 }
             }
+            EvalsSubcommand::FromUrl(args) => {
+                let ctx = api_context.clone().unwrap();
+                let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+                run_evals_from_url(&client, args, fmt).await;
+            }
             EvalsSubcommand::Datasets { sub } => {
                 let ctx = api_context.clone().unwrap();
                 let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
@@ -3783,6 +4047,94 @@ mod tests {
             }
             _ => panic!("expected evals datasets create"),
         }
+    }
+
+    #[test]
+    fn parse_evals_from_url_command() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "--api-key",
+            "test-key",
+            "evals",
+            "from-url",
+            "BeIR/scifact",
+            "--name",
+            "scifact-w003",
+            "--collection-id",
+            "bea30a4b-4733-4e02-befa-c48f6e28280e",
+            "--timeout",
+            "600",
+        ]);
+
+        match args.command {
+            Commands::Evals {
+                sub: EvalsSubcommand::FromUrl(from_url),
+            } => {
+                assert_eq!(from_url.dataset, "BeIR/scifact");
+                assert_eq!(from_url.name.as_deref(), Some("scifact-w003"));
+                assert_eq!(
+                    from_url.collection_id.as_deref(),
+                    Some("bea30a4b-4733-4e02-befa-c48f6e28280e")
+                );
+                assert_eq!(from_url.timeout_secs, 600);
+            }
+            _ => panic!("expected evals from-url"),
+        }
+    }
+
+    #[test]
+    fn parse_evals_from_url_default_timeout() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "evals",
+            "from-url",
+            "https://huggingface.co/datasets/BeIR/scifact",
+        ]);
+        match args.command {
+            Commands::Evals {
+                sub: EvalsSubcommand::FromUrl(from_url),
+            } => {
+                assert_eq!(from_url.timeout_secs, 300);
+                assert_eq!(
+                    from_url.dataset,
+                    "https://huggingface.co/datasets/BeIR/scifact"
+                );
+            }
+            _ => panic!("expected evals from-url"),
+        }
+    }
+
+    #[test]
+    fn normalize_hf_dataset_ref_plain_id() {
+        assert_eq!(
+            normalize_hf_dataset_ref("BeIR/scifact").unwrap(),
+            "BeIR/scifact"
+        );
+    }
+
+    #[test]
+    fn normalize_hf_dataset_ref_full_url() {
+        assert_eq!(
+            normalize_hf_dataset_ref("https://huggingface.co/datasets/BeIR/scifact").unwrap(),
+            "BeIR/scifact"
+        );
+    }
+
+    #[test]
+    fn normalize_hf_dataset_ref_rejects_hf_scheme() {
+        let err = normalize_hf_dataset_ref("hf://BeIR/scifact").unwrap_err();
+        assert!(err.contains("hf:// scheme is not supported"));
+    }
+
+    #[test]
+    fn normalize_hf_dataset_ref_rejects_empty() {
+        let err = normalize_hf_dataset_ref("   ").unwrap_err();
+        assert!(err.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn slugify_dataset_id_basic() {
+        assert_eq!(slugify_dataset_id("BeIR/scifact"), "beir-scifact");
     }
 
     #[test]

@@ -395,8 +395,8 @@ reason = "Convergence analysis requires multi-campaign history; deferred until e
 method = "POST"
 path = "/v1/evals/from-url"
 cli_command = "evals from-url"
-status = "deferred"
-reason = "URL-based dataset import is a background-job feature; deferred until jobs workflow is validated end-to-end"
+status = "implemented"
+note = "Gap1 W-003 — wraps POST /v1/evals/from-url + polls /v1/jobs/{id} until terminal"
 
 # ── Logs & Observability ───────────────────────────────
 
