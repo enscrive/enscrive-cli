@@ -338,6 +338,12 @@ path = "/v1/evals/datasets/{id}"
 cli_command = "evals datasets delete"
 status = "implemented"
 
+[[endpoint]]
+method = "GET"
+path = "/v1/evals/datasets/{id}/queries"
+cli_command = "evals datasets queries"
+status = "implemented"
+
 # ── Evals: Campaigns ───────────────────────────────────
 
 [[endpoint]]

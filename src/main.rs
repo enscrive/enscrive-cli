@@ -1010,6 +1010,13 @@ enum EvalDatasetsSubcommand {
         id: String,
     },
 
+    /// Fetch the flat queries + qrels view of an eval dataset
+    /// (`GET /v1/evals/datasets/{id}/queries`)
+    Queries {
+        #[arg(long)]
+        id: String,
+    },
+
     /// Update an eval dataset
     Update(UpdateEvalDatasetArgs),
 
@@ -2978,6 +2985,15 @@ async fn main() {
                             Err(e) => request_failure("evals datasets get", e).emit(fmt),
                         }
                     }
+                    EvalDatasetsSubcommand::Queries { id } => {
+                        let path = format!("/v1/evals/datasets/{}/queries", id);
+                        match client.get_json(&path).await {
+                            Ok(data) => {
+                                CliResponse::success("evals datasets queries", data).emit(fmt)
+                            }
+                            Err(e) => request_failure("evals datasets queries", e).emit(fmt),
+                        }
+                    }
                     EvalDatasetsSubcommand::Update(args) => {
                         match parse_eval_queries_source(&args.queries_json, &args.queries_file) {
                             Ok(queries) => {
@@ -3766,6 +3782,32 @@ mod tests {
                 assert_eq!(queries_file.as_deref(), Some("queries.json"));
             }
             _ => panic!("expected evals datasets create"),
+        }
+    }
+
+    #[test]
+    fn parse_eval_dataset_queries_command() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "--api-key",
+            "test-key",
+            "evals",
+            "datasets",
+            "queries",
+            "--id",
+            "2ca50d50-5085-425b-8185-f3692d51de1b",
+        ]);
+
+        match args.command {
+            Commands::Evals {
+                sub:
+                    EvalsSubcommand::Datasets {
+                        sub: EvalDatasetsSubcommand::Queries { id },
+                    },
+            } => {
+                assert_eq!(id, "2ca50d50-5085-425b-8185-f3692d51de1b");
+            }
+            _ => panic!("expected evals datasets queries"),
         }
     }
 
