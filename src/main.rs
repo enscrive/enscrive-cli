@@ -505,6 +505,34 @@ enum AnalyzeSubcommand {
 enum ModelsSubcommand {
     /// List public embedding and chunking model names
     List,
+
+    /// Show model card detail for a specific model (J-021)
+    ///
+    /// Accepts <provider>/<model> as a positional argument, e.g.:
+    ///   enscrive models show nebius/Qwen%2FQwen3-Embedding-8B
+    ///   enscrive models show --provider nebius --model Qwen/Qwen3-Embedding-8B
+    Show(ModelsShowArgs),
+}
+
+/// J-021: Arguments for `enscrive models show`.
+#[derive(Args)]
+struct ModelsShowArgs {
+    /// Provider/model string as a single arg, e.g. "nebius/Qwen/Qwen3-Embedding-8B".
+    /// If the model name contains a slash, encode it as %2F or use --provider + --model.
+    #[arg(
+        value_name = "PROVIDER_MODEL",
+        conflicts_with_all = ["provider", "model_name"],
+        required_unless_present_all = ["provider", "model_name"]
+    )]
+    provider_model: Option<String>,
+
+    /// Provider name (alternative to positional PROVIDER_MODEL).
+    #[arg(long = "provider", requires = "model_name")]
+    provider: Option<String>,
+
+    /// Model name (alternative to positional PROVIDER_MODEL).
+    #[arg(long = "model", requires = "provider")]
+    model_name: Option<String>,
 }
 
 #[derive(Args)]
@@ -652,11 +680,23 @@ enum CollectionsSubcommand {
         include_content: bool,
     },
 
-    /// Get a single collection (not yet exposed on public /v1)
+    /// Get enriched detail for a single collection (J-004c)
     Get {
         #[arg(long)]
         id: String,
     },
+
+    /// Discard all uncommitted pending changes for a collection (J-004c)
+    Revert {
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Show the commit history for a collection (J-004c)
+    Commits(CollectionsCommitsArgs),
+
+    /// Get vector-space metrics for a collection (J-020)
+    Metrics(CollectionsMetricsArgs),
 
     /// Stage document changes for later commit
     Stage(CollectionsStageArgs),
@@ -715,6 +755,35 @@ struct CollectionsPendingDeleteArgs {
 
     #[arg(long = "document-id")]
     document_id: String,
+}
+
+/// J-004c: Arguments for `enscrive collections commits`.
+#[derive(Args)]
+struct CollectionsCommitsArgs {
+    /// Collection ID.
+    #[arg(long)]
+    id: String,
+
+    /// Maximum number of commits to return (1–200, default 50).
+    #[arg(long, default_value_t = 50)]
+    limit: i64,
+}
+
+/// J-020: Arguments for `enscrive collections metrics`.
+#[derive(Args)]
+struct CollectionsMetricsArgs {
+    /// Collection UUID to compute metrics for.
+    #[arg(long)]
+    id: String,
+
+    /// Number of vectors to sample for cosine similarity histogram and norm stats.
+    /// Default 1000, max 10000.
+    #[arg(long = "sample-size", default_value_t = 1000)]
+    sample_size: u32,
+
+    /// Bypass the 60-second in-memory cache and recompute metrics.
+    #[arg(long = "force-refresh", default_value_t = false)]
+    force_refresh: bool,
 }
 
 #[derive(Args)]
@@ -2430,9 +2499,6 @@ async fn main() {
         | Commands::Status(_)
         | Commands::Deploy { .. } => None,
         Commands::Health => None,
-        Commands::Collections {
-            sub: CollectionsSubcommand::Get { .. },
-        } => None,
         _ => match local::resolve_api_context(
             cli.profile.as_deref(),
             cli.endpoint.clone(),
@@ -2803,6 +2869,38 @@ async fn main() {
                     Ok(data) => CliResponse::success("models list", data).emit(fmt),
                     Err(e) => request_failure("models list", e).emit(fmt),
                 },
+                // J-021: model card detail.
+                ModelsSubcommand::Show(args) => {
+                    // Resolve (provider, model) from either positional or flags.
+                    let (provider, model) = if let Some(pm) = &args.provider_model {
+                        // Split on first '/' only.
+                        match pm.splitn(2, '/').collect::<Vec<_>>()[..] {
+                            [p, m] => (p.to_string(), m.to_string()),
+                            _ => {
+                                CliResponse::fail(
+                                    "models show",
+                                    "PROVIDER_MODEL must be in <provider>/<model> form".to_string(),
+                                    FailureClass::Bug,
+                                    EXIT_CONFIG,
+                                )
+                                .emit(fmt)
+                            }
+                        }
+                    } else {
+                        (
+                            args.provider.clone().unwrap_or_default(),
+                            args.model_name.clone().unwrap_or_default(),
+                        )
+                    };
+                    // URL-encode the model name (forward slashes must be %2F).
+                    let encoded_model =
+                        model.replace('/', "%2F");
+                    let path = format!("/v1/models/{}/{}", provider, encoded_model);
+                    match client.get_json(&path).await {
+                        Ok(data) => CliResponse::success("models show", data).emit(fmt),
+                        Err(e) => request_failure("models show", e).emit(fmt),
+                    }
+                }
             }
         }
         Commands::Collections { sub } => {
@@ -2872,12 +2970,30 @@ async fn main() {
                         Err(e) => request_failure("collections chunks", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::Get { .. } => {
-                    CliResponse::unsupported(
-                        "collections get",
-                        "GET /v1/collections/{id} is not yet available on public /v1; use collections list or collections stats",
-                    )
-                    .emit(fmt);
+                // J-004c: detail route is now live.
+                CollectionsSubcommand::Get { id } => {
+                    let path = format!("/v1/collections/{}", id);
+                    match client.get_json(&path).await {
+                        Ok(data) => CliResponse::success("collections get", data).emit(fmt),
+                        Err(e) => request_failure("collections get", e).emit(fmt),
+                    }
+                }
+                // J-004c: revert uncommitted pending changes.
+                CollectionsSubcommand::Revert { id } => {
+                    let path = format!("/v1/collections/{}/revert", id);
+                    match client.post_json(&path, serde_json::json!({})).await {
+                        Ok(data) => CliResponse::success("collections revert", data).emit(fmt),
+                        Err(e) => request_failure("collections revert", e).emit(fmt),
+                    }
+                }
+                // J-004c: commit history.
+                CollectionsSubcommand::Commits(args) => {
+                    let limit = args.limit.clamp(1, 200);
+                    let path = format!("/v1/collections/{}/commits?limit={}", args.id, limit);
+                    match client.get_json(&path).await {
+                        Ok(data) => CliResponse::success("collections commits", data).emit(fmt),
+                        Err(e) => request_failure("collections commits", e).emit(fmt),
+                    }
                 }
                 CollectionsSubcommand::Stage(args) => {
                     let documents = if args.documents_json.is_some() || args.documents_file.is_some() {
@@ -2926,6 +3042,17 @@ async fn main() {
                     match client.delete_json(&path).await {
                         Ok(data) => CliResponse::success("collections pending delete", data).emit(fmt),
                         Err(e) => request_failure("collections pending delete", e).emit(fmt),
+                    }
+                }
+                // J-020: vector-space metrics endpoint.
+                CollectionsSubcommand::Metrics(args) => {
+                    let path = format!(
+                        "/v1/collections/{}/metrics?sample_size={}&force_refresh={}",
+                        args.id, args.sample_size, args.force_refresh,
+                    );
+                    match client.get_json(&path).await {
+                        Ok(data) => CliResponse::success("collections metrics", data).emit(fmt),
+                        Err(e) => request_failure("collections metrics", e).emit(fmt),
                     }
                 }
             }
