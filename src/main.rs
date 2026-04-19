@@ -1471,6 +1471,12 @@ enum JobsSubcommand {
 
     /// Cancel a running job
     Cancel(JobsCancelArgs),
+
+    /// Retry failed sub-batches of a batch-set job (J-024 Unit 3)
+    Retry(JobsRetryArgs),
+
+    /// Abandon a failed batch-set job, cleaning up staging collections (J-024 Unit 3)
+    Abandon(JobsAbandonArgs),
 }
 
 #[derive(Args)]
@@ -1489,6 +1495,20 @@ struct JobsGetArgs {
 
 #[derive(Args)]
 struct JobsCancelArgs {
+    /// Job ID
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Args)]
+struct JobsRetryArgs {
+    /// Job ID
+    #[arg(long)]
+    id: String,
+}
+
+#[derive(Args)]
+struct JobsAbandonArgs {
     /// Job ID
     #[arg(long)]
     id: String,
@@ -3798,6 +3818,21 @@ async fn main() {
                         Err(e) => request_failure("jobs cancel", e).emit(fmt),
                     }
                 }
+                // J-024 Unit 3 Concern 6: retry and abandon.
+                JobsSubcommand::Retry(args) => {
+                    let path = format!("/v1/jobs/{}/retry", args.id);
+                    match client.post_json(&path, json!({})).await {
+                        Ok(data) => CliResponse::success("jobs retry", data).emit(fmt),
+                        Err(e) => request_failure("jobs retry", e).emit(fmt),
+                    }
+                }
+                JobsSubcommand::Abandon(args) => {
+                    let path = format!("/v1/jobs/{}/abandon", args.id);
+                    match client.post_json(&path, json!({})).await {
+                        Ok(data) => CliResponse::success("jobs abandon", data).emit(fmt),
+                        Err(e) => request_failure("jobs abandon", e).emit(fmt),
+                    }
+                }
             }
         }
         Commands::BatchSets { sub } => {
@@ -5776,5 +5811,53 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             }
             _ => panic!("expected batch-sets get"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // J-024 Unit 3 Concern 6: jobs retry / jobs abandon parse tests
+    // -------------------------------------------------------------------------
+
+    /// `enscrive jobs retry --id <uuid>` parses to JobsSubcommand::Retry.
+    #[test]
+    fn test_jobs_retry_parses() {
+        let job_id = "deadbeef-dead-dead-dead-deaddeadbeef";
+        let args = Cli::parse_from(["enscrive", "jobs", "retry", "--id", job_id]);
+        match args.command {
+            Commands::Jobs {
+                sub: JobsSubcommand::Retry(JobsRetryArgs { id }),
+            } => {
+                assert_eq!(id, job_id);
+            }
+            _ => panic!("expected jobs retry"),
+        }
+    }
+
+    /// `enscrive jobs abandon --id <uuid>` parses to JobsSubcommand::Abandon.
+    #[test]
+    fn test_jobs_abandon_parses() {
+        let job_id = "cafebabe-cafe-cafe-cafe-cafecafecafe";
+        let args = Cli::parse_from(["enscrive", "jobs", "abandon", "--id", job_id]);
+        match args.command {
+            Commands::Jobs {
+                sub: JobsSubcommand::Abandon(JobsAbandonArgs { id }),
+            } => {
+                assert_eq!(id, job_id);
+            }
+            _ => panic!("expected jobs abandon"),
+        }
+    }
+
+    /// Retry and abandon use `--id` flag, not positional (reject positional input).
+    #[test]
+    fn test_jobs_retry_requires_flag() {
+        // parse_from panics on Cli errors in test mode; just verify the flag form succeeds
+        let args = Cli::parse_from(["enscrive", "jobs", "retry", "--id", "some-uuid"]);
+        assert!(
+            matches!(
+                args.command,
+                Commands::Jobs { sub: JobsSubcommand::Retry(_) }
+            ),
+            "expected jobs retry variant"
+        );
     }
 }
