@@ -159,6 +159,12 @@ enum Commands {
         sub: JobsSubcommand,
     },
 
+    /// Batch-set management commands (J-024)
+    BatchSets {
+        #[command(subcommand)]
+        sub: BatchSetsSubcommand,
+    },
+
     /// Operator admin commands (requires Admin capability)
     Admin {
         #[command(subcommand)]
@@ -1485,6 +1491,42 @@ struct JobsGetArgs {
 struct JobsCancelArgs {
     /// Job ID
     #[arg(long)]
+    id: String,
+}
+
+// ---------------------------------------------------------------------------
+// BatchSets subcommand types (J-024 Unit 5)
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum BatchSetsSubcommand {
+    /// List batch-sets for a collection
+    List(BatchSetsListArgs),
+
+    /// Get details of a specific batch-set
+    Get(BatchSetsGetArgs),
+}
+
+/// J-024: Arguments for `enscrive batch-sets list`.
+#[derive(Args)]
+struct BatchSetsListArgs {
+    /// Collection UUID
+    #[arg(long)]
+    collection: String,
+
+    /// Maximum results (default 50, max 200)
+    #[arg(long)]
+    limit: Option<u32>,
+
+    /// Offset for pagination (default 0)
+    #[arg(long)]
+    offset: Option<u32>,
+}
+
+/// J-024: Arguments for `enscrive batch-sets get`.
+#[derive(Args)]
+struct BatchSetsGetArgs {
+    /// Batch-set UUID
     id: String,
 }
 
@@ -3758,6 +3800,33 @@ async fn main() {
                 }
             }
         }
+        Commands::BatchSets { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            match sub {
+                BatchSetsSubcommand::List(args) => {
+                    let mut query: Vec<(&str, String)> = vec![];
+                    if let Some(limit) = args.limit {
+                        query.push(("limit", limit.to_string()));
+                    }
+                    if let Some(offset) = args.offset {
+                        query.push(("offset", offset.to_string()));
+                    }
+                    let path = format!("/v1/collections/{}/batch-sets", args.collection);
+                    match client.get_json_with_query(&path, &query).await {
+                        Ok(data) => CliResponse::success("batch-sets list", data).emit(fmt),
+                        Err(e) => request_failure("batch-sets list", e).emit(fmt),
+                    }
+                }
+                BatchSetsSubcommand::Get(args) => {
+                    let path = format!("/v1/batch-sets/{}", args.id);
+                    match client.get_json(&path).await {
+                        Ok(data) => CliResponse::success("batch-sets get", data).emit(fmt),
+                        Err(e) => request_failure("batch-sets get", e).emit(fmt),
+                    }
+                }
+            }
+        }
         Commands::Admin { sub } => {
             let ctx = api_context.clone().unwrap();
             let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
@@ -5639,6 +5708,73 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 assert_eq!(burst_tpm, 1_500_000);
             }
             _ => panic!("expected admin rate-limits set"),
+        }
+    }
+
+    // ── J-024 Unit 5: batch-sets parse tests ─────────────────────────────────
+
+    /// Test that `enscrive batch-sets list --collection <uuid>` parses correctly.
+    #[test]
+    fn test_batch_sets_list_parses() {
+        let collection_id = "5171d423-b261-4e3d-b9a4-fb1205e34903";
+        let args = Cli::parse_from([
+            "enscrive",
+            "batch-sets",
+            "list",
+            "--collection",
+            collection_id,
+        ]);
+        match args.command {
+            Commands::BatchSets {
+                sub: BatchSetsSubcommand::List(BatchSetsListArgs { collection, limit, offset }),
+            } => {
+                assert_eq!(collection, collection_id);
+                assert!(limit.is_none(), "limit must default to None");
+                assert!(offset.is_none(), "offset must default to None");
+            }
+            _ => panic!("expected batch-sets list"),
+        }
+    }
+
+    /// Test that `enscrive batch-sets list` with --limit and --offset parses correctly.
+    #[test]
+    fn test_batch_sets_list_parses_with_pagination() {
+        let collection_id = "5171d423-b261-4e3d-b9a4-fb1205e34903";
+        let args = Cli::parse_from([
+            "enscrive",
+            "batch-sets",
+            "list",
+            "--collection",
+            collection_id,
+            "--limit",
+            "10",
+            "--offset",
+            "20",
+        ]);
+        match args.command {
+            Commands::BatchSets {
+                sub: BatchSetsSubcommand::List(BatchSetsListArgs { collection, limit, offset }),
+            } => {
+                assert_eq!(collection, collection_id);
+                assert_eq!(limit, Some(10));
+                assert_eq!(offset, Some(20));
+            }
+            _ => panic!("expected batch-sets list with pagination"),
+        }
+    }
+
+    /// Test that `enscrive batch-sets get <uuid>` parses correctly.
+    #[test]
+    fn test_batch_sets_get_parses() {
+        let batch_set_id = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        let args = Cli::parse_from(["enscrive", "batch-sets", "get", batch_set_id]);
+        match args.command {
+            Commands::BatchSets {
+                sub: BatchSetsSubcommand::Get(BatchSetsGetArgs { id }),
+            } => {
+                assert_eq!(id, batch_set_id);
+            }
+            _ => panic!("expected batch-sets get"),
         }
     }
 }
