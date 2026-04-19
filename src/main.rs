@@ -158,6 +158,12 @@ enum Commands {
         #[command(subcommand)]
         sub: JobsSubcommand,
     },
+
+    /// Operator admin commands (requires Admin capability)
+    Admin {
+        #[command(subcommand)]
+        sub: AdminSubcommand,
+    },
 }
 
 #[derive(Args)]
@@ -1411,6 +1417,69 @@ struct JobsCancelArgs {
     /// Job ID
     #[arg(long)]
     id: String,
+}
+
+// ---------------------------------------------------------------------------
+// Admin subcommand types
+// ---------------------------------------------------------------------------
+
+#[derive(Subcommand)]
+enum AdminSubcommand {
+    /// Rate-limit governor commands (DESIGN §R9)
+    RateLimits {
+        #[command(subcommand)]
+        sub: AdminRateLimitsSubcommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AdminRateLimitsSubcommand {
+    /// Show the effective rate-limit policy for the caller's own tenant.
+    ///
+    /// Without --tenant the caller's own tenant is used (GET /v1/rate-limits).
+    /// Cross-tenant admin reads land in a later unit.
+    Show(AdminRateLimitsShowArgs),
+
+    /// Set (upsert) the rate-limit policy for a tenant/provider pair.
+    ///
+    /// PATCH /v1/admin/rate-limits/{tenant}/{provider}
+    /// Use tenant 00000000-0000-0000-0000-000000000000 to update the global default.
+    Set(AdminRateLimitsSetArgs),
+}
+
+#[derive(Args)]
+struct AdminRateLimitsShowArgs {
+    /// Tenant UUID to show (currently ignored — shows caller's own tenant via
+    /// GET /v1/rate-limits; cross-tenant admin read lands in a later unit).
+    #[arg(long)]
+    tenant: Option<String>,
+}
+
+#[derive(Args)]
+struct AdminRateLimitsSetArgs {
+    /// Tenant UUID to update. Use 00000000-0000-0000-0000-000000000000 for the global default.
+    #[arg(long, required = true)]
+    tenant: String,
+
+    /// Provider key: openai | voyage | nebius | bge-local
+    #[arg(long, required = true)]
+    provider: String,
+
+    /// Steady-state requests per minute
+    #[arg(long, required = true)]
+    rpm: i64,
+
+    /// Burst-request capacity (instantaneous headroom above steady-state RPM)
+    #[arg(long, required = true)]
+    burst_rpm: i64,
+
+    /// Steady-state tokens per minute
+    #[arg(long, required = true)]
+    tpm: i64,
+
+    /// Burst-token capacity (instantaneous headroom above steady-state TPM)
+    #[arg(long, required = true)]
+    burst_tpm: i64,
 }
 
 fn require_api_key(api_key: Option<String>, fmt: OutputFormat) -> String {
@@ -3562,6 +3631,39 @@ async fn main() {
                 }
             }
         }
+        Commands::Admin { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            match sub {
+                AdminSubcommand::RateLimits { sub } => match sub {
+                    // show — GET /v1/rate-limits (caller's own tenant)
+                    // Cross-tenant admin read deferred to a later unit (DESIGN §R9).
+                    AdminRateLimitsSubcommand::Show(_args) => {
+                        match client.get_json("/v1/rate-limits").await {
+                            Ok(data) => CliResponse::success("admin rate-limits show", data).emit(fmt),
+                            Err(e) => request_failure("admin rate-limits show", e).emit(fmt),
+                        }
+                    }
+                    // set — PATCH /v1/admin/rate-limits/{tenant}/{provider}
+                    AdminRateLimitsSubcommand::Set(args) => {
+                        let path = format!(
+                            "/v1/admin/rate-limits/{}/{}",
+                            args.tenant, args.provider
+                        );
+                        let body = json!({
+                            "requests_per_minute": args.rpm,
+                            "burst_requests": args.burst_rpm,
+                            "tokens_per_minute": args.tpm,
+                            "burst_tokens": args.burst_tpm,
+                        });
+                        match client.patch_json(&path, body).await {
+                            Ok(data) => CliResponse::success("admin rate-limits set", data).emit(fmt),
+                            Err(e) => request_failure("admin rate-limits set", e).emit(fmt),
+                        }
+                    }
+                },
+            }
+        }
     }
 }
 
@@ -5279,5 +5381,137 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         );
         assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
         assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
+    }
+
+    // -----------------------------------------------------------------------
+    // admin rate-limits parse tests (J-011 Unit 4b)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_admin_rate_limits_show_no_tenant() {
+        let args = Cli::parse_from(["enscrive", "admin", "rate-limits", "show"]);
+        match args.command {
+            Commands::Admin {
+                sub: AdminSubcommand::RateLimits {
+                    sub: AdminRateLimitsSubcommand::Show(AdminRateLimitsShowArgs { tenant }),
+                },
+            } => {
+                assert!(tenant.is_none(), "tenant should be None when not provided");
+            }
+            _ => panic!("expected admin rate-limits show"),
+        }
+    }
+
+    #[test]
+    fn parse_admin_rate_limits_show_with_tenant() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "admin",
+            "rate-limits",
+            "show",
+            "--tenant",
+            "00000000-0000-0000-0000-000000000000",
+        ]);
+        match args.command {
+            Commands::Admin {
+                sub: AdminSubcommand::RateLimits {
+                    sub: AdminRateLimitsSubcommand::Show(AdminRateLimitsShowArgs { tenant }),
+                },
+            } => {
+                assert_eq!(
+                    tenant.as_deref(),
+                    Some("00000000-0000-0000-0000-000000000000")
+                );
+            }
+            _ => panic!("expected admin rate-limits show"),
+        }
+    }
+
+    #[test]
+    fn parse_admin_rate_limits_set_full() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "admin",
+            "rate-limits",
+            "set",
+            "--tenant",
+            "00000000-0000-0000-0000-000000000000",
+            "--provider",
+            "openai",
+            "--rpm",
+            "500",
+            "--burst-rpm",
+            "1000",
+            "--tpm",
+            "1000000",
+            "--burst-tpm",
+            "2000000",
+        ]);
+        match args.command {
+            Commands::Admin {
+                sub: AdminSubcommand::RateLimits {
+                    sub: AdminRateLimitsSubcommand::Set(AdminRateLimitsSetArgs {
+                        tenant,
+                        provider,
+                        rpm,
+                        burst_rpm,
+                        tpm,
+                        burst_tpm,
+                    }),
+                },
+            } => {
+                assert_eq!(tenant, "00000000-0000-0000-0000-000000000000");
+                assert_eq!(provider, "openai");
+                assert_eq!(rpm, 500);
+                assert_eq!(burst_rpm, 1000);
+                assert_eq!(tpm, 1_000_000);
+                assert_eq!(burst_tpm, 2_000_000);
+            }
+            _ => panic!("expected admin rate-limits set"),
+        }
+    }
+
+    #[test]
+    fn parse_admin_rate_limits_set_non_default_tenant() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "admin",
+            "rate-limits",
+            "set",
+            "--tenant",
+            "aaaabbbb-0000-0000-0000-000000000001",
+            "--provider",
+            "nebius",
+            "--rpm",
+            "300",
+            "--burst-rpm",
+            "600",
+            "--tpm",
+            "750000",
+            "--burst-tpm",
+            "1500000",
+        ]);
+        match args.command {
+            Commands::Admin {
+                sub: AdminSubcommand::RateLimits {
+                    sub: AdminRateLimitsSubcommand::Set(AdminRateLimitsSetArgs {
+                        tenant,
+                        provider,
+                        rpm,
+                        burst_rpm,
+                        tpm,
+                        burst_tpm,
+                    }),
+                },
+            } => {
+                assert_eq!(tenant, "aaaabbbb-0000-0000-0000-000000000001");
+                assert_eq!(provider, "nebius");
+                assert_eq!(rpm, 300);
+                assert_eq!(burst_rpm, 600);
+                assert_eq!(tpm, 750_000);
+                assert_eq!(burst_tpm, 1_500_000);
+            }
+            _ => panic!("expected admin rate-limits set"),
+        }
     }
 }
