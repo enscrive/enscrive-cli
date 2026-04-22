@@ -248,6 +248,72 @@ impl EnscriveClient {
         self.send_json(Method::DELETE, path, None).await
     }
 
+    /// Post a multipart/form-data body with a JSON `metadata` part plus three
+    /// file parts (corpus, queries, qrels). Used by
+    /// `POST /v1/datasets/upload` (EV-006) — the only multipart endpoint today.
+    pub async fn post_dataset_upload(
+        &self,
+        path: &str,
+        metadata: Value,
+        corpus_bytes: Vec<u8>,
+        queries_bytes: Vec<u8>,
+        qrels_bytes: Vec<u8>,
+    ) -> Result<Value, String> {
+        let url = format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        );
+        let form = reqwest::multipart::Form::new()
+            .text(
+                "metadata",
+                serde_json::to_string(&metadata)
+                    .map_err(|e| format!("serialize metadata: {e}"))?,
+            )
+            .part(
+                "corpus",
+                reqwest::multipart::Part::bytes(corpus_bytes)
+                    .file_name("corpus.jsonl")
+                    .mime_str("application/x-ndjson")
+                    .map_err(|e| format!("corpus mime: {e}"))?,
+            )
+            .part(
+                "queries",
+                reqwest::multipart::Part::bytes(queries_bytes)
+                    .file_name("queries.jsonl")
+                    .mime_str("application/x-ndjson")
+                    .map_err(|e| format!("queries mime: {e}"))?,
+            )
+            .part(
+                "qrels",
+                reqwest::multipart::Part::bytes(qrels_bytes)
+                    .file_name("qrels.tsv")
+                    .mime_str("text/tab-separated-values")
+                    .map_err(|e| format!("qrels mime: {e}"))?,
+            );
+
+        let response = self
+            .with_auth_headers(self.http.request(Method::POST, &url))
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+
+        let status = response.status();
+        let body_text = response
+            .text()
+            .await
+            .map_err(|e| format!("read body: {e}"))?;
+
+        if !status.is_success() {
+            return Err(format!("HTTP {status}: {body_text}"));
+        }
+        if body_text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&body_text).map_err(|e| format!("parse response: {e}"))
+    }
+
     async fn send_json(
         &self,
         method: Method,

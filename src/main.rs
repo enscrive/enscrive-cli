@@ -1,5 +1,6 @@
 mod client;
 mod deploy;
+mod evals2;
 mod local;
 mod output;
 #[cfg(test)]
@@ -169,6 +170,23 @@ enum Commands {
     Admin {
         #[command(subcommand)]
         sub: AdminSubcommand,
+    },
+
+    // ───── Evals 2.0 (EV-013) ────────────────────────────────────────────
+
+    /// Evals 2.0 dataset primitive commands (list/get/describe/delete/upload).
+    /// Distinct from legacy `enscrive evals datasets` which targets
+    /// `/v1/evals/datasets/*` (eval_campaigns lineage) — EV-016 unifies.
+    Datasets {
+        #[command(subcommand)]
+        sub: evals2::Datasets2Subcommand,
+    },
+
+    /// Evals 2.0 eval definitions + runs (`/v1/eval-defs/*`, `/v1/eval-runs/*`).
+    /// Distinct from legacy `enscrive evals campaigns` — EV-016 unifies.
+    EvalDefs {
+        #[command(subcommand)]
+        sub: evals2::EvalDefsSubcommand,
     },
 }
 
@@ -853,6 +871,10 @@ enum VoicesSubcommand {
 
     /// Search with a voice profile
     Search(VoiceSearchArgs),
+
+    /// EV-011 voice-diff analyzer + EV-012 cost estimator.
+    #[command(subcommand)]
+    Diff2(evals2::VoiceDiff2Subcommand),
 }
 
 const VOICE_CONFIG_SCHEMA_SUMMARY: &str = "expected VoiceConfigApi keys: chunking_strategy, parameters, optional template_id, score_threshold, default_limit, description, tags";
@@ -3218,6 +3240,9 @@ async fn main() {
                     Err(e) => CliResponse::fail("voices search", e, FailureClass::Bug, EXIT_CONFIG)
                         .emit(fmt),
                 },
+                VoicesSubcommand::Diff2(sub) => {
+                    evals2::run_voice_diff(&client, fmt, sub.clone()).await;
+                }
             }
         }
         Commands::Evals { sub } => match sub {
@@ -3894,6 +3919,16 @@ async fn main() {
                     }
                 },
             }
+        }
+        Commands::Datasets { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            evals2::run_datasets(&client, fmt, sub.clone()).await;
+        }
+        Commands::EvalDefs { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            evals2::run_eval_defs(&client, fmt, sub.clone()).await;
         }
     }
 }
