@@ -97,6 +97,31 @@ pub enum EvalDefsSubcommand {
         #[command(subcommand)]
         sub: EvalRunsSubcommand,
     },
+    /// Publish a completed full-scope run as canonical (EV-017).
+    Publish(EvalDefsPublishArgs),
+    /// List active publications for an eval.
+    Publications {
+        #[arg(long)]
+        id: String,
+    },
+    /// Unpublish a publication (soft delete — audit row remains).
+    Unpublish {
+        #[arg(long = "publication-id")]
+        publication_id: String,
+    },
+}
+
+#[derive(Args, Clone)]
+pub struct EvalDefsPublishArgs {
+    /// Eval definition UUID.
+    #[arg(long)]
+    pub id: String,
+    /// Run UUID to mark as canonical.
+    #[arg(long = "run-id")]
+    pub run_id: String,
+    /// Optional free-form reviewer notes (stored for audit).
+    #[arg(long)]
+    pub notes: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -400,6 +425,31 @@ pub async fn run_eval_defs(
         }
         EvalDefsSubcommand::Run(args) => handle_eval_defs_run(client, fmt, args).await,
         EvalDefsSubcommand::Runs { sub } => run_eval_runs(client, fmt, sub).await,
+        EvalDefsSubcommand::Publish(args) => {
+            let path = format!("/v1/eval-defs/{}/publish", args.id);
+            let mut body = json!({ "run_id": args.run_id });
+            if let Some(n) = args.notes {
+                body["reviewer_notes"] = Value::String(n);
+            }
+            match client.post_json(&path, body).await {
+                Ok(data) => CliResponse::success("eval-defs publish", data).emit(fmt),
+                Err(e) => request_failure("eval-defs publish", e).emit(fmt),
+            }
+        }
+        EvalDefsSubcommand::Publications { id } => {
+            let path = format!("/v1/eval-defs/{id}/publications");
+            match client.get_json(&path).await {
+                Ok(data) => CliResponse::success("eval-defs publications", data).emit(fmt),
+                Err(e) => request_failure("eval-defs publications", e).emit(fmt),
+            }
+        }
+        EvalDefsSubcommand::Unpublish { publication_id } => {
+            let path = format!("/v1/eval-publications/{publication_id}");
+            match client.delete_json(&path).await {
+                Ok(data) => CliResponse::success("eval-defs unpublish", data).emit(fmt),
+                Err(e) => request_failure("eval-defs unpublish", e).emit(fmt),
+            }
+        }
     }
 }
 
