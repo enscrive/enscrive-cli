@@ -194,6 +194,38 @@ enum Commands {
         #[command(subcommand)]
         sub: evals2::EvalDefsSubcommand,
     },
+
+    /// License management for self-managed / enterprise deployments
+    /// (CLI-TIER-007, ENS-62). The enscrive-developer service verifies the
+    /// JWT at startup — the CLI only stores it.
+    License {
+        #[command(subcommand)]
+        sub: LicenseSubcommand,
+    },
+}
+
+/// License subcommands (CLI-TIER-007).
+///
+/// `activate` lands here. `status` and `deactivate` are ENS-63/64's scope;
+/// the enum is kept extensible so those can land without churning the
+/// dispatch match.
+#[derive(Subcommand)]
+enum LicenseSubcommand {
+    /// Activate a license JWT by writing it to
+    /// $ENSCRIVE_LICENSE_PATH (or ~/.config/enscrive/license.jwt).
+    ///
+    /// The CLI does not verify the JWT — the local enscrive-developer
+    /// service parses and verifies it at startup. Restart the stack
+    /// (`enscrive stop && enscrive start` in self-managed) for the new
+    /// license to take effect.
+    Activate(LicenseActivateArgs),
+}
+
+/// Arguments for `enscrive license activate` (CLI-TIER-007).
+#[derive(Args)]
+struct LicenseActivateArgs {
+    /// Signed license JWT obtained from the enscrive.io portal.
+    jwt: String,
 }
 
 #[derive(Args)]
@@ -2660,6 +2692,10 @@ async fn main() {
         | Commands::Status(_)
         | Commands::Deploy { .. } => None,
         Commands::Health => None,
+        // CLI-TIER-007: license activation is a local filesystem write;
+        // profile mode is consulted directly inside the handler so we can
+        // emit FAIL_UNSUPPORTED when it's called against a managed profile.
+        Commands::License { .. } => None,
         _ => match local::resolve_api_context(
             cli.profile.as_deref(),
             cli.endpoint.clone(),
@@ -4012,7 +4048,117 @@ async fn main() {
             let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             evals2::run_eval_defs(&client, fmt, sub.clone()).await;
         }
+        Commands::License { sub } => match sub {
+            LicenseSubcommand::Activate(args) => {
+                // Refuse when the active profile is managed — license only
+                // applies to self-managed / self-hosted stacks.
+                match local::resolve_api_context(
+                    cli.profile.as_deref(),
+                    cli.endpoint.clone(),
+                    cli.api_key.clone(),
+                ) {
+                    Ok(ctx) => {
+                        if ctx.profile_mode.as_deref() == Some("managed") {
+                            CliResponse::fail(
+                                "license activate",
+                                "license activation is only for self-hosted (--mode self-managed); managed mode reads plan from your Enscrive account."
+                                    .to_string(),
+                                FailureClass::Unsupported,
+                                EXIT_UNSUPPORTED,
+                            )
+                            .emit(fmt);
+                        }
+                    }
+                    Err(_) => {
+                        // No profile yet — that's fine; license activate is
+                        // valid pre-init for self-managed bootstrap.
+                    }
+                }
+
+                match write_license_jwt(&args.jwt) {
+                    Ok(path) => CliResponse::success(
+                        "license activate",
+                        json!({
+                            "path": path,
+                            "message": "license written; restart the local stack (`enscrive stop && enscrive start`) for the new plan to take effect.",
+                        }),
+                    )
+                    .emit(fmt),
+                    Err(e) => CliResponse::fail(
+                        "license activate",
+                        e,
+                        FailureClass::Bug,
+                        EXIT_CONFIG,
+                    )
+                    .emit(fmt),
+                }
+            }
+        },
     }
+}
+
+// ---------------------------------------------------------------------------
+// CLI-TIER-007 (ENS-62): `enscrive license activate <jwt>` file-system bits.
+// ---------------------------------------------------------------------------
+
+/// Resolve the on-disk license path.
+///
+/// Precedence:
+///   1. `ENSCRIVE_LICENSE_PATH` env var, if set and non-empty.
+///   2. `$HOME/.config/enscrive/license.jwt`.
+///
+/// Returns a descriptive error if `HOME` is unset and no override is
+/// provided.
+fn resolve_license_path() -> Result<std::path::PathBuf, String> {
+    if let Ok(p) = std::env::var("ENSCRIVE_LICENSE_PATH") {
+        if !p.is_empty() {
+            return Ok(std::path::PathBuf::from(p));
+        }
+    }
+    let home = std::env::var("HOME").map_err(|_| {
+        "cannot resolve license path: HOME is unset; set ENSCRIVE_LICENSE_PATH to override"
+            .to_string()
+    })?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".config")
+        .join("enscrive")
+        .join("license.jwt"))
+}
+
+/// Write the JWT to the resolved license path with 0600 permissions on
+/// Unix. Returns the absolute path written (as a String for structured
+/// output).
+fn write_license_jwt(jwt: &str) -> Result<String, String> {
+    let trimmed = jwt.trim();
+    if trimmed.is_empty() {
+        return Err("license JWT is empty".to_string());
+    }
+
+    let path = resolve_license_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("create license dir {}: {e}", parent.display()))?;
+    }
+    fs::write(&path, trimmed.as_bytes())
+        .map_err(|e| format!("write license to {}: {e}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&path, perms)
+            .map_err(|e| format!("set permissions 0600 on {}: {e}", path.display()))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        eprintln!(
+            "enscrive: warning — running on non-Unix; file permissions on {} were not restricted to 0600.",
+            path.display()
+        );
+    }
+
+    Ok(path.display().to_string())
 }
 
 #[cfg(test)]
@@ -6133,6 +6279,8 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         "stop",
         "status",
         "health",
+        // CLI-TIER-007: license activation writes locally; no /v1 endpoint.
+        "license activate",
         // Deploy sub-tree — operator-only, never contract-tracked.
         "deploy init",
         "deploy status",
@@ -6248,6 +6396,96 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 valid_plans.contains(plan),
                 "command {cmd:?} has invalid required_plan {plan:?}"
             );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // CLI-TIER-007 (ENS-62): `enscrive license activate <jwt>`
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn parse_license_activate_command() {
+        let args = Cli::parse_from(["enscrive", "license", "activate", "eyJhbGciOi.aaa.bbb"]);
+        match args.command {
+            Commands::License {
+                sub: LicenseSubcommand::Activate(LicenseActivateArgs { jwt }),
+            } => {
+                assert_eq!(jwt, "eyJhbGciOi.aaa.bbb");
+            }
+            _ => panic!("expected license activate"),
+        }
+    }
+
+    #[test]
+    fn license_activate_requires_jwt_positional() {
+        // Missing positional should fail clap parsing.
+        let result = Cli::try_parse_from(["enscrive", "license", "activate"]);
+        assert!(
+            result.is_err(),
+            "license activate should require a JWT positional argument"
+        );
+    }
+
+    #[test]
+    fn write_license_jwt_honors_env_override() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("licenses").join("license.jwt");
+        // SAFETY: tests use --test-threads=1 in CI for env-var tests; this
+        // crate only has one test that mutates ENSCRIVE_LICENSE_PATH.
+        unsafe {
+            std::env::set_var("ENSCRIVE_LICENSE_PATH", &target);
+        }
+
+        let jwt = "header.payload.signature";
+        let written = write_license_jwt(jwt).expect("write_license_jwt ok");
+        assert_eq!(written, target.display().to_string());
+
+        let contents = std::fs::read_to_string(&target).expect("read back license");
+        assert_eq!(contents, jwt);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&target)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "license file must be 0600; got {mode:o}");
+        }
+
+        unsafe {
+            std::env::remove_var("ENSCRIVE_LICENSE_PATH");
+        }
+    }
+
+    #[test]
+    fn write_license_jwt_trims_and_rejects_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("license.jwt");
+        unsafe {
+            std::env::set_var("ENSCRIVE_LICENSE_PATH_EMPTY_TEST", &target);
+        }
+        // Empty string => Err.
+        let result = write_license_jwt("   \n  ");
+        assert!(result.is_err(), "empty JWT should error");
+        unsafe {
+            std::env::remove_var("ENSCRIVE_LICENSE_PATH_EMPTY_TEST");
+        }
+    }
+
+    #[test]
+    fn resolve_license_path_uses_env_override() {
+        unsafe {
+            std::env::set_var("ENSCRIVE_LICENSE_PATH", "/tmp/enscrive-license-test.jwt");
+        }
+        let p = resolve_license_path().expect("resolve ok");
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/tmp/enscrive-license-test.jwt")
+        );
+        unsafe {
+            std::env::remove_var("ENSCRIVE_LICENSE_PATH");
         }
     }
 
