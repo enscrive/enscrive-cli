@@ -710,10 +710,12 @@ enum CollectionsSubcommand {
     Update(UpdateCollectionArgs),
 
     /// Delete a collection
-    Delete {
-        #[arg(long)]
-        id: String,
-    },
+    ///
+    /// Destructive. Requires `--confirm` to proceed; in an interactive TTY
+    /// you'll be prompted to type the collection id to double-check
+    /// (CLI-TIER-013). In non-TTY / JSON mode, `--confirm-token` will be
+    /// required once CLI-TIER-014 lands.
+    Delete(CollectionsDeleteArgs),
 
     /// Get collection stats
     Stats {
@@ -771,6 +773,19 @@ enum CollectionsSubcommand {
 
     /// Delete a specific pending staged change
     PendingDelete(CollectionsPendingDeleteArgs),
+}
+
+/// CLI-TIER-013: args for `enscrive collections delete`.
+#[derive(Args)]
+struct CollectionsDeleteArgs {
+    /// Collection UUID to delete.
+    #[arg(long)]
+    id: String,
+
+    /// Required to proceed with the destructive delete. Without this the
+    /// command short-circuits with FAIL_CONFIRMATION_REQUIRED.
+    #[arg(long, default_value_t = false)]
+    confirm: bool,
 }
 
 #[derive(Args)]
@@ -890,10 +905,10 @@ enum VoicesSubcommand {
     Create(CreateVoiceArgs),
 
     /// Delete a voice
-    Delete {
-        #[arg(long)]
-        id: String,
-    },
+    ///
+    /// Destructive. Requires `--confirm` (CLI-TIER-013); interactive TTY
+    /// sessions also prompt for the voice id for double-check.
+    Delete(VoicesDeleteArgs),
 
     /// Compare two voices against the same query and collection
     Compare(VoiceCompareArgs),
@@ -956,6 +971,19 @@ Example query item:
     "collection_id": "collection-uuid",
     "match_mode": "document_prefix"
   }"#;
+
+/// CLI-TIER-013: args for `enscrive voices delete`.
+#[derive(Args)]
+struct VoicesDeleteArgs {
+    /// Voice UUID to delete.
+    #[arg(long)]
+    id: String,
+
+    /// Required to proceed with the destructive delete. Without this the
+    /// command short-circuits with FAIL_CONFIRMATION_REQUIRED.
+    #[arg(long, default_value_t = false)]
+    confirm: bool,
+}
 
 #[derive(Args)]
 #[command(after_long_help = CREATE_VOICE_AFTER_HELP)]
@@ -1771,6 +1799,104 @@ fn server_classified(error: &str) -> Option<FailureClass> {
 
 fn augment_request_error(_command: &str, error: String) -> String {
     error
+}
+
+// ---------------------------------------------------------------------------
+// CLI-TIER-013 (ENS-68): dual-control --confirm for destructive commands.
+// ---------------------------------------------------------------------------
+
+/// Enforce explicit confirmation for a destructive command.
+///
+/// Rules:
+///   - If `confirm == false` in any mode: emit FAIL_CONFIRMATION_REQUIRED
+///     with an actionable message and exit.
+///   - If the output format is JSON (agent/CI mode): `--confirm` alone is
+///     insufficient — once CLI-TIER-014 lands, `--confirm-token` will be
+///     the sanctioned path. For now, emit FAIL_CONFIRMATION_REQUIRED
+///     directing the caller to the (pending) token flow. Human interactive
+///     flows do not pay this cost.
+///   - If running under a non-TTY stdin (script / pipe): emit
+///     FAIL_CONFIRMATION_REQUIRED for the same reason.
+///   - Interactive TTY + human output: prompt on stderr for the target
+///     name; stdin input must exactly match `target_name` to proceed.
+///
+/// The helper never returns when it fails — it exits the process via
+/// `CliResponse::emit`. On success it simply returns.
+fn require_local_confirmation(
+    target_name: &str,
+    command: &str,
+    fmt: OutputFormat,
+    confirm: bool,
+) {
+    if !confirm {
+        CliResponse::fail(
+            command,
+            format!(
+                "add --confirm to proceed with destructive operation on {target_name:?} \
+                 (in an interactive TTY you'll then be prompted to type {target_name:?} to confirm)"
+            ),
+            FailureClass::ConfirmationRequired,
+            output::EXIT_CONFIRMATION_REQUIRED,
+        )
+        .emit(fmt);
+    }
+
+    // JSON / agent mode must never prompt. The token path arrives in
+    // CLI-TIER-014; until then, JSON callers get an explicit error.
+    if matches!(fmt, OutputFormat::Json) {
+        CliResponse::fail(
+            command,
+            "non-interactive destructive operation requires --confirm-token (CLI-TIER-014); \
+             JSON / agent mode cannot prompt for TTY confirmation"
+                .to_string(),
+            FailureClass::ConfirmationRequired,
+            output::EXIT_CONFIRMATION_REQUIRED,
+        )
+        .emit(fmt);
+    }
+
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() {
+        CliResponse::fail(
+            command,
+            "non-TTY destructive operation requires --confirm-token (CLI-TIER-014); \
+             detected non-interactive stdin"
+                .to_string(),
+            FailureClass::ConfirmationRequired,
+            output::EXIT_CONFIRMATION_REQUIRED,
+        )
+        .emit(fmt);
+    }
+
+    // Interactive TTY prompt.
+    eprint!("Type {target_name:?} to confirm: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+
+    let mut typed = String::new();
+    match std::io::stdin().read_line(&mut typed) {
+        Ok(_) => {
+            if typed.trim() != target_name {
+                CliResponse::fail(
+                    command,
+                    format!(
+                        "confirmation did not match {target_name:?}; aborting destructive operation"
+                    ),
+                    FailureClass::ConfirmationRequired,
+                    output::EXIT_CONFIRMATION_REQUIRED,
+                )
+                .emit(fmt);
+            }
+        }
+        Err(e) => {
+            CliResponse::fail(
+                command,
+                format!("failed to read confirmation input: {e}"),
+                FailureClass::ConfirmationRequired,
+                output::EXIT_CONFIRMATION_REQUIRED,
+            )
+            .emit(fmt);
+        }
+    }
 }
 
 fn local_runtime_failure(command: &str, error: String) -> CliResponse {
@@ -3136,8 +3262,14 @@ async fn main() {
                         Err(e) => request_failure("collections update", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::Delete { id } => {
-                    let path = format!("/v1/collections/{}", id);
+                CollectionsSubcommand::Delete(args) => {
+                    require_local_confirmation(
+                        &args.id,
+                        "collections delete",
+                        fmt,
+                        args.confirm,
+                    );
+                    let path = format!("/v1/collections/{}", args.id);
                     match client.delete_json(&path).await {
                         Ok(data) => CliResponse::success("collections delete", data).emit(fmt),
                         Err(e) => request_failure("collections delete", e).emit(fmt),
@@ -3292,8 +3424,9 @@ async fn main() {
                         }
                     }
                 }
-                VoicesSubcommand::Delete { id } => {
-                    let path = format!("/v1/voices/{}", id);
+                VoicesSubcommand::Delete(args) => {
+                    require_local_confirmation(&args.id, "voices delete", fmt, args.confirm);
+                    let path = format!("/v1/voices/{}", args.id);
                     match client.delete_json(&path).await {
                         Ok(data) => CliResponse::success("voices delete", data).emit(fmt),
                         Err(e) => request_failure("voices delete", e).emit(fmt),
@@ -3798,15 +3931,15 @@ async fn main() {
                     }
                 }
                 BackupSubcommand::Restore(args) => {
-                    if !args.confirm {
-                        CliResponse::fail(
-                            "backup restore",
-                            "restore requires --confirm".to_string(),
-                            FailureClass::Bug,
-                            EXIT_CONFIG,
-                        )
-                        .emit(fmt);
-                    }
+                    // CLI-TIER-013: unified --confirm flow for destructive ops.
+                    // Use target_time as the confirmation phrase for interactive
+                    // TTY double-check.
+                    require_local_confirmation(
+                        &args.target_time,
+                        "backup restore",
+                        fmt,
+                        args.confirm,
+                    );
 
                     let body = json!({
                         "target_time": args.target_time,
@@ -6396,6 +6529,96 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 valid_plans.contains(plan),
                 "command {cmd:?} has invalid required_plan {plan:?}"
             );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // CLI-TIER-013 (ENS-68): --confirm flag on destructive commands
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn parse_collections_delete_without_confirm_defaults_false() {
+        let args = Cli::parse_from(["enscrive", "collections", "delete", "--id", "col-1"]);
+        match args.command {
+            Commands::Collections {
+                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs { id, confirm }),
+            } => {
+                assert_eq!(id, "col-1");
+                assert!(!confirm, "confirm must default to false");
+            }
+            _ => panic!("expected collections delete"),
+        }
+    }
+
+    #[test]
+    fn parse_collections_delete_with_confirm() {
+        let args =
+            Cli::parse_from(["enscrive", "collections", "delete", "--id", "col-1", "--confirm"]);
+        match args.command {
+            Commands::Collections {
+                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs { id, confirm }),
+            } => {
+                assert_eq!(id, "col-1");
+                assert!(confirm, "--confirm must flip confirm to true");
+            }
+            _ => panic!("expected collections delete"),
+        }
+    }
+
+    #[test]
+    fn parse_voices_delete_without_confirm_defaults_false() {
+        let args = Cli::parse_from(["enscrive", "voices", "delete", "--id", "voice-1"]);
+        match args.command {
+            Commands::Voices {
+                sub: VoicesSubcommand::Delete(VoicesDeleteArgs { id, confirm }),
+            } => {
+                assert_eq!(id, "voice-1");
+                assert!(!confirm);
+            }
+            _ => panic!("expected voices delete"),
+        }
+    }
+
+    #[test]
+    fn parse_voices_delete_with_confirm() {
+        let args = Cli::parse_from([
+            "enscrive", "voices", "delete", "--id", "voice-1", "--confirm",
+        ]);
+        match args.command {
+            Commands::Voices {
+                sub: VoicesSubcommand::Delete(VoicesDeleteArgs { id, confirm }),
+            } => {
+                assert_eq!(id, "voice-1");
+                assert!(confirm);
+            }
+            _ => panic!("expected voices delete"),
+        }
+    }
+
+    #[test]
+    fn parse_backup_restore_with_confirm_preserved() {
+        // Regression guard: backup restore already had --confirm (pre
+        // CLI-TIER-013); the refactor keeps the field.
+        let args = Cli::parse_from([
+            "enscrive",
+            "backup",
+            "restore",
+            "--target-time",
+            "2026-04-23T00:00:00Z",
+            "--confirm",
+        ]);
+        match args.command {
+            Commands::Backup {
+                sub:
+                    BackupSubcommand::Restore(BackupRestoreArgs {
+                        target_time,
+                        confirm,
+                    }),
+            } => {
+                assert_eq!(target_time, "2026-04-23T00:00:00Z");
+                assert!(confirm);
+            }
+            _ => panic!("expected backup restore"),
         }
     }
 
