@@ -41,6 +41,38 @@ pub enum Datasets2Subcommand {
     /// Upload a BeIR-layout dataset from a local directory containing
     /// `corpus.jsonl`, `queries.jsonl`, `qrels.tsv`.
     Upload(DatasetsUploadArgs),
+    /// Create a dataset by downloading from a HuggingFace BeIR URL.
+    /// Writes `source_type=huggingface` and `source_url` at creation, so
+    /// the dataset is eligible for the `/v1/eval-defs/{id}/publish` gate
+    /// without admin SQL.
+    Create(DatasetsCreateArgs),
+}
+
+#[derive(Args, Clone)]
+pub struct DatasetsCreateArgs {
+    /// HuggingFace URL. Accepts `huggingface:BeIR/fiqa`,
+    /// `https://huggingface.co/datasets/BeIR/fiqa`, or short `BeIR/fiqa`.
+    #[arg(long = "from-url")]
+    pub from_url: String,
+    /// Dataset display name.
+    #[arg(long)]
+    pub name: String,
+    #[arg(long)]
+    pub description: Option<String>,
+    /// full | stratified_random | explicit. Default full.
+    #[arg(long, default_value = "full")]
+    pub sample_strategy: String,
+    /// Strategy params as JSON.
+    #[arg(long)]
+    pub sample_params: Option<String>,
+    #[arg(long)]
+    pub sample_seed: Option<i64>,
+    #[arg(long)]
+    pub selected_query_ids: Option<String>,
+    #[arg(long)]
+    pub selected_doc_ids: Option<String>,
+    #[arg(long)]
+    pub rationale: Option<String>,
 }
 
 #[derive(Args, Clone)]
@@ -284,6 +316,58 @@ pub async fn run_datasets(
             }
         }
         Datasets2Subcommand::Upload(args) => handle_datasets_upload(client, fmt, args).await,
+        Datasets2Subcommand::Create(args) => handle_datasets_create(client, fmt, args).await,
+    }
+}
+
+async fn handle_datasets_create(
+    client: &EnscriveClient,
+    fmt: OutputFormat,
+    args: DatasetsCreateArgs,
+) -> i32 {
+    let mut body = json!({
+        "name": args.name,
+        "source_type": "huggingface",
+        "source_url": args.from_url,
+    });
+    if let Some(d) = args.description {
+        body["description"] = Value::String(d);
+    }
+    if args.sample_strategy != "full" {
+        let mut sample = json!({ "strategy": args.sample_strategy });
+        if let Some(p) = args.sample_params {
+            match serde_json::from_str::<Value>(&p) {
+                Ok(v) => sample["params"] = v,
+                Err(e) => {
+                    return CliResponse::fail(
+                        "datasets create",
+                        format!("--sample-params is not valid JSON: {e}"),
+                        FailureClass::Bug,
+                        EXIT_CONFIG,
+                    )
+                    .emit(fmt);
+                }
+            }
+        }
+        if let Some(seed) = args.sample_seed {
+            sample["seed"] = json!(seed);
+        }
+        if let Some(ids) = args.selected_query_ids {
+            let list: Vec<String> = ids.split(',').map(|s| s.trim().to_string()).collect();
+            sample["selected_query_ids"] = json!(list);
+        }
+        if let Some(ids) = args.selected_doc_ids {
+            let list: Vec<String> = ids.split(',').map(|s| s.trim().to_string()).collect();
+            sample["selected_doc_ids"] = json!(list);
+        }
+        if let Some(r) = args.rationale {
+            sample["rationale"] = Value::String(r);
+        }
+        body["sample"] = sample;
+    }
+    match client.post_json("/v1/datasets", body).await {
+        Ok(data) => CliResponse::success("datasets create", data).emit(fmt),
+        Err(e) => request_failure("datasets create", e).emit(fmt),
     }
 }
 
