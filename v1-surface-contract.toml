@@ -50,6 +50,15 @@ deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
+method = "GET"
+path = "/v1/collections/{id}"
+cli_command = "collections get"
+status = "implemented"
+note = "J-004c — detail route exposing a single collection"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
 method = "PATCH"
 path = "/v1/collections/{id}"
 cli_command = "collections update"
@@ -127,6 +136,33 @@ note = "P0 gap closure — client method added this session"
 deployment_tier = "any-mode"
 required_plan = "free"
 
+[[endpoint]]
+method = "POST"
+path = "/v1/collections/{id}/revert"
+cli_command = "collections revert"
+status = "implemented"
+note = "J-004c — revert uncommitted pending changes"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/collections/{id}/commits"
+cli_command = "collections commits"
+status = "implemented"
+note = "J-004c — commit history for the collection"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/collections/{id}/metrics"
+cli_command = "collections metrics"
+status = "implemented"
+note = "J-020 — vector-space metrics (density, diversity, drift)"
+deployment_tier = "any-mode"
+required_plan = "free"
+
 # ── Ingestion ───────────────────────────────────────────
 
 [[endpoint]]
@@ -201,6 +237,44 @@ note = "P0 gap closure — client method added this session"
 deployment_tier = "any-mode"
 required_plan = "free"
 
+[[endpoint]]
+method = "POST"
+path = "/v1/jobs/{id}/retry"
+cli_command = "jobs retry"
+status = "implemented"
+note = "J-024 Unit 3 Concern 6 — requeue a failed job"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/jobs/{id}/abandon"
+cli_command = "jobs abandon"
+status = "implemented"
+note = "J-024 Unit 3 Concern 6 — mark a failed job as abandoned"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+# ── Batch Sets ──────────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/collections/{id}/batch-sets"
+cli_command = "batch-sets list"
+status = "implemented"
+note = "J-024 Unit 5 — list batch sets for a collection"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/batch-sets/{id}"
+cli_command = "batch-sets get"
+status = "implemented"
+note = "J-024 Unit 5 — batch-set detail"
+deployment_tier = "any-mode"
+required_plan = "free"
+
 # ── Content Analysis ────────────────────────────────────
 
 [[endpoint]]
@@ -217,6 +291,14 @@ required_plan = "free"
 method = "GET"
 path = "/v1/models"
 cli_command = "models list"
+status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/models/{provider}/{model}"
+cli_command = "models show"
 status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
@@ -331,6 +413,35 @@ method = "DELETE"
 path = "/v1/voices/{id}/gates/{metric}"
 cli_command = "voices gates delete"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+# ── Voice Diff & Cost (EV-011 / EV-012) ────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/voices/{id}/diff"
+cli_command = "voices diff"
+status = "implemented"
+note = "EV-011 — diff a voice against an earlier version"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/voices/{id}/diff-cost"
+cli_command = "voices diff-cost"
+status = "implemented"
+note = "EV-012 — estimate money + time cost of applying the diff"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/voices/{id}/diff-proposal"
+cli_command = "voices diff-proposal"
+status = "implemented"
+note = "EV-011 — diff live voice against a proposed config"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
@@ -510,6 +621,158 @@ note = "Gap1 W-003 — wraps POST /v1/evals/from-url + polls /v1/jobs/{id} until
 deployment_tier = "any-mode"
 required_plan = "professional"
 
+# ── Evals 2.0: Datasets (EV-013) ───────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/datasets"
+cli_command = "datasets list"
+status = "implemented"
+note = "EV-013 — Evals 2.0 dataset registry (distinct from legacy /v1/evals/datasets)"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/datasets/{id}"
+cli_command = "datasets get"
+status = "implemented"
+note = "EV-013 — Evals 2.0 dataset by id"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/datasets/{id}/describe"
+cli_command = "datasets describe"
+status = "implemented"
+note = "EV-013 — structured dataset summary for agents"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/datasets/{id}"
+cli_command = "datasets delete"
+status = "implemented"
+note = "EV-013 — archive (hard-delete) a dataset"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/datasets/upload"
+cli_command = "datasets upload"
+status = "implemented"
+note = "EV-013 — multipart upload of BeIR-layout corpus + queries + qrels"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+# ── Evals 2.0: Eval Definitions (EV-013) ───────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/eval-defs"
+cli_command = "eval-defs list"
+status = "implemented"
+note = "EV-013 — list eval definitions for tenant + environment"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/eval-defs"
+cli_command = "eval-defs create"
+status = "implemented"
+note = "EV-013 — create a new eval definition"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/eval-defs/{id}"
+cli_command = "eval-defs get"
+status = "implemented"
+note = "EV-013 — fetch a single eval definition"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/eval-defs/{id}"
+cli_command = "eval-defs delete"
+status = "implemented"
+note = "EV-013 — soft-archive an eval definition"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/eval-defs/{id}/runs"
+cli_command = "eval-defs run"
+status = "implemented"
+note = "EV-013 — trigger a run and poll until terminal"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/eval-defs/{id}/runs"
+cli_command = "eval-runs list"
+status = "implemented"
+note = "EV-013 — list all runs for an eval definition"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+# ── Evals 2.0: Eval Runs (EV-013) ──────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/eval-runs/{id}"
+cli_command = "eval-runs get"
+status = "implemented"
+note = "EV-013 — aggregate metrics + status for a single run"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/eval-runs/{id}/queries"
+cli_command = "eval-runs diagnose"
+status = "implemented"
+note = "EV-013 — per-query details sorted worst-first (diagnose view)"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+# ── Evals 2.0: Publications (EV-017) ───────────────────
+
+[[endpoint]]
+method = "POST"
+path = "/v1/eval-defs/{id}/publish"
+cli_command = "eval-defs publish"
+status = "implemented"
+note = "EV-017 — publish a completed full-scope run as canonical"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/eval-defs/{id}/publications"
+cli_command = "eval-defs publications"
+status = "implemented"
+note = "EV-017 — list active publications for an eval"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/eval-publications/{id}"
+cli_command = "eval-defs unpublish"
+status = "implemented"
+note = "EV-017 — unpublish (soft delete, audit row remains)"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
 # ── Logs & Observability ───────────────────────────────
 
 [[endpoint]]
@@ -613,3 +876,23 @@ cli_command = "backup dry-run"
 status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "professional"
+
+# ── Admin: Rate Limits ─────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/rate-limits"
+cli_command = "admin rate-limits show"
+status = "implemented"
+note = "Caller's own tenant rate-limit view; cross-tenant admin read deferred"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "PATCH"
+path = "/v1/admin/rate-limits/{tenant}/{provider}"
+cli_command = "admin rate-limits set"
+status = "implemented"
+note = "Cross-tenant rate-limit override — managed-mode operator tooling only"
+deployment_tier = "managed-only"
+required_plan = "enterprise"
