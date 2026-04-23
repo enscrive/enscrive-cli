@@ -21,6 +21,13 @@ struct Endpoint {
     #[allow(dead_code)]
     #[serde(default)]
     note: Option<String>,
+    /// Deployment-mode gate. Values: "any-mode" | "managed-only".
+    /// "managed-only" endpoints return 501 / FAIL_UNSUPPORTED_IN_LOCAL_MODE
+    /// in local deployment mode regardless of plan.
+    deployment_tier: String,
+    /// Minimum plan tier. Values: "free" | "professional" | "enterprise".
+    /// Free-plan callers hitting a non-free endpoint get FAIL_PLAN_REQUIRED.
+    required_plan: String,
 }
 
 #[test]
@@ -131,6 +138,92 @@ fn no_duplicate_endpoints() {
         }
         eprintln!();
         panic!("{} duplicate endpoint(s) found", dupes.len());
+    }
+}
+
+#[test]
+fn valid_deployment_tier_values() {
+    let contract: Contract =
+        toml::from_str(CONTRACT_TOML).expect("v1-surface-contract.toml must parse");
+
+    let valid = ["any-mode", "managed-only"];
+    let invalid: Vec<&Endpoint> = contract
+        .endpoint
+        .iter()
+        .filter(|e| !valid.contains(&e.deployment_tier.as_str()))
+        .collect();
+
+    if !invalid.is_empty() {
+        eprintln!("\n=== Invalid deployment_tier values ===\n");
+        for e in &invalid {
+            eprintln!(
+                "  INVALID deployment_tier \"{}\": {} {}",
+                e.deployment_tier, e.method, e.path
+            );
+        }
+        eprintln!();
+        panic!(
+            "{} endpoint(s) have invalid deployment_tier values (must be any-mode or managed-only)",
+            invalid.len()
+        );
+    }
+}
+
+#[test]
+fn valid_required_plan_values() {
+    let contract: Contract =
+        toml::from_str(CONTRACT_TOML).expect("v1-surface-contract.toml must parse");
+
+    let valid = ["free", "professional", "enterprise"];
+    let invalid: Vec<&Endpoint> = contract
+        .endpoint
+        .iter()
+        .filter(|e| !valid.contains(&e.required_plan.as_str()))
+        .collect();
+
+    if !invalid.is_empty() {
+        eprintln!("\n=== Invalid required_plan values ===\n");
+        for e in &invalid {
+            eprintln!(
+                "  INVALID required_plan \"{}\": {} {}",
+                e.required_plan, e.method, e.path
+            );
+        }
+        eprintln!();
+        panic!(
+            "{} endpoint(s) have invalid required_plan values (must be free, professional, or enterprise)",
+            invalid.len()
+        );
+    }
+}
+
+#[test]
+fn managed_only_endpoints_imply_non_free_plan() {
+    // A managed-only endpoint should never be free-plan: if it's only available
+    // in managed mode (i.e., against api.enscrive.io), the user is necessarily
+    // on a paid plan. This catches classification mistakes.
+    let contract: Contract =
+        toml::from_str(CONTRACT_TOML).expect("v1-surface-contract.toml must parse");
+
+    let bad: Vec<&Endpoint> = contract
+        .endpoint
+        .iter()
+        .filter(|e| e.deployment_tier == "managed-only" && e.required_plan == "free")
+        .collect();
+
+    if !bad.is_empty() {
+        eprintln!("\n=== managed-only + free endpoints (classification conflict) ===\n");
+        for e in &bad {
+            eprintln!(
+                "  CONFLICT: {} {} -> `enscrive {}`",
+                e.method, e.path, e.cli_command
+            );
+        }
+        eprintln!();
+        panic!(
+            "{} endpoint(s) are managed-only but free-plan — review classification",
+            bad.len()
+        );
     }
 }
 

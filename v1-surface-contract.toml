@@ -20,12 +20,16 @@ method = "POST"
 path = "/v1/search"
 cli_command = "search"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/query-embeddings"
 cli_command = "embeddings query"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 # ── Collections ─────────────────────────────────────────
 
@@ -34,42 +38,56 @@ method = "GET"
 path = "/v1/collections"
 cli_command = "collections list"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/collections"
 cli_command = "collections create"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "PATCH"
 path = "/v1/collections/{id}"
 cli_command = "collections update"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "DELETE"
 path = "/v1/collections/{id}"
 cli_command = "collections delete"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/collections/{id}/stats"
 cli_command = "collections stats"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/collections/{id}/documents"
 cli_command = "collections documents"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/collections/{id}/documents/{doc_id}/chunks"
 cli_command = "collections chunks"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 # ── Collection Staging ──────────────────────────────────
 
@@ -79,6 +97,8 @@ path = "/v1/collections/{id}/stage"
 cli_command = "collections stage"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
@@ -86,6 +106,8 @@ path = "/v1/collections/{id}/commit"
 cli_command = "collections commit"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "GET"
@@ -93,6 +115,8 @@ path = "/v1/collections/{id}/pending"
 cli_command = "collections pending"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "DELETE"
@@ -100,6 +124,8 @@ path = "/v1/collections/{id}/pending/{doc_id}"
 cli_command = "collections pending-delete"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 # ── Ingestion ───────────────────────────────────────────
 
@@ -109,18 +135,24 @@ path = "/v1/ingest"
 cli_command = "ingest documents"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/ingest-prepared"
 cli_command = "ingest prepared"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/segment-document"
 cli_command = "segment document"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
@@ -128,6 +160,8 @@ path = "/v1/preview-chunking"
 cli_command = "segment preview-chunking"
 status = "deferred"
 reason = "Chunking preview is a developer-portal convenience; low CLI priority until voice-builder workflow lands"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
@@ -135,6 +169,8 @@ path = "/v1/preview-with-template"
 cli_command = "segment preview-with-template"
 status = "deferred"
 reason = "Template-driven preview is a developer-portal convenience; low CLI priority until segmentation-template workflow lands"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 # ── Jobs ────────────────────────────────────────────────
 
@@ -144,6 +180,8 @@ path = "/v1/jobs"
 cli_command = "jobs list"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "GET"
@@ -151,6 +189,8 @@ path = "/v1/jobs/{id}"
 cli_command = "jobs get"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
@@ -158,6 +198,8 @@ path = "/v1/jobs/{id}/cancel"
 cli_command = "jobs cancel"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 # ── Content Analysis ────────────────────────────────────
 
@@ -166,6 +208,8 @@ method = "POST"
 path = "/v1/analyze-content"
 cli_command = "analyze content"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 # ── Models ──────────────────────────────────────────────
 
@@ -174,6 +218,8 @@ method = "GET"
 path = "/v1/models"
 cli_command = "models list"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 # ── Voices ──────────────────────────────────────────────
 
@@ -182,18 +228,24 @@ method = "GET"
 path = "/v1/voices"
 cli_command = "voices list"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/voices"
 cli_command = "voices create"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/voices/{id}"
 cli_command = "voices get"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "PUT"
@@ -201,24 +253,32 @@ path = "/v1/voices/{id}"
 cli_command = "voices update"
 status = "deferred"
 reason = "Voice update requires config schema alignment; tracked for next voice-builder sprint"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "DELETE"
 path = "/v1/voices/{id}"
 cli_command = "voices delete"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/voices/compare"
 cli_command = "voices compare"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/voices/search"
 cli_command = "voices search"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 # ── Voice Versions ──────────────────────────────────────
 
@@ -228,6 +288,8 @@ path = "/v1/voices/{id}/versions"
 cli_command = "voices versions list"
 status = "deferred"
 reason = "Voice version history is a post-launch audit feature; requires version-aware voice model"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
@@ -235,6 +297,8 @@ path = "/v1/voices/{id}/versions/{version}"
 cli_command = "voices versions get"
 status = "deferred"
 reason = "Voice version history is a post-launch audit feature; requires version-aware voice model"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 # ── Voice Promotion & Gates ─────────────────────────────
 
@@ -243,24 +307,32 @@ method = "POST"
 path = "/v1/voices/{id}/promote"
 cli_command = "voices promote"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/voices/{id}/gates"
 cli_command = "voices gates list"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/voices/{id}/gates"
 cli_command = "voices gates set"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "DELETE"
 path = "/v1/voices/{id}/gates/{metric}"
 cli_command = "voices gates delete"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 # ── Segmentation Templates ─────────────────────────────
 
@@ -270,6 +342,8 @@ path = "/v1/segmentation-templates"
 cli_command = "templates list"
 status = "deferred"
 reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
@@ -277,6 +351,8 @@ path = "/v1/segmentation-templates"
 cli_command = "templates create"
 status = "deferred"
 reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
@@ -284,6 +360,8 @@ path = "/v1/segmentation-templates/{id}"
 cli_command = "templates get"
 status = "deferred"
 reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "PUT"
@@ -291,6 +369,8 @@ path = "/v1/segmentation-templates/{id}"
 cli_command = "templates update"
 status = "deferred"
 reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "DELETE"
@@ -298,6 +378,8 @@ path = "/v1/segmentation-templates/{id}"
 cli_command = "templates delete"
 status = "deferred"
 reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
@@ -305,6 +387,8 @@ path = "/v1/segmentation-templates/{id}/clone"
 cli_command = "templates clone"
 status = "deferred"
 reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 # ── Evals: Datasets ─────────────────────────────────────
 
@@ -313,36 +397,48 @@ method = "GET"
 path = "/v1/evals/datasets"
 cli_command = "evals datasets list"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/evals/datasets"
 cli_command = "evals datasets create"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/evals/datasets/{id}"
 cli_command = "evals datasets get"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "PUT"
 path = "/v1/evals/datasets/{id}"
 cli_command = "evals datasets update"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "DELETE"
 path = "/v1/evals/datasets/{id}"
 cli_command = "evals datasets delete"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/evals/datasets/{id}/queries"
 cli_command = "evals datasets queries"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 # ── Evals: Campaigns ───────────────────────────────────
 
@@ -351,30 +447,40 @@ method = "GET"
 path = "/v1/evals/campaigns"
 cli_command = "evals campaigns list"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/evals/{id}"
 cli_command = "evals campaigns get"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/evals/run-campaign"
 cli_command = "evals run-campaign"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/evals/run-campaign-stream"
 cli_command = "evals run-campaign-stream"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/evals/import"
 cli_command = "evals import"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 # ── Evals: Advanced ────────────────────────────────────
 
@@ -383,6 +489,8 @@ method = "GET"
 path = "/v1/evals/voice-status/{voice_id}"
 cli_command = "evals voice-status"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
@@ -390,6 +498,8 @@ path = "/v1/evals/convergence"
 cli_command = "evals convergence"
 status = "deferred"
 reason = "Convergence analysis requires multi-campaign history; deferred until eval maturity milestone"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
@@ -397,6 +507,8 @@ path = "/v1/evals/from-url"
 cli_command = "evals from-url"
 status = "implemented"
 note = "Gap1 W-003 — wraps POST /v1/evals/from-url + polls /v1/jobs/{id} until terminal"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 # ── Logs & Observability ───────────────────────────────
 
@@ -405,18 +517,24 @@ method = "GET"
 path = "/v1/logs/stream"
 cli_command = "logs stream"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/logs/search"
 cli_command = "logs search"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/logs/metrics"
 cli_command = "logs metrics"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 # ── Usage ───────────────────────────────────────────────
 
@@ -425,6 +543,8 @@ method = "GET"
 path = "/v1/usage"
 cli_command = "usage"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
 
 # ── Admin: Export ───────────────────────────────────────
 
@@ -433,18 +553,24 @@ method = "GET"
 path = "/v1/admin/export"
 cli_command = "export tenant"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/admin/export/embeddings"
 cli_command = "export embeddings"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/admin/export/token-usage"
 cli_command = "export token-usage"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 # ── Admin: Backup & Restore ────────────────────────────
 
@@ -453,27 +579,37 @@ method = "GET"
 path = "/v1/admin/backups"
 cli_command = "backup list"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/admin/backups"
 cli_command = "backup create"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/admin/backups/{backup_id}"
 cli_command = "backup get"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/admin/restore"
 cli_command = "backup restore"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/admin/restore/dry-run"
 cli_command = "backup dry-run"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
