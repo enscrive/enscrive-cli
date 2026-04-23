@@ -1656,6 +1656,8 @@ fn request_failure(command: &str, error: String) -> CliResponse {
     if lower.contains("failedprecondition")
         || lower.contains("not yet supported")
         || lower.contains("not yet available on public /v1")
+        || lower.contains("not_yet_available")
+        || lower.contains("\"phase\":\"pre-launch\"")
         || lower.contains("unsupported")
     {
         CliResponse::fail(command, error, FailureClass::Unsupported, EXIT_UNSUPPORTED)
@@ -2781,6 +2783,11 @@ async fn main() {
             }
         },
         Commands::Health => {
+            // Probe /v1/health, not /health. The edge /health can return 200 even
+            // when the API plane is pre-launch (e.g., api.enscrive.io currently
+            // returns 200 {"phase":"pre-launch"} at the edge but 503 on /v1/*).
+            // /v1/health answers the question users actually ask: "can I use the
+            // API?" — which is what `enscrive health` should reflect.
             let endpoint = local::resolve_api_context(
                 cli.profile.as_deref(),
                 cli.endpoint.clone(),
@@ -2789,7 +2796,7 @@ async fn main() {
             .map(|ctx| ctx.endpoint)
             .unwrap_or_else(|_| "http://localhost:3000".to_string());
             let client = make_client(endpoint, cli.api_key.clone().unwrap_or_default());
-            match client.get_json("/health").await {
+            match client.get_json("/v1/health").await {
                 Ok(data) => CliResponse::success("health", data).emit(fmt),
                 Err(e) => request_failure("health", e).emit(fmt),
             }
@@ -5894,5 +5901,42 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             ),
             "expected jobs retry variant"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // CLI-REL-016: classifier maps pre-launch 503 responses to FAIL_UNSUPPORTED
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn classifier_maps_not_yet_available_to_unsupported() {
+        let err = r#"HTTP 503 Service Unavailable: {"error":"not_yet_available","region":"us","phase":"pre-launch","retry_after":null}"#
+            .to_string();
+        let response = request_failure("health", err);
+        assert!(!response.ok);
+        assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
+        assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
+    }
+
+    #[test]
+    fn classifier_maps_phase_pre_launch_to_unsupported() {
+        // Even if the body doesn't use the exact string `not_yet_available`,
+        // `phase: pre-launch` is enough to classify as unsupported.
+        let err = r#"HTTP 503 Service Unavailable: {"phase":"pre-launch","status":"degraded"}"#
+            .to_string();
+        let response = request_failure("collections list", err);
+        assert!(!response.ok);
+        assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
+        assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
+    }
+
+    #[test]
+    fn classifier_keeps_generic_500_as_bug() {
+        // Regression guard: a generic server error without the pre-launch
+        // markers still classifies as FAIL_BUG, not FAIL_UNSUPPORTED.
+        let err = r#"HTTP 500 Internal Server Error: {"error":"database connection lost"}"#
+            .to_string();
+        let response = request_failure("collections list", err);
+        assert_eq!(response.failure_class, Some(FailureClass::Bug));
+        assert_eq!(response.exit_code, EXIT_FAILURE);
     }
 }
