@@ -1658,6 +1658,15 @@ fn require_api_key(api_key: Option<String>, fmt: OutputFormat) -> String {
 
 fn request_failure(command: &str, error: String) -> CliResponse {
     let error = augment_request_error(command, error);
+
+    // CLI-TIER-005 (ENS-60): prefer the server-provided `failure_class`
+    // field when the server has classified the error. Falls back to the
+    // existing heuristics when the body is absent, unparseable, or has an
+    // unrecognized class.
+    if let Some(class) = server_classified(&error) {
+        return CliResponse::fail(command, error, class, exit_code_for(class));
+    }
+
     let lower = error.to_lowercase();
     if lower.contains("failedprecondition")
         || lower.contains("not yet supported")
@@ -1669,6 +1678,62 @@ fn request_failure(command: &str, error: String) -> CliResponse {
         CliResponse::fail(command, error, FailureClass::Unsupported, EXIT_UNSUPPORTED)
     } else {
         CliResponse::fail(command, error, FailureClass::Bug, EXIT_FAILURE)
+    }
+}
+
+/// Map a `failure_class` string from the server body to the CLI's
+/// `FailureClass` enum. Returns `None` for unknown strings so the caller
+/// can fall through to heuristics.
+fn map_failure_class(raw: &str) -> Option<FailureClass> {
+    match raw {
+        "FAIL_BUG" => Some(FailureClass::Bug),
+        "FAIL_UNSUPPORTED" => Some(FailureClass::Unsupported),
+        "FAIL_UNSUPPORTED_IN_LOCAL_MODE" => Some(FailureClass::UnsupportedInLocalMode),
+        "FAIL_PLAN_REQUIRED" => Some(FailureClass::PlanRequired),
+        "FAIL_CONFIRMATION_REQUIRED" => Some(FailureClass::ConfirmationRequired),
+        "FAIL_QUOTA_EXCEEDED" => Some(FailureClass::QuotaExceeded),
+        "FAIL_LICENSE_INVALID" => Some(FailureClass::LicenseInvalid),
+        "FAIL_UNIMPLEMENTED" => Some(FailureClass::Unimplemented),
+        "FAIL_FALSE_CLAIM" => Some(FailureClass::FalseClaim),
+        _ => None,
+    }
+}
+
+/// Exit code to pair with a given `FailureClass` when the server has
+/// classified the error.
+fn exit_code_for(class: FailureClass) -> i32 {
+    match class {
+        FailureClass::Unsupported | FailureClass::UnsupportedInLocalMode => EXIT_UNSUPPORTED,
+        FailureClass::PlanRequired => output::EXIT_PLAN_REQUIRED,
+        FailureClass::ConfirmationRequired => output::EXIT_CONFIRMATION_REQUIRED,
+        FailureClass::QuotaExceeded => output::EXIT_QUOTA_EXCEEDED,
+        FailureClass::LicenseInvalid => output::EXIT_LICENSE_INVALID,
+        FailureClass::Bug | FailureClass::Unimplemented | FailureClass::FalseClaim => EXIT_FAILURE,
+    }
+}
+
+/// Best-effort extraction of a JSON object from the tail of an error
+/// string like `HTTP 503 Service Unavailable: {"error":"…","failure_class":"FAIL_PLAN_REQUIRED"}`.
+/// Returns the parsed `FailureClass` if a recognized `failure_class`
+/// field is present.
+fn server_classified(error: &str) -> Option<FailureClass> {
+    // Find the first '{' — works for the common `HTTP N reason: {…}` layout
+    // and also tolerates a raw JSON body.
+    let start = error.find('{')?;
+    let candidate = &error[start..];
+    let parsed: serde_json::Value = serde_json::from_str(candidate).ok()?;
+    let raw = parsed.get("failure_class")?.as_str()?;
+    match map_failure_class(raw) {
+        Some(class) => Some(class),
+        None => {
+            // Log unknown classes in test/debug builds so we notice server
+            // drift, but fall through to heuristics in prod.
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "enscrive: unrecognized server failure_class {raw:?}; falling back to heuristics"
+            );
+            None
+        }
     }
 }
 
@@ -5948,6 +6013,98 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         let response = request_failure("collections list", err);
         assert_eq!(response.failure_class, Some(FailureClass::Bug));
         assert_eq!(response.exit_code, EXIT_FAILURE);
+    }
+
+    // -------------------------------------------------------------------------
+    // CLI-TIER-005 (ENS-60): prefer server-provided failure_class
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn classifier_uses_server_failure_class_when_present() {
+        // Happy path: server returns FAIL_PLAN_REQUIRED and the CLI honors it.
+        let err = r#"HTTP 402 Payment Required: {"error":"plan_required","message":"backups require the professional plan","failure_class":"FAIL_PLAN_REQUIRED","required_plan":"professional","current_plan":"free","upgrade_url":"https://enscrive.io/pricing"}"#
+            .to_string();
+        let response = request_failure("backup create", err);
+        assert_eq!(response.failure_class, Some(FailureClass::PlanRequired));
+        assert_eq!(response.exit_code, output::EXIT_PLAN_REQUIRED);
+    }
+
+    #[test]
+    fn classifier_uses_server_failure_class_license_invalid() {
+        let err = r#"HTTP 401 Unauthorized: {"error":"license_invalid","failure_class":"FAIL_LICENSE_INVALID"}"#
+            .to_string();
+        let response = request_failure("search", err);
+        assert_eq!(response.failure_class, Some(FailureClass::LicenseInvalid));
+        assert_eq!(response.exit_code, output::EXIT_LICENSE_INVALID);
+    }
+
+    #[test]
+    fn classifier_uses_server_failure_class_quota() {
+        let err = r#"HTTP 429 Too Many Requests: {"failure_class":"FAIL_QUOTA_EXCEEDED"}"#
+            .to_string();
+        let response = request_failure("embeddings query", err);
+        assert_eq!(response.failure_class, Some(FailureClass::QuotaExceeded));
+        assert_eq!(response.exit_code, output::EXIT_QUOTA_EXCEEDED);
+    }
+
+    #[test]
+    fn classifier_uses_server_failure_class_unsupported_in_local_mode() {
+        let err = r#"HTTP 501 Not Implemented: {"failure_class":"FAIL_UNSUPPORTED_IN_LOCAL_MODE"}"#
+            .to_string();
+        let response = request_failure("backup create", err);
+        assert_eq!(
+            response.failure_class,
+            Some(FailureClass::UnsupportedInLocalMode)
+        );
+        assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
+    }
+
+    #[test]
+    fn classifier_falls_back_on_unknown_class() {
+        // Unknown server class → heuristics apply. "unsupported" keyword still
+        // present elsewhere in the message, so the heuristic classifies as
+        // Unsupported.
+        let err = r#"HTTP 500 Server Error: {"failure_class":"FAIL_BOGUS","message":"something unsupported"}"#
+            .to_string();
+        let response = request_failure("search", err);
+        assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
+    }
+
+    #[test]
+    fn classifier_falls_back_on_unknown_class_no_keywords() {
+        // Unknown server class with no heuristic keywords → Bug.
+        let err = r#"HTTP 500 Server Error: {"failure_class":"FAIL_BOGUS"}"#.to_string();
+        let response = request_failure("search", err);
+        assert_eq!(response.failure_class, Some(FailureClass::Bug));
+        assert_eq!(response.exit_code, EXIT_FAILURE);
+    }
+
+    #[test]
+    fn classifier_ignores_non_string_failure_class() {
+        // A non-string failure_class shouldn't short-circuit the heuristic.
+        let err = r#"HTTP 500 Server Error: {"failure_class":42}"#.to_string();
+        let response = request_failure("search", err);
+        assert_eq!(response.failure_class, Some(FailureClass::Bug));
+    }
+
+    #[test]
+    fn classifier_unchanged_when_no_failure_class_field() {
+        // Existing heuristic-driven behavior is preserved when the server
+        // body lacks a failure_class.
+        let err = r#"HTTP 503 Service Unavailable: {"error":"not_yet_available","phase":"pre-launch"}"#
+            .to_string();
+        let response = request_failure("health", err);
+        assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
+        assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
+    }
+
+    #[test]
+    fn classifier_handles_unparseable_body() {
+        // Body with a '{' but malformed JSON — treated as "no server class",
+        // fall through to heuristics (which map generic 500s to Bug).
+        let err = r#"HTTP 500 Internal Server Error: {this is not json"#.to_string();
+        let response = request_failure("search", err);
+        assert_eq!(response.failure_class, Some(FailureClass::Bug));
     }
 
     // -------------------------------------------------------------------------
