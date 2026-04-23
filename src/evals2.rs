@@ -45,9 +45,16 @@ pub enum Datasets2Subcommand {
 
 #[derive(Args, Clone)]
 pub struct DatasetsUploadArgs {
-    /// Directory holding corpus.jsonl + queries.jsonl + qrels.tsv.
+    /// Directory holding corpus.jsonl + queries.jsonl + qrels. Accepts both
+    /// the flat layout (qrels.tsv at the top) and the canonical BEIR layout
+    /// (qrels/{train,dev,test}.tsv); see --qrels-split.
     #[arg(long)]
     pub dir: String,
+    /// Which qrels split to upload when the directory uses the BEIR layout
+    /// (qrels/<split>.tsv). Default "test" — matches EV-003 baseline
+    /// comparison. Ignored when a flat qrels.tsv is present.
+    #[arg(long, default_value = "test")]
+    pub qrels_split: String,
     /// Dataset display name.
     #[arg(long)]
     pub name: String,
@@ -288,9 +295,32 @@ async fn handle_datasets_upload(
     let dir = std::path::PathBuf::from(&args.dir);
     let corpus_path = dir.join("corpus.jsonl");
     let queries_path = dir.join("queries.jsonl");
-    let qrels_path = dir.join("qrels.tsv");
 
-    for p in [&corpus_path, &queries_path, &qrels_path] {
+    // Resolve qrels path. Canonical BEIR layout keeps train/test/dev splits
+    // under <dir>/qrels/<split>.tsv; a flat layout puts a single
+    // <dir>/qrels.tsv at the top. Prefer the split-aware layout when it
+    // exists so the default works against a freshly-unzipped BEIR archive.
+    let split_qrels_path = dir.join("qrels").join(format!("{}.tsv", args.qrels_split));
+    let flat_qrels_path = dir.join("qrels.tsv");
+    let qrels_path = if split_qrels_path.exists() {
+        split_qrels_path
+    } else if flat_qrels_path.exists() {
+        flat_qrels_path
+    } else {
+        return CliResponse::fail(
+            "datasets upload",
+            format!(
+                "missing qrels: expected either {} or {}",
+                flat_qrels_path.display(),
+                split_qrels_path.display(),
+            ),
+            FailureClass::Bug,
+            EXIT_CONFIG,
+        )
+        .emit(fmt);
+    };
+
+    for p in [&corpus_path, &queries_path] {
         if !p.exists() {
             return CliResponse::fail(
                 "datasets upload",
