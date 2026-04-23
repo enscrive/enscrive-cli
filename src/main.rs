@@ -2172,13 +2172,17 @@ async fn run_evals_from_url(client: &client::EnscriveClient, args: &FromUrlArgs,
                         if std::time::Instant::now() >= deadline {
                             let mut data = build_from_url_success_data(&launch, &job);
                             data["terminal_status"] = Value::String(status.clone());
+                            // Timeout is a runtime condition (the server-side job
+                            // may still be running). FailureClass::Bug is the
+                            // generic transient-failure signal; scripts should
+                            // not auto-retry because the job is still in flight.
                             let mut resp = CliResponse::fail(
                                 command,
                                 format!(
                                     "timed out after {}s polling job {} (last status: {})",
                                     args.timeout_secs, job_id, status
                                 ),
-                                FailureClass::Unimplemented,
+                                FailureClass::Bug,
                                 EXIT_FAILURE,
                             );
                             resp.data = Some(data);
