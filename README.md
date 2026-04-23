@@ -1,377 +1,190 @@
 # Enscrive CLI
 
-Enscrive CLI is the thin command-line client and validation harness for the public `enscrive-developer /v1` API.
+Thin, honest command-line client for the Enscrive memory + search platform. Runs against a managed tenant at `api.enscrive.io`, or against a full Enscrive stack you host yourself on one machine.
 
-It is intentionally not a direct client for `enscrive-observe`, `enscrive-embed`, or portal-only endpoints.
+One binary. Same commands either way.
 
-## Role In The Platform
+> **Status — pre-launch beta.** Managed mode against `api.enscrive.io` is coming soon (the `/v1` plane is not yet serving production traffic). Self-hosted local mode is the supported path today. Binary releases will land at [github.com/enscrive/enscrive-cli/releases](https://github.com/enscrive/enscrive-cli/releases) once v0.1.0-beta.1 is cut.
 
-```text
-enscrive -> enscrive-developer /v1 -> enscrive-observe -> enscrive-embed
-```
+---
 
-The CLI exists to:
+## What you can do
 
-- exercise the real public API
-- validate current truth and current honesty
-- provide a scriptable entry point for smoke tests and manifests
-- expose unsupported public capabilities explicitly instead of hiding them
-- bootstrap the emerging local Enscrive self-managed lane
+- **Search + embed**: semantic search over your documents with hybrid ranking and adaptive resolution. Choose from OpenAI, Voyage, Nebius, or local BGE embedding models.
+- **Structured ingestion**: chunk, segment, and index long-form content with SHA256 deduplication and change detection.
+- **Voice authoring**: define and compare chunking strategies (Baseline / Story Beats / Tone Segments). Optimize voices with eval campaigns against your own datasets or HuggingFace corpora *(Professional plan)*.
+- **Operational primitives**: collections CRUD, staging/commit, background jobs, usage metering.
+- **Data portability**: backup, restore, and full tenant export *(Professional plan)*.
 
-## Current Capability Snapshot
+---
 
-The CLI currently includes namespaces for:
+## Install
 
-- health
-- search
-- embeddings
-- ingest
-- segmentation
-- content analysis
-- collections
-- voices
-- evals
-- logs
-- backup
-- export
-- usage
-
-It now covers the major current public `/v1` surface, including `health`, tenant export, embedding export, token-usage export, and backup/restore validation paths.
-
-## Current Honest Caveats
-
-The CLI should be described carefully:
-
-- it is already good as a contract-truth harness
-- it now includes first-pass local lifecycle commands (`init`, `start`, `stop`, `status`)
-- it is not yet a fully polished day-to-day developer UX tool
-- human output is still fairly raw
-- streaming behavior is still thinner than an ideal interactive CLI experience
-- some unsupported/error classification logic remains heuristic rather than perfectly typed
-- live shared-stack Nebius/BYOK proof still depends on a real provider key and stack fixture, even though the harness now supports the canonical BYOK header path
-
-So the honest positioning is:
-
-- strong validation harness now
-- early local/self-managed product scaffolding now
-- stronger developer product later
-
-## Canonical Platform Docs
-
-The canonical current-state platform docs live in the top-level `ENSCRIVE-IO` repo:
-
-- [Formal Documentation Index](https://github.com/chrisroge/ENSCRIVE-IO/blob/main/ENSCRIVE-FORMAL-DOCUMENTATION-INDEX.md)
-- [Platform Capability And Remaining Gaps](https://github.com/chrisroge/ENSCRIVE-IO/blob/main/ENSCRIVE-PLATFORM-CAPABILITY-AND-REMAINING-GAPS-2026-03-15.md)
-- [API Gap Closure Control](https://github.com/chrisroge/ENSCRIVE-IO/blob/main/ENSCRIVE-API-GAP-CLOSURE-CONTROL.md)
-- [CLI Validation Strategy](https://github.com/chrisroge/ENSCRIVE-IO/blob/main/ENSCRIVE-CLI-VALIDATION-STRATEGY-2026-03-14.md)
-- [Gap Closure Tracker](https://github.com/chrisroge/ENSCRIVE-IO/blob/main/MAJOR-PROJECTS/CLOSING-ALL-API-GAPS/TRACKER.md)
-
-## Local Use
+Pre-beta, you'll compile from source. Once `v0.1.0-beta.1` cuts, this repo's Releases page will carry pre-built binaries for `x86_64`/`aarch64` Linux and macOS.
 
 ```bash
-cargo run --bin enscrive -- --help
+# Prerequisites: Rust 1.85+ (rustup recommended)
+git clone https://github.com/enscrive/enscrive-cli.git
+cd enscrive-cli
+cargo build --release
+sudo install -m 0755 target/release/enscrive /usr/local/bin/enscrive
+enscrive --version
 ```
 
-## Early Profile And Local Stack Commands
+A `curl -fsSL https://enscrive.io/install | sh` one-liner is planned and tracked in the project roadmap.
 
-The CLI now supports named profiles in `~/.config/enscrive/profiles.toml`.
+---
 
-Managed profile:
+## Quickstart
+
+### Managed (against `api.enscrive.io`)
 
 ```bash
-enscrive init --mode managed --api-key ens_live_... --endpoint https://api.enscrive.io --set-default
+enscrive init --mode managed \
+  --api-key ens_live_XXXXXXXXXXXX \
+  --endpoint https://api.enscrive.io \
+  --set-default
+
+enscrive health
+enscrive collections list
 ```
 
-Self-managed profile:
+API keys will be available at [enscrive.io/pricing](https://enscrive.io/pricing) once the managed plane is live.
+
+### Self-hosted local stack
+
+You run the full stack on your machine: `enscrive-developer` + `enscrive-observe` + `enscrive-embed` + Postgres, Keycloak, Qdrant, and Loki via Docker Compose.
+
+**Prerequisites.** Docker Engine + Docker Compose. Provider API key(s) for at least one embedding backend.
+
+On Fedora:
+
+```bash
+sudo dnf install -y moby-engine docker-compose
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER  # log out/in or `newgrp docker` to take effect
+```
+
+On Debian/Ubuntu, follow [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).
+
+Then:
 
 ```bash
 enscrive init --mode self-managed \
-  --developer-port 36300 \
   --openai-api-key sk-... \
-  --nebius-api-key neb-... \
-  --bge-endpoint http://192.168.68.135:8088 \
   --set-default
-```
 
-`--developer-port` is optional. If omitted, local self-managed mode still uses
-`3000` today for compatibility, but the CLI now owns that choice explicitly so
-developers do not have to compete for `3000` if their machine already uses it.
-
-Self-managed init now treats providers as two separate capability groups:
-
-- embedding providers: required, one or more of `BGE`, `OpenAI`, `Voyage`, or `Nebius`
-- LLM inference providers: optional, `OpenAI` and/or `Anthropic` for crafted chunking sets
-
-If you do not pass provider flags in an interactive shell, `enscrive init --mode self-managed`
-now walks the missing configuration:
-
-- prompts for one or more embedding providers until the profile is runnable
-- prompts for optional LLM inference providers
-- preserves existing provider config on re-init instead of wiping it
-
-The same OpenAI key can back embeddings, chunking, or both. If no LLM inference providers are
-configured, the local stack still starts, but LLM chunking is disabled honestly. If no embedding
-provider is configured, self-managed local mode is not runnable.
-
-This generates local runtime/config files under:
-
-- `~/.config/enscrive/profiles/<profile>/`
-- `~/.local/share/enscrive/runtime/<profile>/`
-
-Local lifecycle commands:
-
-```bash
 enscrive start
 enscrive status
-enscrive stop
 ```
 
-Self-managed prerequisite:
+`init` walks you through missing provider configuration interactively if you don't pass flags. You can mix providers:
 
-- `enscrive start` requires Docker and Docker Compose on the local machine
-- on Fedora, install them with `sudo dnf install -y moby-engine docker-compose`
-- then start Docker with `sudo systemctl enable --now docker`
-- add your user to the Docker group with `sudo usermod -aG docker $USER`, then re-login or run `newgrp docker`
+| Flag | Enables |
+|---|---|
+| `--openai-api-key` | OpenAI embeddings + LLM-reasoned chunking |
+| `--voyage-api-key` | Voyage AI embeddings |
+| `--nebius-api-key` | Nebius Token Factory embeddings (BGE) |
+| `--bge-endpoint http://host:8088` | Your own BGE inference endpoint |
+| `--anthropic-api-key` | Anthropic LLM-reasoned chunking |
 
-Operator deploy profile commands:
+Bring-your-own-key for embeddings works on every plan.
+
+---
+
+## Commands
+
+```
+enscrive search          Search a collection
+enscrive embeddings      Embedding primitives
+enscrive ingest          Add documents to a collection
+enscrive segment         Chunk a document
+enscrive analyze         Inspect content
+enscrive models          List available models
+enscrive collections     Manage collections
+enscrive voices          Author and compare voices
+enscrive evals           Run eval campaigns                    [Pro]
+enscrive datasets        Manage datasets                       [Pro]
+enscrive eval-defs       Define and run eval suites            [Pro]
+enscrive jobs            Inspect background jobs
+enscrive batch-sets      Inspect batch staging
+enscrive logs            Stream and search logs
+enscrive backup          Backup and restore                    [Pro]
+enscrive export          Data portability                      [Pro]
+enscrive usage           Usage + metering
+```
+
+`enscrive <command> --help` shows the full flag set for any command. All commands support `--output json` for scripting.
+
+---
+
+## Configuration
+
+Profiles live at `~/.config/enscrive/profiles.toml`. You can have multiple profiles (e.g., one per managed tenant, one for local dev) and switch between them with `enscrive init --profile NAME --set-default ...`.
+
+Set once and forget:
 
 ```bash
-enscrive deploy init --target stage --secrets-source esm --set-default
-enscrive deploy fetch --profile-name stage
-enscrive deploy render --profile-name stage
-enscrive deploy apply --profile-name stage
-enscrive deploy status
-enscrive deploy verify --profile-name stage
-enscrive deploy bootstrap
+# Global override on any invocation
+enscrive --profile my-tenant collections list
+
+# Switch default
+enscrive init --profile local --set-default --mode self-managed ...
 ```
 
-`deploy init` now defaults managed operator profiles to their public endpoints:
+Runtime state (Docker Compose volumes, container IDs, logs) for self-hosted profiles lives at `~/.local/share/enscrive/runtime/<profile>/`.
 
-- `dev` -> `https://dev.api.enscrive.io`
-- `stage` -> `https://stage.api.enscrive.io`
-- `us` -> `https://us.api.enscrive.io`
-- `eu` -> `https://eu.api.enscrive.io`
-- `ap` -> `https://ap.api.enscrive.io`
+---
 
-Use `--endpoint` on `deploy init` only when you intentionally want a non-standard
-steady-state operator endpoint for that profile.
+## Plans
 
-`deploy` is the operator-facing path for Enscrive-controlled environments such as
-`DEV`, `STAGE`, `US`, `EU`, and `AP`. It is intentionally separate from customer
-`init` so local/self-managed onboarding does not inherit ESM/operator assumptions.
+Enscrive runs on three plans:
 
-For managed ESM-backed environments, `deploy init` now models the real stack as
-three service-scoped vault roots:
+- **Free self-hosted** — run the full stack on your machine, forever, for free. You pay your own embedding-provider costs. Chunking, embedding, and neural search are the core loop you get.
+- **Professional** — adds first-class evals, voice-gated promotion across Dev/Staging/Prod, daily backups, structured data portability, and extended audit retention. Cloud-managed or self-hosted with a license.
+- **Enterprise** — adds dedicated tenancy, SSO enforcement, BYOK encryption-at-rest, VPC peering, compliance attestations, and an uptime SLA.
 
-- `enscrive-developer`
-- `enscrive-observe`
-- `enscrive-embed`
+Feature comparison and pricing: [enscrive.io/pricing](https://enscrive.io/pricing).
 
-Run it from the developer STAGE vault workspace on the operator machine or from
-the developer secret root on the target host. The CLI discovers the companion
-observe and embed roots automatically when they exist in the expected repo-style
-or host-style layout.
+When you run a Pro-gated command on a free profile, the CLI tells you so clearly — no silent limitations.
 
-`deploy render` is the first honest STAGE host-delivery step. It generates a
-deterministic managed-host bundle under `./enscrive-deploy/<profile>/` by
-default, including:
+---
 
-- service env files for `enscrive-developer`, `enscrive-observe`, and `enscrive-embed`
-- systemd unit files for the three native services
-- an nginx reverse-proxy config targeting the private developer port
-- a machine-readable `manifest.json`
-- a rendered `README.md` with operator next steps
-- service-scoped installed secret roots under `/opt/enscrive/<target>/secrets/...`
-- runtime `ESM_BINARY` / `ESM_VAULT_PATH` wiring for services that already read from ESM at runtime
+## Output contract
 
-Example:
+Every command supports a stable JSON output shape for automation:
 
-```bash
-enscrive deploy render \
-  --profile-name stage \
-  --out-dir ./enscrive-deploy/stage \
-  --host-root /opt/enscrive/stage
+```json
+{
+  "ok": true,
+  "command": "search",
+  "data": { "...": "..." },
+  "exit_code": 0
+}
 ```
 
-`deploy fetch` now supports two honest artifact sources:
+On failure:
 
-- `manifest`
-  Download the current release artifacts from a hosted release manifest,
-  verify checksums, and stage them under `./enscrive-artifacts/<profile>/`.
-- `local-build`
-  Build or reuse the current local source tree artifacts and stage them into the
-  same `./enscrive-artifacts/<profile>/` layout.
-
-For the current managed operator path, `fetch` defaults to local workspace
-artifact staging for `stage`, `us`, `eu`, and `ap` when no explicit `--source`
-is provided. This keeps `api.enscrive.io` bootstrap and deploy self-contained in
-the CLI without requiring a hosted artifact channel first.
-
-Recommended current STAGE path:
-
-```bash
-enscrive deploy fetch --profile-name stage
+```json
+{
+  "ok": false,
+  "command": "search",
+  "error": "human-readable message",
+  "failure_class": "FAIL_UNSUPPORTED",
+  "exit_code": 2
+}
 ```
 
-This stages:
+Exit codes: `0` success, `1` bug, `2` unsupported, `3` config error, `4` plan required, `5` confirmation required.
 
-- `enscrive`
-- `enscrive-developer`
-- `enscrive-observe`
-- `enscrive-embed`
-- the `enscrive-developer` site bundle
+---
 
-into:
+## Contributing
 
-- `./enscrive-artifacts/<profile>/bin`
-- `./enscrive-artifacts/<profile>/site/enscrive-developer`
+Issues and PRs welcome at [github.com/enscrive/enscrive-cli](https://github.com/enscrive/enscrive-cli). See the issue tracker for open work.
 
-If the workspace root is not discoverable automatically, make it explicit:
+---
 
-```bash
-enscrive deploy fetch \
-  --profile-name stage \
-  --workspace-root /home/christopher/enscrive-io
-```
+## License
 
-Hosted-manifest mode remains available:
-
-```bash
-enscrive deploy fetch --profile-name stage --source manifest --manifest-url <manifest-url>
-```
-
-Use `--manifest-url` when you want to pin an exact staged release manifest.
-
-`deploy verify` checks the selected managed endpoint through `/health` and fails
-explicitly if the managed stack is unhealthy or degraded:
-
-```bash
-enscrive deploy verify --profile-name stage
-```
-
-`deploy apply` is the narrow host-local install step. Run it on the target host
-after rendering. It stages:
-
-- `enscrive-developer`, `enscrive-observe`, and `enscrive-embed` into the managed host `bin/`
-- `esm` into the managed host `bin/`
-- the developer portal site bundle into the managed host `site/`
-- the discovered developer, observe, and embed vault roots into the managed host `secrets/`
-- rendered env files into the managed host `config/`
-- systemd units and nginx config into operator-selected destinations
-
-Config hydration is now service-scoped:
-
-- `developer.env` is hydrated from the developer vault
-- `observe.env` is hydrated from the observe vault
-- `embed.env` is hydrated from the embed vault
-
-By default it only installs files. Use `--reload-systemd`, `--start-services`,
-and `--reload-nginx` when you want the CLI to reconcile the live host too.
-
-Example:
-
-```bash
-enscrive deploy apply \
-  --profile-name stage \
-  --render-dir ./enscrive-deploy/stage \
-  --binary-dir ./enscrive-artifacts/stage/bin \
-  --site-root ./enscrive-artifacts/stage/site/enscrive-developer \
-  --reload-systemd \
-  --start-services \
-  --reload-nginx
-```
-
-Signed bootstrap consume:
-
-```bash
-enscrive deploy bootstrap \
-  --profile-name stage \
-  --bundle-secret-key ENSCRIVE_BOOTSTRAP_BUNDLE
-```
-
-For a fresh STAGE bring-up, use `--endpoint` on `deploy bootstrap` only as a
-temporary bootstrap override, for example when talking to a private IP, SSH
-tunnel, or first-boot local listener before `stage.api.enscrive.io` is serving
-traffic. The override is not treated as the steady-state managed endpoint for
-the profile.
-
-For ESM-backed operator profiles, `deploy bootstrap` now tries `esm get --raw`
-for the signed bundle first, then falls back to `<vault-workdir>/bootstrap.bundle.toml`
-if present. The returned `platform_admin` and `operator` keys are persisted into
-the deploy profile for steady-state operator use after first bootstrap.
-
-What the current self-managed slice does:
-
-- generates local config/env/runtime files
-- creates a local Docker Compose infra definition for PostgreSQL, Keycloak, Qdrant, and Loki
-- bootstraps a default local Keycloak realm/client/developer user
-- starts local `enscrive-developer`, `enscrive-observe`, and `enscrive-embed` binaries if they are available
-- seeds a default local tenant/environment and captures the first local API key into the active profile
-
-What it does not yet do:
-
-- install binaries for you from `curl -L https://enscrive.io/install | sh`
-
-The first installer/productization scaffold for that future path now lives at:
-
-- `/home/christopher/enscrive-io/installer/install.sh`
-- `/home/christopher/enscrive-io/installer/manifests/`
-- `/home/christopher/enscrive-io/installer/scripts/generate_manifest.py`
-
-For now, the intended flow is:
-
-1. `enscrive init --mode self-managed`
-2. `enscrive start`
-3. sign in to the local portal with the bootstrapped developer credentials from the `start` output
-4. use the CLI immediately against the local profile; the first API key is already persisted
-
-Manifest runner:
-
-```bash
-python3 scripts/run_manifests.py --help
-```
-
-The manifest runner supports both JSON and YAML manifests, suite metadata
-(`current-truth`, `current-honesty`, `end-state`), and richer threshold/check
-assertions for dataset-oriented validation.
-
-Current-truth fixture bootstrap:
-
-```bash
-python3 scripts/bootstrap_current_truth_fixture.py --help
-```
-
-Live validation orchestrator:
-
-```bash
-python3 scripts/run_live_validation.py --help
-```
-
-The orchestrator supports provider-specific suite presets. For example, the
-default `current-truth-core` lane uses an OpenAI-backed fixture collection,
-while `bge-capability` mints a BGE-backed fixture collection and exercises the
-same public `/v1` surface against that provider. The canonical local BGE lane
-is now `bge-large-en-v1.5`; use overrides only when you are intentionally
-comparing alternate BGE models. For Nebius/BYOK public-stack validation, use
-the `nebius-byok` suite with `ENSCRIVE_EMBEDDING_PROVIDER_KEY` set to the
-provider key you want forwarded as `X-Embedding-Provider-Key`:
-
-```bash
-python3 scripts/run_live_validation.py --suite bge-capability
-ENSCRIVE_EMBEDDING_PROVIDER_KEY=neb-... \
-  python3 scripts/run_live_validation.py --suite nebius-byok
-```
-
-For a protected self-hosted BGE deployment, `embed-svc` must be started with
-`BGE_ENDPOINT` and, if required by the upstream service, `BGE_API_KEY`.
-For single-model BGE endpoints, set `BGE_MODEL_NAME` as well so the stack
-fails cleanly on model mismatch instead of pretending the endpoint supports the
-entire `bge-*` family.
-
-Eval campaign commands also expose campaign-level match semantics. For
-segmented content, use `--match-mode document_prefix` so any matching chunk of
-the expected document can satisfy relevance during scoring. Dataset-backed
-campaigns can now omit `--queries-json` / `--queries-file`; the CLI will send
-`queries: []` and let the stored dataset drive execution.
-
-This README is the companion current-state entry point for the CLI repo. The top-level `ENSCRIVE-IO` docs remain canonical for platform truth.
+MIT. See [LICENSE](LICENSE).
