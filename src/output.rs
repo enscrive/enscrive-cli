@@ -14,6 +14,16 @@ pub enum FailureClass {
     Unimplemented,
     #[serde(rename = "FAIL_FALSE_CLAIM")]
     FalseClaim,
+    #[serde(rename = "FAIL_UNSUPPORTED_IN_LOCAL_MODE")]
+    UnsupportedInLocalMode,
+    #[serde(rename = "FAIL_PLAN_REQUIRED")]
+    PlanRequired,
+    #[serde(rename = "FAIL_CONFIRMATION_REQUIRED")]
+    ConfirmationRequired,
+    #[serde(rename = "FAIL_QUOTA_EXCEEDED")]
+    QuotaExceeded,
+    #[serde(rename = "FAIL_LICENSE_INVALID")]
+    LicenseInvalid,
 }
 
 impl fmt::Display for FailureClass {
@@ -23,6 +33,11 @@ impl fmt::Display for FailureClass {
             Self::Unsupported => write!(f, "FAIL_UNSUPPORTED"),
             Self::Unimplemented => write!(f, "FAIL_UNIMPLEMENTED"),
             Self::FalseClaim => write!(f, "FAIL_FALSE_CLAIM"),
+            Self::UnsupportedInLocalMode => write!(f, "FAIL_UNSUPPORTED_IN_LOCAL_MODE"),
+            Self::PlanRequired => write!(f, "FAIL_PLAN_REQUIRED"),
+            Self::ConfirmationRequired => write!(f, "FAIL_CONFIRMATION_REQUIRED"),
+            Self::QuotaExceeded => write!(f, "FAIL_QUOTA_EXCEEDED"),
+            Self::LicenseInvalid => write!(f, "FAIL_LICENSE_INVALID"),
         }
     }
 }
@@ -32,6 +47,14 @@ pub const EXIT_SUCCESS: i32 = 0;
 pub const EXIT_FAILURE: i32 = 1;
 pub const EXIT_UNSUPPORTED: i32 = 2;
 pub const EXIT_CONFIG: i32 = 3;
+#[allow(dead_code)]
+pub const EXIT_PLAN_REQUIRED: i32 = 4;
+#[allow(dead_code)]
+pub const EXIT_CONFIRMATION_REQUIRED: i32 = 5;
+#[allow(dead_code)]
+pub const EXIT_QUOTA_EXCEEDED: i32 = 6;
+#[allow(dead_code)]
+pub const EXIT_LICENSE_INVALID: i32 = 7;
 
 /// Output format selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -153,6 +176,63 @@ mod tests {
             "FAIL_UNIMPLEMENTED"
         );
         assert_eq!(FailureClass::FalseClaim.to_string(), "FAIL_FALSE_CLAIM");
+        assert_eq!(
+            FailureClass::UnsupportedInLocalMode.to_string(),
+            "FAIL_UNSUPPORTED_IN_LOCAL_MODE"
+        );
+        assert_eq!(FailureClass::PlanRequired.to_string(), "FAIL_PLAN_REQUIRED");
+        assert_eq!(
+            FailureClass::ConfirmationRequired.to_string(),
+            "FAIL_CONFIRMATION_REQUIRED"
+        );
+        assert_eq!(
+            FailureClass::QuotaExceeded.to_string(),
+            "FAIL_QUOTA_EXCEEDED"
+        );
+        assert_eq!(
+            FailureClass::LicenseInvalid.to_string(),
+            "FAIL_LICENSE_INVALID"
+        );
+    }
+
+    #[test]
+    fn new_failure_classes_serde() {
+        for (class, expected) in [
+            (
+                FailureClass::UnsupportedInLocalMode,
+                "FAIL_UNSUPPORTED_IN_LOCAL_MODE",
+            ),
+            (FailureClass::PlanRequired, "FAIL_PLAN_REQUIRED"),
+            (
+                FailureClass::ConfirmationRequired,
+                "FAIL_CONFIRMATION_REQUIRED",
+            ),
+            (FailureClass::QuotaExceeded, "FAIL_QUOTA_EXCEEDED"),
+            (FailureClass::LicenseInvalid, "FAIL_LICENSE_INVALID"),
+        ] {
+            let r = CliResponse::fail("cmd", "msg".to_string(), class, 1);
+            let json = serde_json::to_value(&r).unwrap();
+            assert_eq!(json["failure_class"], expected, "class {class:?}");
+        }
+    }
+
+    #[test]
+    fn new_exit_codes_distinct() {
+        // Ensure the new exit codes don't collide with existing ones.
+        let codes = [
+            EXIT_SUCCESS,
+            EXIT_FAILURE,
+            EXIT_UNSUPPORTED,
+            EXIT_CONFIG,
+            EXIT_PLAN_REQUIRED,
+            EXIT_CONFIRMATION_REQUIRED,
+            EXIT_QUOTA_EXCEEDED,
+            EXIT_LICENSE_INVALID,
+        ];
+        let mut sorted = codes.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "exit codes must be distinct");
     }
 
     #[test]
