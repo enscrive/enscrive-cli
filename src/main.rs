@@ -1,6 +1,7 @@
 mod client;
 mod deploy;
 mod evals2;
+mod fetch_verify;
 mod local;
 mod output;
 mod release_channel;
