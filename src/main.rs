@@ -1,8 +1,10 @@
 mod client;
 mod deploy;
 mod evals2;
+mod license;
 mod local;
 mod output;
+mod preflight;
 mod release_channel;
 #[cfg(test)]
 mod test_support;
@@ -20,7 +22,8 @@ use local::{
     InitMode, ManagedInitOptions, SelfManagedInitOptions, StartOptions, StatusOptions, StopOptions,
 };
 use output::{
-    CliResponse, EXIT_CONFIG, EXIT_FAILURE, EXIT_UNSUPPORTED, FailureClass, OutputFormat,
+    CliResponse, EXIT_CONFIG, EXIT_FAILURE, EXIT_LICENSE_INVALID, EXIT_UNSUPPORTED, FailureClass,
+    OutputFormat,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -205,11 +208,7 @@ enum Commands {
     },
 }
 
-/// License subcommands (CLI-TIER-007).
-///
-/// `activate` lands here. `status` and `deactivate` are ENS-63/64's scope;
-/// the enum is kept extensible so those can land without churning the
-/// dispatch match.
+/// License subcommands (CLI-TIER-007 / ENS-63 / ENS-64).
 #[derive(Subcommand)]
 enum LicenseSubcommand {
     /// Activate a license JWT by writing it to
@@ -220,6 +219,18 @@ enum LicenseSubcommand {
     /// (`enscrive stop && enscrive start` in self-managed) for the new
     /// license to take effect.
     Activate(LicenseActivateArgs),
+
+    /// Show current license status (plan, expiry, file path).
+    ///
+    /// Decodes the JWT payload without signature verification.
+    /// The server verifies the JWT at runtime.
+    Status,
+
+    /// Remove the license file from disk.
+    ///
+    /// Exits 0 even if no license file is present.
+    /// Restart the local stack for the change to take effect.
+    Deactivate,
 }
 
 /// Arguments for `enscrive license activate` (CLI-TIER-007).
@@ -2862,8 +2873,406 @@ fn local_prompt_mode() -> Result<InitMode, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ENS-66 CLI-TIER-011: annotate --help with plan + deployment tier suffixes.
+// ---------------------------------------------------------------------------
+
+/// Build a tier annotation suffix for a command, e.g. " [Pro]",
+/// " [Enterprise, managed only]", or "" for free any-mode commands.
+fn tier_annotation(deployment_tier: &str, required_plan: &str) -> String {
+    let plan_label = match required_plan {
+        "professional" => Some("Pro"),
+        "enterprise" => Some("Enterprise"),
+        _ => None,
+    };
+    let managed_only = deployment_tier == "managed-only";
+
+    match (plan_label, managed_only) {
+        (Some(p), true) => format!(" [{p}, managed only]"),
+        (Some(p), false) => format!(" [{p}]"),
+        (None, true) => " [managed only]".to_string(),
+        (None, false) => String::new(),
+    }
+}
+
+/// Walk the clap `Command` tree recursively, looking up each leaf's key in
+/// `COMMAND_TIERS` (using `prefix` as the space-joined path, which is the
+/// same format as `cli_command` in v1-surface-contract.toml), and appending
+/// the tier annotation to the command's `about` string.
+///
+/// Returns the (possibly modified) `Command` with updated `about` strings
+/// on all matching leaves.
+fn annotate_help_tiers(cmd: clap::Command, prefix: &str) -> clap::Command {
+    let subs: Vec<clap::Command> = cmd
+        .get_subcommands()
+        .cloned()
+        .collect();
+
+    if subs.is_empty() {
+        // Leaf command — look up in COMMAND_TIERS.
+        let key = prefix;
+        if let Some((_, tier, plan)) = COMMAND_TIERS.iter().find(|(c, _, _)| *c == key) {
+            let annotation = tier_annotation(tier, plan);
+            if !annotation.is_empty() {
+                let existing_about = cmd
+                    .get_about()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let new_about = format!("{existing_about}{annotation}");
+                return cmd.about(new_about);
+            }
+        }
+        return cmd;
+    }
+
+    // Non-leaf: recurse into subcommands, then swap each child back in
+    // via mut_subcommand so the parent Command keeps its structure.
+    let modified = cmd.get_subcommands().cloned().map(|sub| {
+        let name = sub.get_name().to_string();
+        let child_prefix = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix} {name}")
+        };
+        annotate_help_tiers(sub, &child_prefix)
+    }).collect::<Vec<_>>();
+
+    let mut result = cmd;
+    for updated_sub in modified {
+        result = result.mut_subcommand(updated_sub.get_name(), |_| updated_sub.clone());
+    }
+    result
+}
+
+#[cfg(test)]
+mod tier_annotation_tests {
+    use super::*;
+
+    #[test]
+    fn free_any_mode_has_no_annotation() {
+        assert_eq!(tier_annotation("any-mode", "free"), "");
+    }
+
+    #[test]
+    fn professional_any_mode_annotates_pro() {
+        assert_eq!(tier_annotation("any-mode", "professional"), " [Pro]");
+    }
+
+    #[test]
+    fn enterprise_any_mode_annotates_enterprise() {
+        assert_eq!(tier_annotation("any-mode", "enterprise"), " [Enterprise]");
+    }
+
+    #[test]
+    fn free_managed_only_annotates_managed_only() {
+        assert_eq!(tier_annotation("managed-only", "free"), " [managed only]");
+    }
+
+    #[test]
+    fn professional_managed_only_combines_annotation() {
+        assert_eq!(
+            tier_annotation("managed-only", "professional"),
+            " [Pro, managed only]"
+        );
+    }
+
+    #[test]
+    fn enterprise_managed_only_combines_annotation() {
+        assert_eq!(
+            tier_annotation("managed-only", "enterprise"),
+            " [Enterprise, managed only]"
+        );
+    }
+
+    #[test]
+    fn annotate_help_tiers_suffixes_leaves_from_command_tiers() {
+        use clap::{Arg, Command};
+
+        // Fake a small command tree that overlaps real COMMAND_TIERS entries:
+        //   root
+        //   ├─ search              (any-mode, free)            → no annotation
+        //   ├─ evals run-campaign  (any-mode, professional)    → [Pro]
+        //   └─ admin
+        //      └─ rate-limits
+        //         └─ set           (managed-only, enterprise)  → [Enterprise, managed only]
+        //
+        // We only assert that keys actually present in COMMAND_TIERS get annotated
+        // correctly. If an expected key is not in the table (because a future
+        // refactor renamed it), we treat that as a tier-annotation vacuous pass
+        // rather than a hard failure, so this test pins behavior without
+        // double-booking with command_tiers_covers_every_leaf_subcommand.
+        fn tier_for(cmd: &str) -> Option<(&'static str, &'static str)> {
+            COMMAND_TIERS
+                .iter()
+                .find(|(c, _, _)| *c == cmd)
+                .map(|(_, t, p)| (*t, *p))
+        }
+
+        let root = Command::new("enscrive")
+            .subcommand(Command::new("search").about("search").arg(Arg::new("q")))
+            .subcommand(
+                Command::new("evals").subcommand(
+                    Command::new("run-campaign").about("run an evals campaign"),
+                ),
+            )
+            .subcommand(
+                Command::new("admin").subcommand(
+                    Command::new("rate-limits").subcommand(
+                        Command::new("set").about("set a tenant rate limit"),
+                    ),
+                ),
+            );
+
+        let annotated = annotate_help_tiers(root, "");
+
+        // Helper: drill down through the tree to find a leaf's `about` string.
+        fn leaf_about(cmd: &Command, path: &[&str]) -> Option<String> {
+            let mut node = cmd;
+            for seg in path {
+                node = node.get_subcommands().find(|c| c.get_name() == *seg)?;
+            }
+            node.get_about().map(|s| s.to_string())
+        }
+
+        if let Some((t, p)) = tier_for("search") {
+            let expected = format!("search{}", tier_annotation(t, p));
+            assert_eq!(leaf_about(&annotated, &["search"]).as_deref(), Some(expected.as_str()));
+        }
+        if let Some((t, p)) = tier_for("evals run-campaign") {
+            let expected = format!("run an evals campaign{}", tier_annotation(t, p));
+            assert_eq!(
+                leaf_about(&annotated, &["evals", "run-campaign"]).as_deref(),
+                Some(expected.as_str())
+            );
+        }
+        if let Some((t, p)) = tier_for("admin rate-limits set") {
+            let expected = format!("set a tenant rate limit{}", tier_annotation(t, p));
+            assert_eq!(
+                leaf_about(&annotated, &["admin", "rate-limits", "set"]).as_deref(),
+                Some(expected.as_str())
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ENS-61 CLI-TIER-006: map a parsed Commands value to its COMMAND_TIERS key.
+// Returns None for commands that are not in COMMAND_TIERS (local / operator).
+// ---------------------------------------------------------------------------
+fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
+    use evals2::{Datasets2Subcommand, EvalDefsSubcommand, EvalRunsSubcommand, VoiceDiff2Subcommand};
+    let key: &str = match cmd {
+        Commands::Search(_) => "search",
+        Commands::Embeddings { sub } => match sub {
+            EmbeddingsSubcommand::Query(_) => "embeddings query",
+        },
+        Commands::Ingest { sub } => match sub {
+            IngestSubcommand::Prepared(_) => "ingest prepared",
+            IngestSubcommand::Documents(_) => "ingest documents",
+        },
+        Commands::Segment { sub } => match sub {
+            SegmentSubcommand::Document(_) => "segment document",
+        },
+        Commands::Analyze { sub } => match sub {
+            AnalyzeSubcommand::Content(_) => "analyze content",
+        },
+        Commands::Models { sub } => match sub {
+            ModelsSubcommand::List => "models list",
+            ModelsSubcommand::Show(_) => return None, // skip list
+        },
+        Commands::Collections { sub } => match sub {
+            CollectionsSubcommand::List => "collections list",
+            CollectionsSubcommand::Create(_) => "collections create",
+            CollectionsSubcommand::Update(_) => "collections update",
+            CollectionsSubcommand::Delete(_) => "collections delete",
+            CollectionsSubcommand::Stats { .. } => "collections stats",
+            CollectionsSubcommand::Documents { .. } => "collections documents",
+            CollectionsSubcommand::Chunks { .. } => "collections chunks",
+            CollectionsSubcommand::Stage(_) => "collections stage",
+            CollectionsSubcommand::Commit(_) => "collections commit",
+            CollectionsSubcommand::Pending(_) => "collections pending",
+            CollectionsSubcommand::PendingDelete(_) => "collections pending-delete",
+            // Local-only / skip-list commands:
+            CollectionsSubcommand::Get { .. }
+            | CollectionsSubcommand::Revert { .. }
+            | CollectionsSubcommand::Commits(_)
+            | CollectionsSubcommand::Metrics(_)
+            | CollectionsSubcommand::MaterializeFromDataset(_) => return None,
+        },
+        Commands::Voices { sub } => match sub {
+            VoicesSubcommand::List => "voices list",
+            VoicesSubcommand::Get { .. } => "voices get",
+            VoicesSubcommand::Create(_) => "voices create",
+            VoicesSubcommand::Update(_) => "voices update",
+            VoicesSubcommand::Delete(_) => "voices delete",
+            VoicesSubcommand::Compare(_) => "voices compare",
+            VoicesSubcommand::Promote(_) => "voices promote",
+            VoicesSubcommand::Search(_) => "voices search",
+            VoicesSubcommand::Gates { sub } => match sub {
+                VoiceGatesSubcommand::List { .. } => "voices gates list",
+                VoiceGatesSubcommand::Set(_) => "voices gates set",
+                VoiceGatesSubcommand::Delete(_) => "voices gates delete",
+            },
+            VoicesSubcommand::Diff2(d) => match d {
+                VoiceDiff2Subcommand::Diff(_) => return None,
+                VoiceDiff2Subcommand::DiffCost(_) => return None,
+                VoiceDiff2Subcommand::DiffProposal(_) => return None,
+            },
+        },
+        Commands::Evals { sub } => match sub {
+            EvalsSubcommand::Campaigns { sub } => match sub {
+                EvalCampaignsSubcommand::List => "evals campaigns list",
+                EvalCampaignsSubcommand::Get { .. } => "evals campaigns get",
+            },
+            EvalsSubcommand::RunCampaign(_) => "evals run-campaign",
+            EvalsSubcommand::RunCampaignStream(_) => "evals run-campaign-stream",
+            EvalsSubcommand::Import(_) => "evals import",
+            EvalsSubcommand::FromUrl(_) => "evals from-url",
+            EvalsSubcommand::Datasets { sub } => match sub {
+                EvalDatasetsSubcommand::List => "evals datasets list",
+                EvalDatasetsSubcommand::Create(_) => "evals datasets create",
+                EvalDatasetsSubcommand::Get { .. } => "evals datasets get",
+                EvalDatasetsSubcommand::Queries { .. } => "evals datasets queries",
+                EvalDatasetsSubcommand::Update(_) => "evals datasets update",
+                EvalDatasetsSubcommand::Delete { .. } => "evals datasets delete",
+            },
+            EvalsSubcommand::VoiceStatus { .. } => "evals voice-status",
+        },
+        Commands::Logs { sub } => match sub {
+            LogsSubcommand::Stream(_) => "logs stream",
+            LogsSubcommand::Search(_) => "logs search",
+            LogsSubcommand::Metrics(_) => "logs metrics",
+        },
+        Commands::Backup { sub } => match sub {
+            BackupSubcommand::Create => "backup create",
+            BackupSubcommand::List(_) => "backup list",
+            BackupSubcommand::Get { .. } => "backup get",
+            BackupSubcommand::Restore(_) => "backup restore",
+            BackupSubcommand::DryRun(_) => "backup dry-run",
+        },
+        Commands::Export { sub } => match sub {
+            ExportSubcommand::Tenant(_) => "export tenant",
+            ExportSubcommand::Embeddings(_) => "export embeddings",
+            ExportSubcommand::TokenUsage(_) => "export token-usage",
+        },
+        Commands::Usage(_) => "usage",
+        Commands::Jobs { sub } => match sub {
+            JobsSubcommand::List(_) => "jobs list",
+            JobsSubcommand::Get(_) => "jobs get",
+            JobsSubcommand::Cancel(_) => "jobs cancel",
+            // skip-list:
+            JobsSubcommand::Retry(_) | JobsSubcommand::Abandon(_) => return None,
+        },
+        Commands::BatchSets { sub } => match sub {
+            // skip-list:
+            BatchSetsSubcommand::List(_) | BatchSetsSubcommand::Get(_) => return None,
+        },
+        Commands::Admin { sub } => match sub {
+            AdminSubcommand::RateLimits { sub } => match sub {
+                // skip-list:
+                AdminRateLimitsSubcommand::Show(_) | AdminRateLimitsSubcommand::Set(_) => {
+                    return None
+                }
+            },
+        },
+        Commands::Datasets { sub } => match sub {
+            Datasets2Subcommand::List => return None,
+            Datasets2Subcommand::Get { .. } => return None,
+            Datasets2Subcommand::Describe { .. } => return None,
+            Datasets2Subcommand::Delete { .. } => return None,
+            Datasets2Subcommand::Upload(_) => return None,
+            Datasets2Subcommand::Create(_) => return None,
+        },
+        Commands::EvalDefs { sub } => match sub {
+            EvalDefsSubcommand::Create(_) => return None,
+            EvalDefsSubcommand::List => return None,
+            EvalDefsSubcommand::Get { .. } => return None,
+            EvalDefsSubcommand::Delete { .. } => return None,
+            EvalDefsSubcommand::Run(_) => return None,
+            EvalDefsSubcommand::Publish(_) => return None,
+            EvalDefsSubcommand::Publications { .. } => return None,
+            EvalDefsSubcommand::Unpublish { .. } => return None,
+            EvalDefsSubcommand::Runs { sub } => match sub {
+                EvalRunsSubcommand::List { .. } => return None,
+                EvalRunsSubcommand::Get { .. } => return None,
+                EvalRunsSubcommand::Diagnose(_) => return None,
+            },
+        },
+        // Local/operator/license commands: no tier gating.
+        Commands::Init(_)
+        | Commands::Start(_)
+        | Commands::Stop(_)
+        | Commands::Status(_)
+        | Commands::Health
+        | Commands::Deploy { .. }
+        | Commands::License { .. } => return None,
+    };
+    // Look up the computed key in COMMAND_TIERS to get a 'static reference.
+    COMMAND_TIERS
+        .iter()
+        .find(|(cmd, _, _)| *cmd == key)
+        .map(|(cmd, _, _)| *cmd)
+        .or(Some(key)) // If not in table, return the key anyway (gate will pass-through).
+}
+
 #[tokio::main]
 async fn main() {
+    // ENS-66 CLI-TIER-011: intercept --help / -h before clap parses, so we
+    // can inject tier annotations into the help output.
+    {
+        use clap::CommandFactory;
+        let raw: Vec<String> = std::env::args().collect();
+        // Check if any arg is --help or -h (and not a positional value like --api-key).
+        let has_help = raw.iter().any(|a| a == "--help" || a == "-h");
+        if has_help {
+            // Build the annotated command tree and print help.
+            // Walk the raw args (excluding the binary name) to find which
+            // sub-tree the user is asking help for.
+            let annotated = annotate_help_tiers(Cli::command(), "");
+            // Re-apply the raw args (minus --help) to navigate to the right
+            // subcommand help page, then print and exit.
+            let args_without_help: Vec<String> = raw
+                .iter()
+                .skip(1) // skip binary name
+                .filter(|a| *a != "--help" && *a != "-h")
+                .cloned()
+                .collect();
+            let mut sub_cmd = annotated;
+            // Navigate into subcommands based on remaining positional args,
+            // descending as many levels as the invocation specifies (e.g.
+            // `enscrive admin rate-limits set --help` walks three levels).
+            for arg in &args_without_help {
+                if arg.starts_with('-') {
+                    continue; // flag, not a subcommand name
+                }
+                let found_name = sub_cmd
+                    .get_subcommands()
+                    .find(|s| s.get_name() == arg.as_str())
+                    .map(|s| s.get_name().to_string());
+                match found_name {
+                    Some(name) => {
+                        let subs: Vec<clap::Command> =
+                            sub_cmd.get_subcommands().cloned().collect();
+                        if let Some(child) =
+                            subs.into_iter().find(|s| s.get_name() == name)
+                        {
+                            sub_cmd = child;
+                        }
+                        // Continue the loop so we can descend further.
+                    }
+                    None => {
+                        // Unrecognized positional — stop descending and let
+                        // this node print its help.
+                        break;
+                    }
+                }
+            }
+            let _ = sub_cmd.print_help();
+            println!(); // trailing newline
+            std::process::exit(0);
+        }
+    }
+
     let cli = Cli::parse();
     let fmt = cli.output;
     let make_client = |endpoint: String, api_key: String| {
@@ -2889,6 +3298,38 @@ async fn main() {
             Err(e) => CliResponse::fail("", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt),
         },
     };
+
+    // ENS-61 CLI-TIER-006: pre-flight tier gate — runs before HTTP client
+    // construction. Rejects managed-only commands in local mode and plan-gated
+    // commands when the cached plan is below the required tier.
+    if let Some(cmd_key) = cmd_key_for_command(&cli.command) {
+        let deployment_mode = api_context
+            .as_ref()
+            .and_then(|ctx| ctx.profile_mode.as_deref())
+            .unwrap_or("local");
+        // cached_plan: not yet stored in profiles.toml — always None for now.
+        // When server-hint caching is added, read from StoredProfile here.
+        let cached_plan: Option<&str> = None;
+        // TODO: read cached_plan from profiles.toml StoredProfile once the field is added.
+        if let Err(failure) = preflight::preflight_gate(cmd_key, deployment_mode, cached_plan, COMMAND_TIERS) {
+            let (msg, exit_code) = match failure {
+                FailureClass::UnsupportedInLocalMode => (
+                    format!(
+                        "command `{cmd_key}` is only available in managed mode (your current profile is self-managed/local)"
+                    ),
+                    EXIT_UNSUPPORTED,
+                ),
+                FailureClass::PlanRequired => (
+                    format!(
+                        "command `{cmd_key}` requires a higher plan tier than your current cached plan"
+                    ),
+                    output::EXIT_PLAN_REQUIRED,
+                ),
+                other => (format!("pre-flight gate rejected: {other}"), EXIT_FAILURE),
+            };
+            CliResponse::fail(cmd_key, msg, failure, exit_code).emit(fmt);
+        }
+    }
 
     match &cli.command {
         Commands::Init(args) => {
@@ -2963,7 +3404,95 @@ async fn main() {
         })
         .await
         {
-            Ok(data) => CliResponse::success("status", data).emit(fmt),
+            Ok(mut data) => {
+                // ENS-65 CLI-TIER-010: enrich status with plan + license.
+                let mode = data
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local")
+                    .to_owned();
+                let (plan, license_field) = if mode == "managed" {
+                    // Managed: plan comes from cached_plan (not yet stored;
+                    // TODO: read from profiles.toml when cached_plan field is added).
+                    (serde_json::Value::Null, None::<serde_json::Value>)
+                } else {
+                    // Local: resolve plan from license JWT claims if present.
+                    let (plan_val, license_obj) = match license::read_license_jwt() {
+                        Ok(Some(jwt)) => match license::decode_jwt_payload_unverified(&jwt) {
+                            Ok(claims) => {
+                                let plan = claims
+                                    .plan
+                                    .clone()
+                                    .map(|p| serde_json::Value::String(p))
+                                    .unwrap_or_else(|| serde_json::Value::String("unknown".to_string()));
+                                let expires_at = claims.expires_at.clone();
+                                let lic = json!({
+                                    "present": true,
+                                    "expires_at": expires_at,
+                                    "last_verified_at": null,
+                                });
+                                (plan, Some(lic))
+                            }
+                            Err(_) => (
+                                serde_json::Value::String("unknown".to_string()),
+                                Some(json!({
+                                    "present": true,
+                                    "expires_at": null,
+                                    "last_verified_at": null,
+                                })),
+                            ),
+                        },
+                        _ => (
+                            serde_json::Value::String("free".to_string()),
+                            Some(json!({
+                                "present": false,
+                                "expires_at": null,
+                                "last_verified_at": null,
+                            })),
+                        ),
+                    };
+                    (plan_val, license_obj)
+                };
+
+                if let Some(obj) = data.as_object_mut() {
+                    obj.insert("plan".to_string(), plan.clone());
+                    if mode != "managed" {
+                        if let Some(lic) = license_field {
+                            obj.insert("license".to_string(), lic);
+                        }
+                    }
+                }
+
+                match fmt {
+                    OutputFormat::Human => {
+                        // Print 2-line summary before the full JSON.
+                        let plan_str = plan.as_str().unwrap_or("unknown");
+                        let license_summary = if mode == "managed" {
+                            "managed (no local license)".to_string()
+                        } else {
+                            match data.get("license") {
+                                Some(lic) => {
+                                    let present = lic.get("present").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    if present {
+                                        let exp = lic.get("expires_at").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                        // Truncate to date portion if ISO timestamp.
+                                        let exp_date = exp.split('T').next().unwrap_or(exp);
+                                        format!("present, expires {exp_date}")
+                                    } else {
+                                        "absent".to_string()
+                                    }
+                                }
+                                None => "absent".to_string(),
+                            }
+                        };
+                        println!("Plan: {plan_str}  License: {license_summary}");
+                        println!("Mode: {mode}");
+                    }
+                    OutputFormat::Json => {}
+                }
+
+                CliResponse::success("status", data).emit(fmt)
+            }
             Err(e) => CliResponse::fail("status", e, FailureClass::Bug, EXIT_FAILURE).emit(fmt),
         },
         Commands::Deploy { sub } => match sub {
@@ -4359,7 +4888,7 @@ async fn main() {
                     }
                 }
 
-                match write_license_jwt(&args.jwt) {
+                match license::write_license_jwt(&args.jwt) {
                     Ok(path) => CliResponse::success(
                         "license activate",
                         json!({
@@ -4377,73 +4906,193 @@ async fn main() {
                     .emit(fmt),
                 }
             }
+
+            // ENS-63 / CLI-TIER-008: license status
+            LicenseSubcommand::Status => {
+                let profile_mode = local::resolve_api_context(
+                    cli.profile.as_deref(),
+                    cli.endpoint.clone(),
+                    cli.api_key.clone(),
+                )
+                .ok()
+                .and_then(|ctx| ctx.profile_mode);
+
+                let mode = profile_mode.as_deref().unwrap_or("local");
+
+                let license_path = match license::resolve_license_path() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        CliResponse::fail("license status", e, FailureClass::Bug, EXIT_CONFIG)
+                            .emit(fmt)
+                    }
+                };
+                let path_str = license_path.display().to_string();
+
+                if mode == "managed" {
+                    // In managed mode there's no local license file.
+                    let cached_plan: Option<String> = None; // TODO: read from profiles.toml when cached_plan field is added.
+                    let data = json!({
+                        "license_file": path_str,
+                        "license_present": false,
+                        "claims_as_written": null,
+                        "profile_mode": "managed",
+                        "profile_cached_plan": cached_plan,
+                        "note": "Managed mode: plan is read from your Enscrive account, not a local license file.",
+                    });
+                    match fmt {
+                        output::OutputFormat::Json => {
+                            CliResponse::success("license status", data).emit(fmt)
+                        }
+                        output::OutputFormat::Human => {
+                            println!("Mode:         managed");
+                            println!("License file: not used in managed mode");
+                            CliResponse::success("license status", data).emit(fmt)
+                        }
+                    }
+                } else {
+                    match license::read_license_jwt() {
+                        Ok(None) => {
+                            let data = json!({
+                                "license_file": path_str,
+                                "license_present": false,
+                                "claims_as_written": null,
+                                "profile_mode": mode,
+                                "profile_cached_plan": null,
+                                "note": "No license file found. Use `enscrive license activate <jwt>` to install one.",
+                            });
+                            match fmt {
+                                output::OutputFormat::Human => {
+                                    println!("Plan:         free (no license file)");
+                                    println!("License file: {path_str} (absent)");
+                                    CliResponse::success("license status", data).emit(fmt)
+                                }
+                                output::OutputFormat::Json => {
+                                    CliResponse::success("license status", data).emit(fmt)
+                                }
+                            }
+                        }
+                        Ok(Some(jwt)) => {
+                            match license::decode_jwt_payload_unverified(&jwt) {
+                                Ok(claims) => {
+                                    let expires_at = claims.expires_at.clone();
+                                    let plan = claims.plan.clone().unwrap_or_else(|| "unknown".to_string());
+                                    let claims_val = serde_json::to_value(&claims).unwrap_or(Value::Null);
+                                    let data = json!({
+                                        "license_file": path_str,
+                                        "license_present": true,
+                                        "claims_as_written": claims_val,
+                                        "profile_mode": mode,
+                                        "profile_cached_plan": null,
+                                        "note": "Claims as written in the file; server verifies at runtime.",
+                                    });
+                                    match fmt {
+                                        output::OutputFormat::Human => {
+                                            println!("Plan:         {plan}");
+                                            println!("Expiry:       {}", expires_at.as_deref().unwrap_or("unknown"));
+                                            println!("License file: {path_str}");
+                                            CliResponse::success("license status", data).emit(fmt)
+                                        }
+                                        output::OutputFormat::Json => {
+                                            CliResponse::success("license status", data).emit(fmt)
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    CliResponse::fail(
+                                        "license status",
+                                        format!("license file present but JWT is malformed: {e}"),
+                                        FailureClass::LicenseInvalid,
+                                        EXIT_LICENSE_INVALID,
+                                    )
+                                    .emit(fmt)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            CliResponse::fail("license status", e, FailureClass::Bug, EXIT_CONFIG)
+                                .emit(fmt)
+                        }
+                    }
+                }
+            }
+
+            // ENS-64 / CLI-TIER-009: license deactivate
+            LicenseSubcommand::Deactivate => {
+                // Refuse in managed mode.
+                match local::resolve_api_context(
+                    cli.profile.as_deref(),
+                    cli.endpoint.clone(),
+                    cli.api_key.clone(),
+                ) {
+                    Ok(ctx) => {
+                        if ctx.profile_mode.as_deref() == Some("managed") {
+                            CliResponse::fail(
+                                "license deactivate",
+                                "license deactivation is only for self-hosted (--mode self-managed); managed mode reads plan from your Enscrive account."
+                                    .to_string(),
+                                FailureClass::Unsupported,
+                                EXIT_UNSUPPORTED,
+                            )
+                            .emit(fmt);
+                        }
+                    }
+                    Err(_) => {}
+                }
+
+                match license::remove_license_file() {
+                    Ok(true) => {
+                        let path_str = license::resolve_license_path()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default();
+                        match fmt {
+                            output::OutputFormat::Human => {
+                                println!("License file removed.");
+                                println!("Restart your local enscrive-developer for the change to take effect.");
+                            }
+                            output::OutputFormat::Json => {}
+                        }
+                        CliResponse::success(
+                            "license deactivate",
+                            json!({
+                                "removed": true,
+                                "already_absent": false,
+                                "path": path_str,
+                            }),
+                        )
+                        .emit(fmt)
+                    }
+                    Ok(false) => {
+                        match fmt {
+                            output::OutputFormat::Human => {
+                                println!("No license file present — nothing to remove.");
+                            }
+                            output::OutputFormat::Json => {}
+                        }
+                        CliResponse::success(
+                            "license deactivate",
+                            json!({
+                                "removed": false,
+                                "already_absent": true,
+                            }),
+                        )
+                        .emit(fmt)
+                    }
+                    Err(e) => CliResponse::fail(
+                        "license deactivate",
+                        e,
+                        FailureClass::Bug,
+                        EXIT_CONFIG,
+                    )
+                    .emit(fmt),
+                }
+            }
         },
     }
 }
 
 // ---------------------------------------------------------------------------
-// CLI-TIER-007 (ENS-62): `enscrive license activate <jwt>` file-system bits.
+// CLI-TIER-007 (ENS-62/63/64): license helpers are in src/license.rs.
 // ---------------------------------------------------------------------------
-
-/// Resolve the on-disk license path.
-///
-/// Precedence:
-///   1. `ENSCRIVE_LICENSE_PATH` env var, if set and non-empty.
-///   2. `$HOME/.config/enscrive/license.jwt`.
-///
-/// Returns a descriptive error if `HOME` is unset and no override is
-/// provided.
-fn resolve_license_path() -> Result<std::path::PathBuf, String> {
-    if let Ok(p) = std::env::var("ENSCRIVE_LICENSE_PATH") {
-        if !p.is_empty() {
-            return Ok(std::path::PathBuf::from(p));
-        }
-    }
-    let home = std::env::var("HOME").map_err(|_| {
-        "cannot resolve license path: HOME is unset; set ENSCRIVE_LICENSE_PATH to override"
-            .to_string()
-    })?;
-    Ok(std::path::PathBuf::from(home)
-        .join(".config")
-        .join("enscrive")
-        .join("license.jwt"))
-}
-
-/// Write the JWT to the resolved license path with 0600 permissions on
-/// Unix. Returns the absolute path written (as a String for structured
-/// output).
-fn write_license_jwt(jwt: &str) -> Result<String, String> {
-    let trimmed = jwt.trim();
-    if trimmed.is_empty() {
-        return Err("license JWT is empty".to_string());
-    }
-
-    let path = resolve_license_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("create license dir {}: {e}", parent.display()))?;
-    }
-    fs::write(&path, trimmed.as_bytes())
-        .map_err(|e| format!("write license to {}: {e}", path.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms)
-            .map_err(|e| format!("set permissions 0600 on {}: {e}", path.display()))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        eprintln!(
-            "enscrive: warning — running on non-Unix; file permissions on {} were not restricted to 0600.",
-            path.display()
-        );
-    }
-
-    Ok(path.display().to_string())
-}
 
 #[cfg(test)]
 mod tests {
@@ -6563,8 +7212,10 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         "stop",
         "status",
         "health",
-        // CLI-TIER-007: license activation writes locally; no /v1 endpoint.
+        // CLI-TIER-007/008/009: license subcommands write locally; no /v1 endpoint.
         "license activate",
+        "license status",
+        "license deactivate",
         // Deploy sub-tree — operator-only, never contract-tracked.
         "deploy init",
         "deploy status",
@@ -6579,6 +7230,8 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         "collections commits",
         // J-020: vector-space metrics — contract row pending.
         "collections metrics",
+        // ENS-104: materialize from dataset — contract row pending.
+        "collections materialize-from-dataset",
         // J-024: batch-set + job retry/abandon — contract rows pending.
         "jobs retry",
         "jobs abandon",
@@ -6811,7 +7464,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         }
 
         let jwt = "header.payload.signature";
-        let written = write_license_jwt(jwt).expect("write_license_jwt ok");
+        let written = license::write_license_jwt(jwt).expect("write_license_jwt ok");
         assert_eq!(written, target.display().to_string());
 
         let contents = std::fs::read_to_string(&target).expect("read back license");
@@ -6841,7 +7494,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             std::env::set_var("ENSCRIVE_LICENSE_PATH_EMPTY_TEST", &target);
         }
         // Empty string => Err.
-        let result = write_license_jwt("   \n  ");
+        let result = license::write_license_jwt("   \n  ");
         assert!(result.is_err(), "empty JWT should error");
         unsafe {
             std::env::remove_var("ENSCRIVE_LICENSE_PATH_EMPTY_TEST");
@@ -6853,7 +7506,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         unsafe {
             std::env::set_var("ENSCRIVE_LICENSE_PATH", "/tmp/enscrive-license-test.jwt");
         }
-        let p = resolve_license_path().expect("resolve ok");
+        let p = license::resolve_license_path().expect("resolve ok");
         assert_eq!(
             p,
             std::path::PathBuf::from("/tmp/enscrive-license-test.jwt")
