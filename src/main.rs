@@ -1785,51 +1785,50 @@ fn require_api_key(api_key: Option<String>, fmt: OutputFormat) -> String {
     }
 }
 
-fn request_failure(command: &str, error: String) -> CliResponse {
-    let error = augment_request_error(command, error);
+/// ENS-84 CLI-REL-013: typed path from `ApiError` to `CliResponse`.
+///
+/// Replaces the previous string-heuristic layer (`server_classified` /
+/// `map_failure_class` / `contains("unsupported")` fallback).  The
+/// `ApiError` variants produced by `EnscriveClient` carry all the
+/// information needed to assign `FailureClass` without inspecting strings.
+fn request_failure(command: &str, error: client::ApiError) -> CliResponse {
+    use client::ApiError;
 
-    // CLI-TIER-005 (ENS-60): prefer the server-provided `failure_class`
-    // field when the server has classified the error. Falls back to the
-    // existing heuristics when the body is absent, unparseable, or has an
-    // unrecognized class.
-    if let Some(class) = server_classified(&error) {
-        return CliResponse::fail(command, error, class, exit_code_for(class));
-    }
+    let (class, exit_code) = match &error {
+        ApiError::NotYetAvailable { .. } => (FailureClass::Unsupported, EXIT_UNSUPPORTED),
+        ApiError::Timeout => (FailureClass::Bug, EXIT_FAILURE),
+        ApiError::Network(_) => (FailureClass::Bug, EXIT_FAILURE),
+        ApiError::InvalidResponse { .. } => (FailureClass::Bug, EXIT_FAILURE),
+        ApiError::Http4xx { .. } => (FailureClass::Bug, EXIT_FAILURE),
+        ApiError::Http5xx { .. } => (FailureClass::Bug, EXIT_FAILURE),
+        ApiError::ServerClassified { class, .. } => {
+            let fc = map_failure_class(class);
+            let code = exit_code_for(fc);
+            (fc, code)
+        }
+    };
 
-    let lower = error.to_lowercase();
-    if lower.contains("failedprecondition")
-        || lower.contains("not yet supported")
-        || lower.contains("not yet available on public /v1")
-        || lower.contains("not_yet_available")
-        || lower.contains("\"phase\":\"pre-launch\"")
-        || lower.contains("unsupported")
-    {
-        CliResponse::fail(command, error, FailureClass::Unsupported, EXIT_UNSUPPORTED)
-    } else {
-        CliResponse::fail(command, error, FailureClass::Bug, EXIT_FAILURE)
-    }
+    CliResponse::fail(command, error.to_string(), class, exit_code)
 }
 
 /// Map a `failure_class` string from the server body to the CLI's
-/// `FailureClass` enum. Returns `None` for unknown strings so the caller
-/// can fall through to heuristics.
-fn map_failure_class(raw: &str) -> Option<FailureClass> {
+/// `FailureClass` enum. Unknown strings map to `FailureClass::Bug`.
+fn map_failure_class(raw: &str) -> FailureClass {
     match raw {
-        "FAIL_BUG" => Some(FailureClass::Bug),
-        "FAIL_UNSUPPORTED" => Some(FailureClass::Unsupported),
-        "FAIL_UNSUPPORTED_IN_LOCAL_MODE" => Some(FailureClass::UnsupportedInLocalMode),
-        "FAIL_PLAN_REQUIRED" => Some(FailureClass::PlanRequired),
-        "FAIL_CONFIRMATION_REQUIRED" => Some(FailureClass::ConfirmationRequired),
-        "FAIL_QUOTA_EXCEEDED" => Some(FailureClass::QuotaExceeded),
-        "FAIL_LICENSE_INVALID" => Some(FailureClass::LicenseInvalid),
-        "FAIL_UNIMPLEMENTED" => Some(FailureClass::Unimplemented),
-        "FAIL_FALSE_CLAIM" => Some(FailureClass::FalseClaim),
-        _ => None,
+        "FAIL_BUG" => FailureClass::Bug,
+        "FAIL_UNSUPPORTED" => FailureClass::Unsupported,
+        "FAIL_UNSUPPORTED_IN_LOCAL_MODE" => FailureClass::UnsupportedInLocalMode,
+        "FAIL_PLAN_REQUIRED" => FailureClass::PlanRequired,
+        "FAIL_CONFIRMATION_REQUIRED" => FailureClass::ConfirmationRequired,
+        "FAIL_QUOTA_EXCEEDED" => FailureClass::QuotaExceeded,
+        "FAIL_LICENSE_INVALID" => FailureClass::LicenseInvalid,
+        "FAIL_UNIMPLEMENTED" => FailureClass::Unimplemented,
+        "FAIL_FALSE_CLAIM" => FailureClass::FalseClaim,
+        _ => FailureClass::Bug,
     }
 }
 
-/// Exit code to pair with a given `FailureClass` when the server has
-/// classified the error.
+/// Exit code to pair with a given `FailureClass`.
 fn exit_code_for(class: FailureClass) -> i32 {
     match class {
         FailureClass::Unsupported | FailureClass::UnsupportedInLocalMode => EXIT_UNSUPPORTED,
@@ -1839,35 +1838,6 @@ fn exit_code_for(class: FailureClass) -> i32 {
         FailureClass::LicenseInvalid => output::EXIT_LICENSE_INVALID,
         FailureClass::Bug | FailureClass::Unimplemented | FailureClass::FalseClaim => EXIT_FAILURE,
     }
-}
-
-/// Best-effort extraction of a JSON object from the tail of an error
-/// string like `HTTP 503 Service Unavailable: {"error":"…","failure_class":"FAIL_PLAN_REQUIRED"}`.
-/// Returns the parsed `FailureClass` if a recognized `failure_class`
-/// field is present.
-fn server_classified(error: &str) -> Option<FailureClass> {
-    // Find the first '{' — works for the common `HTTP N reason: {…}` layout
-    // and also tolerates a raw JSON body.
-    let start = error.find('{')?;
-    let candidate = &error[start..];
-    let parsed: serde_json::Value = serde_json::from_str(candidate).ok()?;
-    let raw = parsed.get("failure_class")?.as_str()?;
-    match map_failure_class(raw) {
-        Some(class) => Some(class),
-        None => {
-            // Log unknown classes in test/debug builds so we notice server
-            // drift, but fall through to heuristics in prod.
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "enscrive: unrecognized server failure_class {raw:?}; falling back to heuristics"
-            );
-            None
-        }
-    }
-}
-
-fn augment_request_error(_command: &str, error: String) -> String {
-    error
 }
 
 // ---------------------------------------------------------------------------
@@ -3745,9 +3715,21 @@ async fn main() {
                                 Ok(segments) => {
                                     CliResponse::success("segment document", segments).emit(fmt)
                                 }
-                                Err(e) => request_failure("segment document", e).emit(fmt),
+                                Err(e) => CliResponse::fail(
+                                    "segment document",
+                                    e,
+                                    FailureClass::Bug,
+                                    EXIT_FAILURE,
+                                )
+                                .emit(fmt),
                             },
-                            Err(e) => request_failure("segment document", e).emit(fmt),
+                            Err(e) => CliResponse::fail(
+                                "segment document",
+                                e,
+                                FailureClass::Bug,
+                                EXIT_FAILURE,
+                            )
+                            .emit(fmt),
                         }
                     }
                     Err(e) => {
@@ -4224,7 +4206,13 @@ async fn main() {
                             CliResponse::success("evals run-campaign-stream", Value::String(data))
                                 .emit(fmt)
                         }
-                        Err(e) => request_failure("evals run-campaign-stream", e).emit(fmt),
+                        Err(e) => CliResponse::fail(
+                            "evals run-campaign-stream",
+                            e,
+                            FailureClass::Bug,
+                            EXIT_FAILURE,
+                        )
+                        .emit(fmt),
                     },
                     Err(e) => CliResponse::fail(
                         "evals run-campaign-stream",
@@ -4672,7 +4660,8 @@ async fn main() {
                         )
                         .emit(fmt),
                     },
-                    Err(e) => request_failure("export tenant", e).emit(fmt),
+                    Err(e) => CliResponse::fail("export tenant", e, FailureClass::Bug, EXIT_FAILURE)
+                        .emit(fmt),
                 }
             }
             ExportSubcommand::Embeddings(args) => {
@@ -4718,7 +4707,13 @@ async fn main() {
                         Ok(data) => {
                             CliResponse::success("logs stream", Value::String(data)).emit(fmt)
                         }
-                        Err(e) => request_failure("logs stream", e).emit(fmt),
+                        Err(e) => CliResponse::fail(
+                            "logs stream",
+                            e,
+                            FailureClass::Bug,
+                            EXIT_FAILURE,
+                        )
+                        .emit(fmt),
                     }
                 }
                 LogsSubcommand::Search(args) => {
@@ -6800,14 +6795,18 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         }
     }
 
+    // ENS-84: request_failure now takes ApiError, not String.
+    // The old string-heuristic test is replaced by typed-variant tests.
+    // A 500 without failure_class → Http5xx → Bug (heuristic removed).
     #[test]
-    fn request_failure_classifies_failed_precondition_as_unsupported() {
-        let response = request_failure(
-            "embeddings query",
-            "HTTP 500 Internal Server Error: query_embeddings RPC failed: status: FailedPrecondition, message: \"unsupported\"".to_string(),
-        );
-        assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
-        assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
+    fn request_failure_http5xx_no_class_is_bug() {
+        let err = client::ApiError::Http5xx {
+            status: 500,
+            body: serde_json::json!({"error": "database connection lost"}),
+        };
+        let response = request_failure("embeddings query", err);
+        assert_eq!(response.failure_class, Some(FailureClass::Bug));
+        assert_eq!(response.exit_code, EXIT_FAILURE);
     }
 
     // -----------------------------------------------------------------------
@@ -7058,78 +7057,95 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     }
 
     // -------------------------------------------------------------------------
-    // CLI-REL-016: classifier maps pre-launch 503 responses to FAIL_UNSUPPORTED
+    // ENS-84 CLI-REL-013: typed ApiError → FailureClass mapping tests.
+    //
+    // These replace the previous string-heuristic tests.  All classification
+    // now goes through ApiError variants, not string pattern matching.
     // -------------------------------------------------------------------------
 
+    /// 503 with pre-launch error field → NotYetAvailable → Unsupported
     #[test]
     fn classifier_maps_not_yet_available_to_unsupported() {
-        let err = r#"HTTP 503 Service Unavailable: {"error":"not_yet_available","region":"us","phase":"pre-launch","retry_after":null}"#
-            .to_string();
+        let err = client::ApiError::NotYetAvailable { status: 503 };
         let response = request_failure("health", err);
         assert!(!response.ok);
         assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
         assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
     }
 
+    /// 503 with phase:pre-launch body → NotYetAvailable → Unsupported
     #[test]
     fn classifier_maps_phase_pre_launch_to_unsupported() {
-        // Even if the body doesn't use the exact string `not_yet_available`,
-        // `phase: pre-launch` is enough to classify as unsupported.
-        let err = r#"HTTP 503 Service Unavailable: {"phase":"pre-launch","status":"degraded"}"#
-            .to_string();
+        let err = client::ApiError::NotYetAvailable { status: 503 };
         let response = request_failure("collections list", err);
         assert!(!response.ok);
         assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
         assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
     }
 
+    /// Generic 500 without failure_class → Http5xx → Bug
     #[test]
     fn classifier_keeps_generic_500_as_bug() {
-        // Regression guard: a generic server error without the pre-launch
-        // markers still classifies as FAIL_BUG, not FAIL_UNSUPPORTED.
-        let err = r#"HTTP 500 Internal Server Error: {"error":"database connection lost"}"#
-            .to_string();
+        let err = client::ApiError::Http5xx {
+            status: 500,
+            body: serde_json::json!({"error": "database connection lost"}),
+        };
         let response = request_failure("collections list", err);
         assert_eq!(response.failure_class, Some(FailureClass::Bug));
         assert_eq!(response.exit_code, EXIT_FAILURE);
     }
 
     // -------------------------------------------------------------------------
-    // CLI-TIER-005 (ENS-60): prefer server-provided failure_class
+    // Server-supplied failure_class (typed path, formerly ENS-60 / CLI-TIER-005)
     // -------------------------------------------------------------------------
 
+    /// ServerClassified with FAIL_PLAN_REQUIRED → PlanRequired
     #[test]
     fn classifier_uses_server_failure_class_when_present() {
-        // Happy path: server returns FAIL_PLAN_REQUIRED and the CLI honors it.
-        let err = r#"HTTP 402 Payment Required: {"error":"plan_required","message":"backups require the professional plan","failure_class":"FAIL_PLAN_REQUIRED","required_plan":"professional","current_plan":"free","upgrade_url":"https://enscrive.io/pricing"}"#
-            .to_string();
+        let err = client::ApiError::ServerClassified {
+            class: "FAIL_PLAN_REQUIRED".into(),
+            status: 402,
+            body: serde_json::json!({"error":"plan_required","required_plan":"professional"}),
+        };
         let response = request_failure("backup create", err);
         assert_eq!(response.failure_class, Some(FailureClass::PlanRequired));
         assert_eq!(response.exit_code, output::EXIT_PLAN_REQUIRED);
     }
 
+    /// ServerClassified with FAIL_LICENSE_INVALID → LicenseInvalid
     #[test]
     fn classifier_uses_server_failure_class_license_invalid() {
-        let err = r#"HTTP 401 Unauthorized: {"error":"license_invalid","failure_class":"FAIL_LICENSE_INVALID"}"#
-            .to_string();
+        let err = client::ApiError::ServerClassified {
+            class: "FAIL_LICENSE_INVALID".into(),
+            status: 401,
+            body: serde_json::json!({"error":"license_invalid"}),
+        };
         let response = request_failure("search", err);
         assert_eq!(response.failure_class, Some(FailureClass::LicenseInvalid));
         assert_eq!(response.exit_code, output::EXIT_LICENSE_INVALID);
     }
 
+    /// ServerClassified with FAIL_QUOTA_EXCEEDED → QuotaExceeded
     #[test]
     fn classifier_uses_server_failure_class_quota() {
-        let err = r#"HTTP 429 Too Many Requests: {"failure_class":"FAIL_QUOTA_EXCEEDED"}"#
-            .to_string();
+        let err = client::ApiError::ServerClassified {
+            class: "FAIL_QUOTA_EXCEEDED".into(),
+            status: 429,
+            body: serde_json::json!({}),
+        };
         let response = request_failure("embeddings query", err);
         assert_eq!(response.failure_class, Some(FailureClass::QuotaExceeded));
         assert_eq!(response.exit_code, output::EXIT_QUOTA_EXCEEDED);
     }
 
+    /// ServerClassified with FAIL_UNSUPPORTED_IN_LOCAL_MODE → UnsupportedInLocalMode
     #[test]
     fn classifier_uses_server_failure_class_unsupported_in_local_mode() {
-        let err = r#"HTTP 501 Not Implemented: {"failure_class":"FAIL_UNSUPPORTED_IN_LOCAL_MODE"}"#
-            .to_string();
+        let err = client::ApiError::ServerClassified {
+            class: "FAIL_UNSUPPORTED_IN_LOCAL_MODE".into(),
+            status: 501,
+            body: serde_json::json!({}),
+        };
         let response = request_failure("backup create", err);
         assert_eq!(
             response.failure_class,
@@ -7138,50 +7154,46 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
     }
 
+    /// ServerClassified with unknown class → Bug (no heuristic fallback)
     #[test]
-    fn classifier_falls_back_on_unknown_class() {
-        // Unknown server class → heuristics apply. "unsupported" keyword still
-        // present elsewhere in the message, so the heuristic classifies as
-        // Unsupported.
-        let err = r#"HTTP 500 Server Error: {"failure_class":"FAIL_BOGUS","message":"something unsupported"}"#
-            .to_string();
-        let response = request_failure("search", err);
-        assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
-    }
-
-    #[test]
-    fn classifier_falls_back_on_unknown_class_no_keywords() {
-        // Unknown server class with no heuristic keywords → Bug.
-        let err = r#"HTTP 500 Server Error: {"failure_class":"FAIL_BOGUS"}"#.to_string();
+    fn classifier_unknown_server_class_is_bug() {
+        let err = client::ApiError::ServerClassified {
+            class: "FAIL_BOGUS".into(),
+            status: 500,
+            body: serde_json::json!({"failure_class":"FAIL_BOGUS","message":"something"}),
+        };
         let response = request_failure("search", err);
         assert_eq!(response.failure_class, Some(FailureClass::Bug));
         assert_eq!(response.exit_code, EXIT_FAILURE);
     }
 
+    /// Http5xx with non-string failure_class in body → Bug (body doesn't carry class at ApiError level)
     #[test]
-    fn classifier_ignores_non_string_failure_class() {
-        // A non-string failure_class shouldn't short-circuit the heuristic.
-        let err = r#"HTTP 500 Server Error: {"failure_class":42}"#.to_string();
+    fn classifier_http5xx_is_always_bug() {
+        let err = client::ApiError::Http5xx {
+            status: 500,
+            body: serde_json::json!({"failure_class": 42}),
+        };
         let response = request_failure("search", err);
         assert_eq!(response.failure_class, Some(FailureClass::Bug));
     }
 
+    /// NotYetAvailable with no failure_class field → Unsupported
     #[test]
-    fn classifier_unchanged_when_no_failure_class_field() {
-        // Existing heuristic-driven behavior is preserved when the server
-        // body lacks a failure_class.
-        let err = r#"HTTP 503 Service Unavailable: {"error":"not_yet_available","phase":"pre-launch"}"#
-            .to_string();
+    fn classifier_not_yet_available_no_class_field() {
+        let err = client::ApiError::NotYetAvailable { status: 503 };
         let response = request_failure("health", err);
         assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
         assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
     }
 
+    /// InvalidResponse (unparseable body) → Bug
     #[test]
-    fn classifier_handles_unparseable_body() {
-        // Body with a '{' but malformed JSON — treated as "no server class",
-        // fall through to heuristics (which map generic 500s to Bug).
-        let err = r#"HTTP 500 Internal Server Error: {this is not json"#.to_string();
+    fn classifier_invalid_response_is_bug() {
+        let err = client::ApiError::InvalidResponse {
+            status: 500,
+            body: "{this is not json".into(),
+        };
         let response = request_failure("search", err);
         assert_eq!(response.failure_class, Some(FailureClass::Bug));
     }

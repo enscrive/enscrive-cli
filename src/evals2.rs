@@ -12,8 +12,8 @@
 use clap::{Args, Subcommand};
 use serde_json::{json, Value};
 
-use crate::client::EnscriveClient;
-use crate::output::{CliResponse, FailureClass, OutputFormat, EXIT_CONFIG};
+use crate::client::{ApiError, EnscriveClient};
+use crate::output::{CliResponse, FailureClass, OutputFormat, EXIT_CONFIG, EXIT_FAILURE};
 
 // ──────────────────────────────────────────────────────────────────────────
 // Subcommand trees
@@ -781,21 +781,39 @@ pub async fn run_voice_diff(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// Error helpers
+// Error helpers — ENS-84: typed ApiError replaces string heuristics
 // ──────────────────────────────────────────────────────────────────────────
 
-fn request_failure(command: &'static str, e: String) -> CliResponse {
-    let class = classify_error(&e);
-    CliResponse::fail(command, e, class, crate::output::EXIT_FAILURE)
-}
-
-fn classify_error(e: &str) -> FailureClass {
-    let lower = e.to_ascii_lowercase();
-    if lower.contains("501") || lower.contains("not_implemented") {
-        FailureClass::Unimplemented
-    } else if lower.contains("unsupported") {
-        FailureClass::Unsupported
-    } else {
-        FailureClass::Bug
-    }
+fn request_failure(command: &'static str, e: ApiError) -> CliResponse {
+    use crate::output::{EXIT_UNSUPPORTED, EXIT_PLAN_REQUIRED, EXIT_QUOTA_EXCEEDED,
+                        EXIT_CONFIRMATION_REQUIRED, EXIT_LICENSE_INVALID};
+    let (class, exit_code) = match &e {
+        ApiError::NotYetAvailable { .. } => (FailureClass::Unsupported, EXIT_UNSUPPORTED),
+        ApiError::Timeout | ApiError::Network(_) | ApiError::InvalidResponse { .. }
+        | ApiError::Http4xx { .. } | ApiError::Http5xx { .. } => (FailureClass::Bug, EXIT_FAILURE),
+        ApiError::ServerClassified { class, .. } => {
+            let fc = match class.as_str() {
+                "FAIL_BUG" => FailureClass::Bug,
+                "FAIL_UNSUPPORTED" => FailureClass::Unsupported,
+                "FAIL_UNSUPPORTED_IN_LOCAL_MODE" => FailureClass::UnsupportedInLocalMode,
+                "FAIL_PLAN_REQUIRED" => FailureClass::PlanRequired,
+                "FAIL_CONFIRMATION_REQUIRED" => FailureClass::ConfirmationRequired,
+                "FAIL_QUOTA_EXCEEDED" => FailureClass::QuotaExceeded,
+                "FAIL_LICENSE_INVALID" => FailureClass::LicenseInvalid,
+                "FAIL_UNIMPLEMENTED" => FailureClass::Unimplemented,
+                "FAIL_FALSE_CLAIM" => FailureClass::FalseClaim,
+                _ => FailureClass::Bug,
+            };
+            let code = match fc {
+                FailureClass::Unsupported | FailureClass::UnsupportedInLocalMode => EXIT_UNSUPPORTED,
+                FailureClass::PlanRequired => EXIT_PLAN_REQUIRED,
+                FailureClass::ConfirmationRequired => EXIT_CONFIRMATION_REQUIRED,
+                FailureClass::QuotaExceeded => EXIT_QUOTA_EXCEEDED,
+                FailureClass::LicenseInvalid => EXIT_LICENSE_INVALID,
+                _ => EXIT_FAILURE,
+            };
+            (fc, code)
+        }
+    };
+    CliResponse::fail(command, e.to_string(), class, exit_code)
 }
