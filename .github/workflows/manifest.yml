@@ -1,0 +1,303 @@
+name: manifest
+
+# ENS-91 / RB-005 — Manifest generator + publication workflow.
+# Operator-dispatched: must only run after all four per-repo release workflows
+# have completed for the given version tag. No push trigger by design.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (e.g. v0.1.0-beta.1)"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+  AWS_ROLE_ARN: arn:aws:iam::535002853127:role/enscrive-releases-publisher
+  S3_BUCKET: enscrive-install-artifacts-dev
+  CF_DISTRIBUTION_ID: EWE9BH1POOS0A
+  CHANNEL: dev
+
+jobs:
+  generate-manifest:
+    name: generate and publish manifest
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout enscrive-cli at version tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.version }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ---------------------------------------------------------------------------
+      # Gate: verify all expected artifacts exist in S3 before generating a manifest.
+      # Fail fast if any binary is missing — partial manifests must not be published.
+      # ---------------------------------------------------------------------------
+      - name: Verify all artifacts exist in S3
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          declare -A BINARIES
+          BINARIES["enscrive-cli"]="enscrive"
+          BINARIES["enscrive-developer"]="enscrive-developer"
+          BINARIES["enscrive-observe"]="enscrive-observe"
+          BINARIES["enscrive-embed"]="enscrive-embed"
+
+          TARGETS=(
+            x86_64-unknown-linux-gnu
+            aarch64-unknown-linux-gnu
+            x86_64-unknown-linux-musl
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+          )
+
+          MISSING=0
+          for REPO in "${!BINARIES[@]}"; do
+            BINARY="${BINARIES[$REPO]}"
+            for TARGET in "${TARGETS[@]}"; do
+              KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}"
+              echo "Checking s3://${S3_BUCKET}/${KEY} ..."
+              if ! aws s3api head-object \
+                    --bucket "${S3_BUCKET}" \
+                    --key "${KEY}" \
+                    --output json > /dev/null 2>&1; then
+                echo "MISSING: s3://${S3_BUCKET}/${KEY}"
+                MISSING=$((MISSING + 1))
+              fi
+            done
+          done
+
+          if [[ $MISSING -gt 0 ]]; then
+            echo "ERROR: ${MISSING} artifact(s) missing from S3. Cannot generate manifest."
+            exit 1
+          fi
+
+          echo "All artifacts verified present in S3."
+
+      # ---------------------------------------------------------------------------
+      # Collect SHA256 and size for every artifact.
+      # sha256 files contain "<hash>  <filename>" — we strip the filename.
+      # size_bytes comes from head-object ContentLength.
+      # ---------------------------------------------------------------------------
+      - name: Collect SHA256 and size metadata
+        id: metadata
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p /tmp/manifest-work
+
+          declare -A BINARIES
+          BINARIES["enscrive-cli"]="enscrive"
+          BINARIES["enscrive-developer"]="enscrive-developer"
+          BINARIES["enscrive-observe"]="enscrive-observe"
+          BINARIES["enscrive-embed"]="enscrive-embed"
+
+          TARGETS=(
+            x86_64-unknown-linux-gnu
+            aarch64-unknown-linux-gnu
+            x86_64-unknown-linux-musl
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+          )
+
+          # Emit one line per artifact: REPO TARGET BINARY SHA256 SIZE_BYTES
+          METADATA_FILE="/tmp/manifest-work/metadata.tsv"
+          : > "${METADATA_FILE}"
+
+          for REPO in "${!BINARIES[@]}"; do
+            BINARY="${BINARIES[$REPO]}"
+            for TARGET in "${TARGETS[@]}"; do
+              KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}"
+              SHA256_KEY="${KEY}.sha256"
+
+              # Capture sha256 (strip trailing filename if present)
+              RAW_HASH=$(aws s3 cp "s3://${S3_BUCKET}/${SHA256_KEY}" - 2>/dev/null | awk '{print $1}')
+              if [[ -z "${RAW_HASH}" ]]; then
+                echo "ERROR: could not read SHA256 for ${SHA256_KEY}"
+                exit 1
+              fi
+
+              # Capture size from head-object ContentLength on the binary
+              SIZE_BYTES=$(aws s3api head-object \
+                --bucket "${S3_BUCKET}" \
+                --key "${KEY}" \
+                --query 'ContentLength' \
+                --output text)
+
+              echo -e "${REPO}\t${TARGET}\t${BINARY}\t${RAW_HASH}\t${SIZE_BYTES}" >> "${METADATA_FILE}"
+            done
+          done
+
+          echo "Metadata collection complete."
+          cat "${METADATA_FILE}"
+
+      # ---------------------------------------------------------------------------
+      # Generate manifest.json from collected metadata.
+      # Schema per DESIGN.md §2.3 — channel-first URL convention per §2.2.
+      # ---------------------------------------------------------------------------
+      - name: Generate manifest.json
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          METADATA_FILE="/tmp/manifest-work/metadata.tsv"
+          MANIFEST_FILE="/tmp/manifest-work/manifest.json"
+          GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          BASE_URL="https://dev.enscrive.io"
+
+          # Derive channel label for the manifest's "channel" field.
+          # Tags like v0.1.0-beta.x map to "beta"; others to "internal" for now.
+          if [[ "${VERSION}" == *-beta* ]]; then
+            CHANNEL_LABEL="beta"
+          elif [[ "${VERSION}" == *-alpha* ]]; then
+            CHANNEL_LABEL="internal"
+          elif [[ "${VERSION}" == *-rc* ]]; then
+            CHANNEL_LABEL="beta"
+          else
+            CHANNEL_LABEL="stable"
+          fi
+
+          # Declare repo-to-binary mapping in jq-friendly form.
+          # We build a JSON structure per binary, then merge at the end.
+          declare -A BINARIES
+          BINARIES["enscrive-cli"]="enscrive"
+          BINARIES["enscrive-developer"]="enscrive-developer"
+          BINARIES["enscrive-observe"]="enscrive-observe"
+          BINARIES["enscrive-embed"]="enscrive-embed"
+
+          # Build per-binary platform objects via jq.
+          # Start with an empty binaries object and accumulate.
+          BINARIES_JSON="{}"
+
+          for REPO in "${!BINARIES[@]}"; do
+            BINARY="${BINARIES[$REPO]}"
+
+            # Extract rows for this binary from the TSV
+            PLATFORMS_JSON="{}"
+            while IFS=$'\t' read -r ROW_REPO ROW_TARGET ROW_BINARY ROW_SHA256 ROW_SIZE; do
+              [[ "${ROW_REPO}" != "${REPO}" ]] && continue
+
+              ARTIFACT_URL="${BASE_URL}/releases/${CHANNEL}/${VERSION}/${ROW_TARGET}/${ROW_BINARY}"
+
+              PLATFORM_ENTRY=$(jq -n \
+                --arg url "${ARTIFACT_URL}" \
+                --arg sha256 "${ROW_SHA256}" \
+                --argjson size "${ROW_SIZE}" \
+                '{"url": $url, "sha256": $sha256, "size_bytes": $size}')
+
+              PLATFORMS_JSON=$(echo "${PLATFORMS_JSON}" | jq \
+                --arg target "${ROW_TARGET}" \
+                --argjson entry "${PLATFORM_ENTRY}" \
+                '. + {($target): $entry}')
+            done < "${METADATA_FILE}"
+
+            BINARY_ENTRY=$(jq -n \
+              --arg source_version "${VERSION}" \
+              --argjson platforms "${PLATFORMS_JSON}" \
+              '{"source_version": $source_version, "platforms": $platforms}')
+
+            BINARIES_JSON=$(echo "${BINARIES_JSON}" | jq \
+              --arg binary "${BINARY}" \
+              --argjson entry "${BINARY_ENTRY}" \
+              '. + {($binary): $entry}')
+          done
+
+          # Assemble final manifest
+          jq -n \
+            --argjson schema_version 1 \
+            --arg version "${VERSION}" \
+            --arg released_at "${GENERATED_AT}" \
+            --arg channel "${CHANNEL_LABEL}" \
+            --argjson binaries "${BINARIES_JSON}" \
+            --arg min_cli_version "${VERSION}" \
+            '{
+              "schema_version": $schema_version,
+              "version": $version,
+              "released_at": $released_at,
+              "channel": $channel,
+              "binaries": $binaries,
+              "compatibility": {
+                "min_cli_version": $min_cli_version
+              },
+              "signature": null
+            }' > "${MANIFEST_FILE}"
+
+          echo "Generated manifest.json:"
+          cat "${MANIFEST_FILE}"
+
+      # ---------------------------------------------------------------------------
+      # Publish: upload to both versioned and current-pointer S3 paths, then
+      # invalidate CloudFront so both URLs reflect the new manifest immediately.
+      # ---------------------------------------------------------------------------
+      - name: Upload manifest.json to S3 (versioned + current pointer)
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          MANIFEST_FILE="/tmp/manifest-work/manifest.json"
+
+          # Versioned copy — immutable, keep forever
+          aws s3 cp \
+            "${MANIFEST_FILE}" \
+            "s3://${S3_BUCKET}/releases/${CHANNEL}/${VERSION}/manifest.json" \
+            --content-type "application/json" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          # Current pointer — short TTL so consumers pick up new releases promptly
+          aws s3 cp \
+            "${MANIFEST_FILE}" \
+            "s3://${S3_BUCKET}/releases/${CHANNEL}/latest.json" \
+            --content-type "application/json" \
+            --cache-control "public, max-age=300"
+
+          echo "Manifest uploaded to:"
+          echo "  s3://${S3_BUCKET}/releases/${CHANNEL}/${VERSION}/manifest.json"
+          echo "  s3://${S3_BUCKET}/releases/${CHANNEL}/latest.json"
+
+      - name: Invalidate CloudFront cache and wait
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          INVALIDATION_ID=$(aws cloudfront create-invalidation \
+            --distribution-id "${CF_DISTRIBUTION_ID}" \
+            --paths \
+              "/releases/${CHANNEL}/latest.json" \
+              "/releases/${CHANNEL}/${VERSION}/manifest.json" \
+            --query 'Invalidation.Id' \
+            --output text)
+
+          echo "CloudFront invalidation created: ${INVALIDATION_ID}"
+          echo "Waiting for invalidation to complete..."
+
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "${CF_DISTRIBUTION_ID}" \
+            --id "${INVALIDATION_ID}"
+
+          echo "CloudFront invalidation complete."
+
+      - name: manifest published
+        run: echo "manifest published"
