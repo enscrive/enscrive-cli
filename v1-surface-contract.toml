@@ -163,6 +163,15 @@ note = "J-020 — vector-space metrics (density, diversity, drift)"
 deployment_tier = "any-mode"
 required_plan = "free"
 
+[[endpoint]]
+method = "POST"
+path = "/v1/collections/materialize-from-dataset"
+cli_command = "collections materialize-from-dataset"
+status = "implemented"
+note = "ENS-104 — materialize a collection from a dataset URL"
+deployment_tier = "any-mode"
+required_plan = "free"
+
 # ── Ingestion ───────────────────────────────────────────
 
 [[endpoint]]
