@@ -764,12 +764,14 @@ pub async fn fetch(opts: DeployFetchOptions) -> Result<Value, String> {
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| default_release_manifest_url(&profile.target).to_string());
-            let platform = detect_release_platform()?;
+            let platform = crate::release_channel::current_target();
             let manifest = fetch_release_manifest(&manifest_url).await?;
-            let platform_release = manifest.platforms.get(&platform).ok_or_else(|| {
-                format!(
-                    "release manifest '{}' does not define platform '{}'",
-                    manifest_url, platform
+            let platform_release = manifest.platforms.get(platform).ok_or_else(|| {
+                let available: Vec<String> = manifest.platforms.keys().cloned().collect();
+                crate::release_channel::format_platform_missing(
+                    &manifest_url,
+                    platform,
+                    &available,
                 )
             })?;
 
@@ -821,7 +823,7 @@ pub async fn fetch(opts: DeployFetchOptions) -> Result<Value, String> {
             }))
         }
         DeployFetchSource::LocalBuild => {
-            let platform = detect_release_platform()?;
+            let platform = crate::release_channel::current_target();
             let artifacts = stage_local_build_artifacts(
                 &bin_dir,
                 &site_root,
@@ -1670,20 +1672,6 @@ async fn fetch_release_manifest(manifest_url: &str) -> Result<ReleaseManifest, S
             summarize_manifest_response(manifest_url, content_type.as_deref(), &body)
         )
     })
-}
-
-fn detect_release_platform() -> Result<String, String> {
-    let os = match env::consts::OS {
-        "linux" => "linux",
-        "macos" => "darwin",
-        other => return Err(format!("unsupported operating system '{}'", other)),
-    };
-    let arch = match env::consts::ARCH {
-        "x86_64" => "x86_64",
-        "aarch64" => "aarch64",
-        other => return Err(format!("unsupported architecture '{}'", other)),
-    };
-    Ok(format!("{os}-{arch}"))
 }
 
 fn looks_like_html(content_type: Option<&str>, body: &[u8]) -> bool {
@@ -4112,25 +4100,30 @@ exit 1
         }
         let site_bytes = fs::read(&site_archive).unwrap();
 
+        // Use the compile-time target triple so the test exercises whatever
+        // platform the test binary is actually running on (ENS-103).
+        let platform = crate::release_channel::current_target();
+        let base_path = format!("/releases/stage/0.0.0-stage/{platform}");
+
         let mut responses: HashMap<String, (String, Vec<u8>)> = HashMap::new();
         responses.insert(
-            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive".into(),
+            format!("{base_path}/enscrive"),
             ("application/octet-stream".into(), cli_bytes.clone()),
         );
         responses.insert(
-            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive-developer".into(),
+            format!("{base_path}/enscrive-developer"),
             ("application/octet-stream".into(), developer_bytes.clone()),
         );
         responses.insert(
-            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive-observe".into(),
+            format!("{base_path}/enscrive-observe"),
             ("application/octet-stream".into(), observe_bytes.clone()),
         );
         responses.insert(
-            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive-embed".into(),
+            format!("{base_path}/enscrive-embed"),
             ("application/octet-stream".into(), embed_bytes.clone()),
         );
         responses.insert(
-            "/releases/stage/0.0.0-stage/linux-x86_64/enscrive-developer-site.tar.gz".into(),
+            format!("{base_path}/enscrive-developer-site.tar.gz"),
             ("application/gzip".into(), site_bytes.clone()),
         );
 
@@ -4141,39 +4134,39 @@ exit 1
             "install_endpoint": format!("{server}/install"),
             "managed_endpoint": "https://stage.api.enscrive.io",
             "platforms": {
-                "linux-x86_64": {
+                platform: {
                     "artifacts": [
                         {
                             "name": "enscrive",
-                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive"),
+                            "url": format!("{server}{base_path}/enscrive"),
                             "sha256": sha256_hex(&cli_bytes),
                             "mode": "0755",
                             "size_bytes": cli_bytes.len()
                         },
                         {
                             "name": "enscrive-developer",
-                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive-developer"),
+                            "url": format!("{server}{base_path}/enscrive-developer"),
                             "sha256": sha256_hex(&developer_bytes),
                             "mode": "0755",
                             "size_bytes": developer_bytes.len()
                         },
                         {
                             "name": "enscrive-observe",
-                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive-observe"),
+                            "url": format!("{server}{base_path}/enscrive-observe"),
                             "sha256": sha256_hex(&observe_bytes),
                             "mode": "0755",
                             "size_bytes": observe_bytes.len()
                         },
                         {
                             "name": "enscrive-embed",
-                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive-embed"),
+                            "url": format!("{server}{base_path}/enscrive-embed"),
                             "sha256": sha256_hex(&embed_bytes),
                             "mode": "0755",
                             "size_bytes": embed_bytes.len()
                         },
                         {
                             "name": "enscrive-developer-site.tar.gz",
-                            "url": format!("{server}/releases/stage/0.0.0-stage/linux-x86_64/enscrive-developer-site.tar.gz"),
+                            "url": format!("{server}{base_path}/enscrive-developer-site.tar.gz"),
                             "sha256": sha256_hex(&site_bytes),
                             "mode": "0644",
                             "size_bytes": site_bytes.len()
