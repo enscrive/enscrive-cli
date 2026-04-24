@@ -1,6 +1,7 @@
 mod client;
 mod deploy;
 mod evals2;
+mod fetch_verify;
 mod license;
 mod local;
 mod output;
@@ -301,6 +302,17 @@ struct InitArgs {
     /// Set this profile as the default CLI profile
     #[arg(long, default_value_t = false)]
     set_default: bool,
+
+    /// Override the release manifest URL. Defaults to
+    /// `https://enscrive.io/releases/manifest.json`. Supports `file://` for
+    /// offline harnesses. Also reads `ENSCRIVE_MANIFEST_URL`.
+    #[arg(long = "manifest-url", env = "ENSCRIVE_MANIFEST_URL")]
+    manifest_url: Option<String>,
+
+    /// Re-download service binaries even if they already exist and match the
+    /// manifest SHA256.
+    #[arg(long = "force-refetch", default_value_t = false)]
+    force_refetch: bool,
 }
 
 #[derive(Args)]
@@ -3342,6 +3354,8 @@ async fn main() {
                         bge_api_key: args.bge_api_key.clone(),
                         bge_model_name: args.bge_model_name.clone(),
                         set_default: args.set_default,
+                        manifest_url: args.manifest_url.clone(),
+                        force_refetch: args.force_refetch,
                     })
                     .await
                 }
