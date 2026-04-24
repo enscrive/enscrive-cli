@@ -150,6 +150,28 @@ When you run a Pro-gated command on a free profile, the CLI tells you so clearly
 
 ---
 
+## Capability tiers
+
+**Free self-hosted** commands:
+- `enscrive search`, `enscrive collections list`, `enscrive ingest`
+
+**Professional** commands add:
+- `enscrive evals run`, `enscrive voices promote`, `enscrive backup`
+
+**Enterprise** commands add:
+- `enscrive admin rate-limits`
+
+License activation and plan validation:
+- `enscrive license activate` — activate a Pro or Enterprise license on self-hosted
+- `enscrive license status` — check current plan and expiry
+- `enscrive license deactivate` — deactivate the current license
+
+Managed mode automatically derives the plan from your Enscrive account.
+
+For a complete feature matrix: [enscrive.io/pricing](https://enscrive.io/pricing).
+
+---
+
 ## Output contract
 
 Every command supports a stable JSON output shape for automation:
