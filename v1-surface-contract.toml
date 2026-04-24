@@ -633,6 +633,15 @@ deployment_tier = "any-mode"
 required_plan = "professional"
 
 [[endpoint]]
+method = "POST"
+path = "/v1/datasets"
+cli_command = "datasets create"
+status = "implemented"
+note = "EV-013 Sprint B — create dataset from HuggingFace BeIR URL"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
 method = "GET"
 path = "/v1/datasets/{id}"
 cli_command = "datasets get"
