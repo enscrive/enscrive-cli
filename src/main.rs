@@ -774,6 +774,12 @@ enum CollectionsSubcommand {
 
     /// Delete a specific pending staged change
     PendingDelete(CollectionsPendingDeleteArgs),
+
+    /// Materialize a purpose-built collection from a dataset's selected
+    /// corpus subset (ENS-104). Closes the rapid-voice-iteration gap in
+    /// the 5-step E2E evals vision: an 83-doc stratified sample re-embeds
+    /// in seconds instead of hours.
+    MaterializeFromDataset(CollectionsMaterializeFromDatasetArgs),
 }
 
 /// CLI-TIER-013: args for `enscrive collections delete`.
@@ -845,6 +851,27 @@ struct CollectionsCommitsArgs {
     /// Maximum number of commits to return (1–200, default 50).
     #[arg(long, default_value_t = 50)]
     limit: i64,
+}
+
+/// ENS-104: Arguments for `enscrive collections materialize-from-dataset`.
+#[derive(Args)]
+struct CollectionsMaterializeFromDatasetArgs {
+    /// Dataset UUID whose selected corpus subset drives the ingest.
+    #[arg(long = "dataset-id")]
+    dataset_id: String,
+
+    /// Name for the new collection.
+    #[arg(long = "name")]
+    collection_name: String,
+
+    /// Optional description for the new collection.
+    #[arg(long = "description")]
+    collection_description: Option<String>,
+
+    /// Voice UUID whose chunking + embedding config drives the ingest.
+    /// When omitted, a baseline text-embedding-3-small config is used.
+    #[arg(long = "voice-id")]
+    voice_id: Option<String>,
 }
 
 /// J-020: Arguments for `enscrive collections metrics`.
@@ -3407,6 +3434,29 @@ async fn main() {
                     match client.delete_json(&path).await {
                         Ok(data) => CliResponse::success("collections pending delete", data).emit(fmt),
                         Err(e) => request_failure("collections pending delete", e).emit(fmt),
+                    }
+                }
+                // ENS-104: materialize a purpose-built collection from a dataset.
+                CollectionsSubcommand::MaterializeFromDataset(args) => {
+                    let mut body = serde_json::Map::new();
+                    body.insert("dataset_id".into(), json!(args.dataset_id));
+                    body.insert("collection_name".into(), json!(args.collection_name));
+                    if let Some(desc) = &args.collection_description {
+                        body.insert("collection_description".into(), json!(desc));
+                    }
+                    if let Some(vid) = &args.voice_id {
+                        body.insert("voice_id".into(), json!(vid));
+                    }
+                    match client
+                        .post_json("/v1/collections/materialize-from-dataset", json!(body))
+                        .await
+                    {
+                        Ok(data) => {
+                            CliResponse::success("collections materialize-from-dataset", data)
+                                .emit(fmt)
+                        }
+                        Err(e) => request_failure("collections materialize-from-dataset", e)
+                            .emit(fmt),
                     }
                 }
                 // J-020: vector-space metrics endpoint.
