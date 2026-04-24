@@ -905,6 +905,12 @@ enum VoicesSubcommand {
     /// Create a voice
     Create(CreateVoiceArgs),
 
+    /// Update a voice (full config replace; bumps version and appends to the
+    /// voice_versions audit table). Retrieval-only changes apply instantly;
+    /// chunking + embedding changes invalidate the target collection's
+    /// corpus — run `voices diff2 diff-cost` first to estimate re-embed.
+    Update(UpdateVoiceArgs),
+
     /// Delete a voice
     ///
     /// Destructive. Requires `--confirm` (CLI-TIER-013); interactive TTY
@@ -999,6 +1005,30 @@ struct CreateVoiceArgs {
     /// Path to a JSON file containing the VoiceConfigApi object
     #[arg(long, conflicts_with = "config_json")]
     config_file: Option<String>,
+}
+
+#[derive(Args)]
+#[command(after_long_help = CREATE_VOICE_AFTER_HELP)]
+struct UpdateVoiceArgs {
+    /// Voice id to update.
+    #[arg(long)]
+    id: String,
+
+    /// JSON string containing the replacement VoiceConfigApi object.
+    #[arg(long, conflicts_with = "config_file")]
+    config_json: Option<String>,
+
+    /// Path to a JSON file containing the replacement VoiceConfigApi object.
+    #[arg(long, conflicts_with = "config_json")]
+    config_file: Option<String>,
+
+    /// Required acknowledgment when the change is corpus-invalidating
+    /// (chunking / embedding touched). Safety interlock for expensive
+    /// re-embeds — run `voices diff2 diff-cost --against <v> --collection <id>`
+    /// first to see the $ and wall-clock estimate. Ignored for query-only
+    /// changes.
+    #[arg(long = "confirm-re-embed", default_value_t = false)]
+    confirm_re_embed: bool,
 }
 
 #[derive(Args)]
@@ -3423,6 +3453,76 @@ async fn main() {
                             CliResponse::fail("voices create", e, FailureClass::Bug, EXIT_CONFIG)
                                 .emit(fmt)
                         }
+                    }
+                }
+                VoicesSubcommand::Update(args) => {
+                    let config = match parse_config_source(&args.config_json, &args.config_file) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            CliResponse::fail("voices update", e, FailureClass::Bug, EXIT_CONFIG)
+                                .emit(fmt);
+                        }
+                    };
+
+                    // Preview: call diff-proposal to classify impact before
+                    // the expensive PUT path. Gate corpus-invalidating updates
+                    // behind --confirm-re-embed so an agent that sets only
+                    // retrieval fields isn't penalized with a rejection.
+                    let diff_path = format!("/v1/voices/{}/diff-proposal", args.id);
+                    let diff = match client.post_json(&diff_path, config.clone()).await {
+                        Ok(d) => d,
+                        Err(e) => request_failure("voices update (diff preview)", e).emit(fmt),
+                    };
+                    let impact = diff
+                        .get("impact")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    if impact == "corpus_invalidating" && !args.confirm_re_embed {
+                        let changed = diff
+                            .get("changed_fields")
+                            .and_then(|v| v.as_array())
+                            .map(|a| a.len())
+                            .unwrap_or(0);
+                        let reasoning = diff
+                            .get("reasoning")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("corpus-invalidating voice change")
+                            .to_string();
+                        CliResponse::fail(
+                            "voices update",
+                            format!(
+                                "refusing corpus-invalidating update without --confirm-re-embed \
+                                 ({changed} field(s) affected). {reasoning}. \
+                                 Run `enscrive voices diff2 diff-cost --id {} --against <v> \
+                                 --collection <uuid>` to estimate the re-embed cost first.",
+                                args.id
+                            ),
+                            FailureClass::Bug,
+                            EXIT_CONFIG,
+                        )
+                        .emit(fmt);
+                    }
+
+                    let body = json!({ "config": config });
+                    let path = format!("/v1/voices/{}", args.id);
+                    match client.put_json(&path, body).await {
+                        Ok(data) => {
+                            let mut out = match data {
+                                Value::Object(m) => m,
+                                other => {
+                                    let mut m = Map::new();
+                                    m.insert("voice".to_string(), other);
+                                    m
+                                }
+                            };
+                            out.insert("diff_preview".to_string(), diff);
+                            CliResponse::success(
+                                "voices update",
+                                Value::Object(out),
+                            )
+                            .emit(fmt)
+                        }
+                        Err(e) => request_failure("voices update", e).emit(fmt),
                     }
                 }
                 VoicesSubcommand::Delete(args) => {
