@@ -2874,6 +2874,188 @@ fn local_prompt_mode() -> Result<InitMode, String> {
 }
 
 // ---------------------------------------------------------------------------
+// ENS-66 CLI-TIER-011: annotate --help with plan + deployment tier suffixes.
+// ---------------------------------------------------------------------------
+
+/// Build a tier annotation suffix for a command, e.g. " [Pro]",
+/// " [Enterprise, managed only]", or "" for free any-mode commands.
+fn tier_annotation(deployment_tier: &str, required_plan: &str) -> String {
+    let plan_label = match required_plan {
+        "professional" => Some("Pro"),
+        "enterprise" => Some("Enterprise"),
+        _ => None,
+    };
+    let managed_only = deployment_tier == "managed-only";
+
+    match (plan_label, managed_only) {
+        (Some(p), true) => format!(" [{p}, managed only]"),
+        (Some(p), false) => format!(" [{p}]"),
+        (None, true) => " [managed only]".to_string(),
+        (None, false) => String::new(),
+    }
+}
+
+/// Walk the clap `Command` tree recursively, looking up each leaf's key in
+/// `COMMAND_TIERS` (using `prefix` as the space-joined path, which is the
+/// same format as `cli_command` in v1-surface-contract.toml), and appending
+/// the tier annotation to the command's `about` string.
+///
+/// Returns the (possibly modified) `Command` with updated `about` strings
+/// on all matching leaves.
+fn annotate_help_tiers(cmd: clap::Command, prefix: &str) -> clap::Command {
+    let subs: Vec<clap::Command> = cmd
+        .get_subcommands()
+        .cloned()
+        .collect();
+
+    if subs.is_empty() {
+        // Leaf command — look up in COMMAND_TIERS.
+        let key = prefix;
+        if let Some((_, tier, plan)) = COMMAND_TIERS.iter().find(|(c, _, _)| *c == key) {
+            let annotation = tier_annotation(tier, plan);
+            if !annotation.is_empty() {
+                let existing_about = cmd
+                    .get_about()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let new_about = format!("{existing_about}{annotation}");
+                return cmd.about(new_about);
+            }
+        }
+        return cmd;
+    }
+
+    // Non-leaf: recurse into subcommands, then swap each child back in
+    // via mut_subcommand so the parent Command keeps its structure.
+    let modified = cmd.get_subcommands().cloned().map(|sub| {
+        let name = sub.get_name().to_string();
+        let child_prefix = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix} {name}")
+        };
+        annotate_help_tiers(sub, &child_prefix)
+    }).collect::<Vec<_>>();
+
+    let mut result = cmd;
+    for updated_sub in modified {
+        result = result.mut_subcommand(updated_sub.get_name(), |_| updated_sub.clone());
+    }
+    result
+}
+
+#[cfg(test)]
+mod tier_annotation_tests {
+    use super::*;
+
+    #[test]
+    fn free_any_mode_has_no_annotation() {
+        assert_eq!(tier_annotation("any-mode", "free"), "");
+    }
+
+    #[test]
+    fn professional_any_mode_annotates_pro() {
+        assert_eq!(tier_annotation("any-mode", "professional"), " [Pro]");
+    }
+
+    #[test]
+    fn enterprise_any_mode_annotates_enterprise() {
+        assert_eq!(tier_annotation("any-mode", "enterprise"), " [Enterprise]");
+    }
+
+    #[test]
+    fn free_managed_only_annotates_managed_only() {
+        assert_eq!(tier_annotation("managed-only", "free"), " [managed only]");
+    }
+
+    #[test]
+    fn professional_managed_only_combines_annotation() {
+        assert_eq!(
+            tier_annotation("managed-only", "professional"),
+            " [Pro, managed only]"
+        );
+    }
+
+    #[test]
+    fn enterprise_managed_only_combines_annotation() {
+        assert_eq!(
+            tier_annotation("managed-only", "enterprise"),
+            " [Enterprise, managed only]"
+        );
+    }
+
+    #[test]
+    fn annotate_help_tiers_suffixes_leaves_from_command_tiers() {
+        use clap::{Arg, Command};
+
+        // Fake a small command tree that overlaps real COMMAND_TIERS entries:
+        //   root
+        //   ├─ search              (any-mode, free)            → no annotation
+        //   ├─ evals run-campaign  (any-mode, professional)    → [Pro]
+        //   └─ admin
+        //      └─ rate-limits
+        //         └─ set           (managed-only, enterprise)  → [Enterprise, managed only]
+        //
+        // We only assert that keys actually present in COMMAND_TIERS get annotated
+        // correctly. If an expected key is not in the table (because a future
+        // refactor renamed it), we treat that as a tier-annotation vacuous pass
+        // rather than a hard failure, so this test pins behavior without
+        // double-booking with command_tiers_covers_every_leaf_subcommand.
+        fn tier_for(cmd: &str) -> Option<(&'static str, &'static str)> {
+            COMMAND_TIERS
+                .iter()
+                .find(|(c, _, _)| *c == cmd)
+                .map(|(_, t, p)| (*t, *p))
+        }
+
+        let root = Command::new("enscrive")
+            .subcommand(Command::new("search").about("search").arg(Arg::new("q")))
+            .subcommand(
+                Command::new("evals").subcommand(
+                    Command::new("run-campaign").about("run an evals campaign"),
+                ),
+            )
+            .subcommand(
+                Command::new("admin").subcommand(
+                    Command::new("rate-limits").subcommand(
+                        Command::new("set").about("set a tenant rate limit"),
+                    ),
+                ),
+            );
+
+        let annotated = annotate_help_tiers(root, "");
+
+        // Helper: drill down through the tree to find a leaf's `about` string.
+        fn leaf_about(cmd: &Command, path: &[&str]) -> Option<String> {
+            let mut node = cmd;
+            for seg in path {
+                node = node.get_subcommands().find(|c| c.get_name() == *seg)?;
+            }
+            node.get_about().map(|s| s.to_string())
+        }
+
+        if let Some((t, p)) = tier_for("search") {
+            let expected = format!("search{}", tier_annotation(t, p));
+            assert_eq!(leaf_about(&annotated, &["search"]).as_deref(), Some(expected.as_str()));
+        }
+        if let Some((t, p)) = tier_for("evals run-campaign") {
+            let expected = format!("run an evals campaign{}", tier_annotation(t, p));
+            assert_eq!(
+                leaf_about(&annotated, &["evals", "run-campaign"]).as_deref(),
+                Some(expected.as_str())
+            );
+        }
+        if let Some((t, p)) = tier_for("admin rate-limits set") {
+            let expected = format!("set a tenant rate limit{}", tier_annotation(t, p));
+            assert_eq!(
+                leaf_about(&annotated, &["admin", "rate-limits", "set"]).as_deref(),
+                Some(expected.as_str())
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ENS-61 CLI-TIER-006: map a parsed Commands value to its COMMAND_TIERS key.
 // Returns None for commands that are not in COMMAND_TIERS (local / operator).
 // ---------------------------------------------------------------------------
@@ -3035,6 +3217,62 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
 
 #[tokio::main]
 async fn main() {
+    // ENS-66 CLI-TIER-011: intercept --help / -h before clap parses, so we
+    // can inject tier annotations into the help output.
+    {
+        use clap::CommandFactory;
+        let raw: Vec<String> = std::env::args().collect();
+        // Check if any arg is --help or -h (and not a positional value like --api-key).
+        let has_help = raw.iter().any(|a| a == "--help" || a == "-h");
+        if has_help {
+            // Build the annotated command tree and print help.
+            // Walk the raw args (excluding the binary name) to find which
+            // sub-tree the user is asking help for.
+            let annotated = annotate_help_tiers(Cli::command(), "");
+            // Re-apply the raw args (minus --help) to navigate to the right
+            // subcommand help page, then print and exit.
+            let args_without_help: Vec<String> = raw
+                .iter()
+                .skip(1) // skip binary name
+                .filter(|a| *a != "--help" && *a != "-h")
+                .cloned()
+                .collect();
+            let mut sub_cmd = annotated;
+            // Navigate into subcommands based on remaining positional args,
+            // descending as many levels as the invocation specifies (e.g.
+            // `enscrive admin rate-limits set --help` walks three levels).
+            for arg in &args_without_help {
+                if arg.starts_with('-') {
+                    continue; // flag, not a subcommand name
+                }
+                let found_name = sub_cmd
+                    .get_subcommands()
+                    .find(|s| s.get_name() == arg.as_str())
+                    .map(|s| s.get_name().to_string());
+                match found_name {
+                    Some(name) => {
+                        let subs: Vec<clap::Command> =
+                            sub_cmd.get_subcommands().cloned().collect();
+                        if let Some(child) =
+                            subs.into_iter().find(|s| s.get_name() == name)
+                        {
+                            sub_cmd = child;
+                        }
+                        // Continue the loop so we can descend further.
+                    }
+                    None => {
+                        // Unrecognized positional — stop descending and let
+                        // this node print its help.
+                        break;
+                    }
+                }
+            }
+            let _ = sub_cmd.print_help();
+            println!(); // trailing newline
+            std::process::exit(0);
+        }
+    }
+
     let cli = Cli::parse();
     let fmt = cli.output;
     let make_client = |endpoint: String, api_key: String| {

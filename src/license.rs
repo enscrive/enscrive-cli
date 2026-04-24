@@ -84,8 +84,6 @@ pub fn decode_jwt_payload_unverified(jwt: &str) -> Result<LicenseClaims, String>
 fn base64_decode_url(s: &str) -> Result<Vec<u8>, String> {
     // Replace URL-safe chars with standard base64.
     let standard = s.replace('-', "+").replace('_', "/");
-    use std::io::Read;
-    // Use the stdlib's built-in base64 decoder via a simple implementation.
     base64_decode_standard(&standard)
 }
 
