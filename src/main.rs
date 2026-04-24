@@ -4,6 +4,7 @@ mod evals2;
 mod license;
 mod local;
 mod output;
+mod preflight;
 mod release_channel;
 #[cfg(test)]
 mod test_support;
@@ -2872,6 +2873,166 @@ fn local_prompt_mode() -> Result<InitMode, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ENS-61 CLI-TIER-006: map a parsed Commands value to its COMMAND_TIERS key.
+// Returns None for commands that are not in COMMAND_TIERS (local / operator).
+// ---------------------------------------------------------------------------
+fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
+    use evals2::{Datasets2Subcommand, EvalDefsSubcommand, EvalRunsSubcommand, VoiceDiff2Subcommand};
+    let key: &str = match cmd {
+        Commands::Search(_) => "search",
+        Commands::Embeddings { sub } => match sub {
+            EmbeddingsSubcommand::Query(_) => "embeddings query",
+        },
+        Commands::Ingest { sub } => match sub {
+            IngestSubcommand::Prepared(_) => "ingest prepared",
+            IngestSubcommand::Documents(_) => "ingest documents",
+        },
+        Commands::Segment { sub } => match sub {
+            SegmentSubcommand::Document(_) => "segment document",
+        },
+        Commands::Analyze { sub } => match sub {
+            AnalyzeSubcommand::Content(_) => "analyze content",
+        },
+        Commands::Models { sub } => match sub {
+            ModelsSubcommand::List => "models list",
+            ModelsSubcommand::Show(_) => return None, // skip list
+        },
+        Commands::Collections { sub } => match sub {
+            CollectionsSubcommand::List => "collections list",
+            CollectionsSubcommand::Create(_) => "collections create",
+            CollectionsSubcommand::Update(_) => "collections update",
+            CollectionsSubcommand::Delete(_) => "collections delete",
+            CollectionsSubcommand::Stats { .. } => "collections stats",
+            CollectionsSubcommand::Documents { .. } => "collections documents",
+            CollectionsSubcommand::Chunks { .. } => "collections chunks",
+            CollectionsSubcommand::Stage(_) => "collections stage",
+            CollectionsSubcommand::Commit(_) => "collections commit",
+            CollectionsSubcommand::Pending(_) => "collections pending",
+            CollectionsSubcommand::PendingDelete(_) => "collections pending-delete",
+            // Local-only / skip-list commands:
+            CollectionsSubcommand::Get { .. }
+            | CollectionsSubcommand::Revert { .. }
+            | CollectionsSubcommand::Commits(_)
+            | CollectionsSubcommand::Metrics(_)
+            | CollectionsSubcommand::MaterializeFromDataset(_) => return None,
+        },
+        Commands::Voices { sub } => match sub {
+            VoicesSubcommand::List => "voices list",
+            VoicesSubcommand::Get { .. } => "voices get",
+            VoicesSubcommand::Create(_) => "voices create",
+            VoicesSubcommand::Update(_) => "voices update",
+            VoicesSubcommand::Delete(_) => "voices delete",
+            VoicesSubcommand::Compare(_) => "voices compare",
+            VoicesSubcommand::Promote(_) => "voices promote",
+            VoicesSubcommand::Search(_) => "voices search",
+            VoicesSubcommand::Gates { sub } => match sub {
+                VoiceGatesSubcommand::List { .. } => "voices gates list",
+                VoiceGatesSubcommand::Set(_) => "voices gates set",
+                VoiceGatesSubcommand::Delete(_) => "voices gates delete",
+            },
+            VoicesSubcommand::Diff2(d) => match d {
+                VoiceDiff2Subcommand::Diff(_) => return None,
+                VoiceDiff2Subcommand::DiffCost(_) => return None,
+                VoiceDiff2Subcommand::DiffProposal(_) => return None,
+            },
+        },
+        Commands::Evals { sub } => match sub {
+            EvalsSubcommand::Campaigns { sub } => match sub {
+                EvalCampaignsSubcommand::List => "evals campaigns list",
+                EvalCampaignsSubcommand::Get { .. } => "evals campaigns get",
+            },
+            EvalsSubcommand::RunCampaign(_) => "evals run-campaign",
+            EvalsSubcommand::RunCampaignStream(_) => "evals run-campaign-stream",
+            EvalsSubcommand::Import(_) => "evals import",
+            EvalsSubcommand::FromUrl(_) => "evals from-url",
+            EvalsSubcommand::Datasets { sub } => match sub {
+                EvalDatasetsSubcommand::List => "evals datasets list",
+                EvalDatasetsSubcommand::Create(_) => "evals datasets create",
+                EvalDatasetsSubcommand::Get { .. } => "evals datasets get",
+                EvalDatasetsSubcommand::Queries { .. } => "evals datasets queries",
+                EvalDatasetsSubcommand::Update(_) => "evals datasets update",
+                EvalDatasetsSubcommand::Delete { .. } => "evals datasets delete",
+            },
+            EvalsSubcommand::VoiceStatus { .. } => "evals voice-status",
+        },
+        Commands::Logs { sub } => match sub {
+            LogsSubcommand::Stream(_) => "logs stream",
+            LogsSubcommand::Search(_) => "logs search",
+            LogsSubcommand::Metrics(_) => "logs metrics",
+        },
+        Commands::Backup { sub } => match sub {
+            BackupSubcommand::Create => "backup create",
+            BackupSubcommand::List(_) => "backup list",
+            BackupSubcommand::Get { .. } => "backup get",
+            BackupSubcommand::Restore(_) => "backup restore",
+            BackupSubcommand::DryRun(_) => "backup dry-run",
+        },
+        Commands::Export { sub } => match sub {
+            ExportSubcommand::Tenant(_) => "export tenant",
+            ExportSubcommand::Embeddings(_) => "export embeddings",
+            ExportSubcommand::TokenUsage(_) => "export token-usage",
+        },
+        Commands::Usage(_) => "usage",
+        Commands::Jobs { sub } => match sub {
+            JobsSubcommand::List(_) => "jobs list",
+            JobsSubcommand::Get(_) => "jobs get",
+            JobsSubcommand::Cancel(_) => "jobs cancel",
+            // skip-list:
+            JobsSubcommand::Retry(_) | JobsSubcommand::Abandon(_) => return None,
+        },
+        Commands::BatchSets { sub } => match sub {
+            // skip-list:
+            BatchSetsSubcommand::List(_) | BatchSetsSubcommand::Get(_) => return None,
+        },
+        Commands::Admin { sub } => match sub {
+            AdminSubcommand::RateLimits { sub } => match sub {
+                // skip-list:
+                AdminRateLimitsSubcommand::Show(_) | AdminRateLimitsSubcommand::Set(_) => {
+                    return None
+                }
+            },
+        },
+        Commands::Datasets { sub } => match sub {
+            Datasets2Subcommand::List => return None,
+            Datasets2Subcommand::Get { .. } => return None,
+            Datasets2Subcommand::Describe { .. } => return None,
+            Datasets2Subcommand::Delete { .. } => return None,
+            Datasets2Subcommand::Upload(_) => return None,
+            Datasets2Subcommand::Create(_) => return None,
+        },
+        Commands::EvalDefs { sub } => match sub {
+            EvalDefsSubcommand::Create(_) => return None,
+            EvalDefsSubcommand::List => return None,
+            EvalDefsSubcommand::Get { .. } => return None,
+            EvalDefsSubcommand::Delete { .. } => return None,
+            EvalDefsSubcommand::Run(_) => return None,
+            EvalDefsSubcommand::Publish(_) => return None,
+            EvalDefsSubcommand::Publications { .. } => return None,
+            EvalDefsSubcommand::Unpublish { .. } => return None,
+            EvalDefsSubcommand::Runs { sub } => match sub {
+                EvalRunsSubcommand::List { .. } => return None,
+                EvalRunsSubcommand::Get { .. } => return None,
+                EvalRunsSubcommand::Diagnose(_) => return None,
+            },
+        },
+        // Local/operator/license commands: no tier gating.
+        Commands::Init(_)
+        | Commands::Start(_)
+        | Commands::Stop(_)
+        | Commands::Status(_)
+        | Commands::Health
+        | Commands::Deploy { .. }
+        | Commands::License { .. } => return None,
+    };
+    // Look up the computed key in COMMAND_TIERS to get a 'static reference.
+    COMMAND_TIERS
+        .iter()
+        .find(|(cmd, _, _)| *cmd == key)
+        .map(|(cmd, _, _)| *cmd)
+        .or(Some(key)) // If not in table, return the key anyway (gate will pass-through).
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -2899,6 +3060,38 @@ async fn main() {
             Err(e) => CliResponse::fail("", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt),
         },
     };
+
+    // ENS-61 CLI-TIER-006: pre-flight tier gate — runs before HTTP client
+    // construction. Rejects managed-only commands in local mode and plan-gated
+    // commands when the cached plan is below the required tier.
+    if let Some(cmd_key) = cmd_key_for_command(&cli.command) {
+        let deployment_mode = api_context
+            .as_ref()
+            .and_then(|ctx| ctx.profile_mode.as_deref())
+            .unwrap_or("local");
+        // cached_plan: not yet stored in profiles.toml — always None for now.
+        // When server-hint caching is added, read from StoredProfile here.
+        let cached_plan: Option<&str> = None;
+        // TODO: read cached_plan from profiles.toml StoredProfile once the field is added.
+        if let Err(failure) = preflight::preflight_gate(cmd_key, deployment_mode, cached_plan, COMMAND_TIERS) {
+            let (msg, exit_code) = match failure {
+                FailureClass::UnsupportedInLocalMode => (
+                    format!(
+                        "command `{cmd_key}` is only available in managed mode (your current profile is self-managed/local)"
+                    ),
+                    EXIT_UNSUPPORTED,
+                ),
+                FailureClass::PlanRequired => (
+                    format!(
+                        "command `{cmd_key}` requires a higher plan tier than your current cached plan"
+                    ),
+                    output::EXIT_PLAN_REQUIRED,
+                ),
+                other => (format!("pre-flight gate rejected: {other}"), EXIT_FAILURE),
+            };
+            CliResponse::fail(cmd_key, msg, failure, exit_code).emit(fmt);
+        }
+    }
 
     match &cli.command {
         Commands::Init(args) => {
