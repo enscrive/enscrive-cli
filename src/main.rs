@@ -2973,7 +2973,95 @@ async fn main() {
         })
         .await
         {
-            Ok(data) => CliResponse::success("status", data).emit(fmt),
+            Ok(mut data) => {
+                // ENS-65 CLI-TIER-010: enrich status with plan + license.
+                let mode = data
+                    .get("mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local")
+                    .to_owned();
+                let (plan, license_field) = if mode == "managed" {
+                    // Managed: plan comes from cached_plan (not yet stored;
+                    // TODO: read from profiles.toml when cached_plan field is added).
+                    (serde_json::Value::Null, None::<serde_json::Value>)
+                } else {
+                    // Local: resolve plan from license JWT claims if present.
+                    let (plan_val, license_obj) = match license::read_license_jwt() {
+                        Ok(Some(jwt)) => match license::decode_jwt_payload_unverified(&jwt) {
+                            Ok(claims) => {
+                                let plan = claims
+                                    .plan
+                                    .clone()
+                                    .map(|p| serde_json::Value::String(p))
+                                    .unwrap_or_else(|| serde_json::Value::String("unknown".to_string()));
+                                let expires_at = claims.expires_at.clone();
+                                let lic = json!({
+                                    "present": true,
+                                    "expires_at": expires_at,
+                                    "last_verified_at": null,
+                                });
+                                (plan, Some(lic))
+                            }
+                            Err(_) => (
+                                serde_json::Value::String("unknown".to_string()),
+                                Some(json!({
+                                    "present": true,
+                                    "expires_at": null,
+                                    "last_verified_at": null,
+                                })),
+                            ),
+                        },
+                        _ => (
+                            serde_json::Value::String("free".to_string()),
+                            Some(json!({
+                                "present": false,
+                                "expires_at": null,
+                                "last_verified_at": null,
+                            })),
+                        ),
+                    };
+                    (plan_val, license_obj)
+                };
+
+                if let Some(obj) = data.as_object_mut() {
+                    obj.insert("plan".to_string(), plan.clone());
+                    if mode != "managed" {
+                        if let Some(lic) = license_field {
+                            obj.insert("license".to_string(), lic);
+                        }
+                    }
+                }
+
+                match fmt {
+                    OutputFormat::Human => {
+                        // Print 2-line summary before the full JSON.
+                        let plan_str = plan.as_str().unwrap_or("unknown");
+                        let license_summary = if mode == "managed" {
+                            "managed (no local license)".to_string()
+                        } else {
+                            match data.get("license") {
+                                Some(lic) => {
+                                    let present = lic.get("present").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    if present {
+                                        let exp = lic.get("expires_at").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                        // Truncate to date portion if ISO timestamp.
+                                        let exp_date = exp.split('T').next().unwrap_or(exp);
+                                        format!("present, expires {exp_date}")
+                                    } else {
+                                        "absent".to_string()
+                                    }
+                                }
+                                None => "absent".to_string(),
+                            }
+                        };
+                        println!("Plan: {plan_str}  License: {license_summary}");
+                        println!("Mode: {mode}");
+                    }
+                    OutputFormat::Json => {}
+                }
+
+                CliResponse::success("status", data).emit(fmt)
+            }
             Err(e) => CliResponse::fail("status", e, FailureClass::Bug, EXIT_FAILURE).emit(fmt),
         },
         Commands::Deploy { sub } => match sub {
