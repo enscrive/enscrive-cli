@@ -46,6 +46,7 @@ struct Endpoint {
 fn main() {
     println!("cargo:rerun-if-changed={}", CONTRACT_PATH);
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rustc-env=CLI_TARGET={}", std::env::var("TARGET").unwrap());
 
     let toml_src = fs::read_to_string(CONTRACT_PATH)
         .unwrap_or_else(|e| panic!("build.rs: read {}: {}", CONTRACT_PATH, e));

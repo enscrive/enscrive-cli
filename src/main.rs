@@ -3,6 +3,7 @@ mod deploy;
 mod evals2;
 mod local;
 mod output;
+mod release_channel;
 #[cfg(test)]
 mod test_support;
 
