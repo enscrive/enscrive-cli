@@ -210,6 +210,105 @@ jobs:
           prerelease: ${{ steps.prerelease.outputs.prerelease }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          body: |
+            ## Verification
+
+            Checksums: `curl -fsSL https://dev.enscrive.io/releases/dev/${{ github.ref_name }}/SHA256SUMS | sha256sum -c --ignore-missing`
+
+            Signatures: `cosign verify-blob --bundle <artifact>.bundle --certificate-identity-regexp 'https://github.com/enscrive/enscrive-cli' --certificate-oidc-issuer https://token.actions.githubusercontent.com <artifact>`
           files: |
             dist/enscrive-*
             dist/SHA256SUMS
+
+  # ---------------------------------------------------------------------------
+  # ENS-82 / CLI-REL-011 — cosign keyless signing.
+  # Signs every per-platform binary and the aggregated SHA256SUMS file using
+  # Sigstore keyless mode (OIDC-issued short-lived Fulcio certificate).
+  # Bundles are uploaded next to their artifacts in S3.
+  # ---------------------------------------------------------------------------
+  sign:
+    name: cosign keyless signing
+    needs: [build, aggregate]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC token (Fulcio certificate issuance)
+      contents: write   # required to update GitHub Release body
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cosign
+        # sigstore/cosign-installer@v3 — keyless signing via Fulcio + Rekor.
+        # Pin the SHA for reproducibility in production; tag is sufficient for beta.
+        uses: sigstore/cosign-installer@v3
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # TODO(ENS-81 + ENS-82): verify cosign bundle in install.sh once ENS-81 creates it.
+
+      - name: Sign artifacts and upload bundles to S3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          WORK_DIR="/tmp/cosign-work"
+          mkdir -p "${WORK_DIR}"
+
+          TARGETS=(
+            x86_64-unknown-linux-gnu
+            aarch64-unknown-linux-gnu
+            x86_64-unknown-linux-musl
+            x86_64-apple-darwin
+            aarch64-apple-darwin
+          )
+
+          # Sign each per-platform binary
+          for TARGET in "${TARGETS[@]}"; do
+            ARTIFACT="${BINARY_NAME}-${TARGET}"
+            S3_KEY="releases/${CHANNEL}/${TAG}/${TARGET}/${BINARY_NAME}"
+            LOCAL_PATH="${WORK_DIR}/${ARTIFACT}"
+
+            echo "Downloading s3://${S3_BUCKET}/${S3_KEY} ..."
+            aws s3 cp "s3://${S3_BUCKET}/${S3_KEY}" "${LOCAL_PATH}"
+
+            echo "Signing ${ARTIFACT} ..."
+            cosign sign-blob \
+              --yes \
+              --bundle "${LOCAL_PATH}.bundle" \
+              "${LOCAL_PATH}"
+
+            echo "Uploading bundle to S3 ..."
+            aws s3 cp \
+              "${LOCAL_PATH}.bundle" \
+              "s3://${S3_BUCKET}/${S3_KEY}.bundle" \
+              --cache-control "public, max-age=31536000, immutable"
+
+            echo "Signed and uploaded bundle for ${ARTIFACT}."
+          done
+
+          # Sign the aggregated SHA256SUMS file
+          SHA256SUMS_KEY="releases/${CHANNEL}/${TAG}/SHA256SUMS"
+          SHA256SUMS_LOCAL="${WORK_DIR}/SHA256SUMS"
+
+          echo "Downloading s3://${S3_BUCKET}/${SHA256SUMS_KEY} ..."
+          aws s3 cp "s3://${S3_BUCKET}/${SHA256SUMS_KEY}" "${SHA256SUMS_LOCAL}"
+
+          echo "Signing SHA256SUMS ..."
+          cosign sign-blob \
+            --yes \
+            --bundle "${SHA256SUMS_LOCAL}.bundle" \
+            "${SHA256SUMS_LOCAL}"
+
+          echo "Uploading SHA256SUMS bundle to S3 ..."
+          aws s3 cp \
+            "${SHA256SUMS_LOCAL}.bundle" \
+            "s3://${S3_BUCKET}/${SHA256SUMS_KEY}.bundle" \
+            --cache-control "public, max-age=31536000, immutable"
+
+          echo "All artifacts signed and bundles uploaded."
