@@ -2954,6 +2954,275 @@ mod tests {
         );
     }
 
+    /// Offline integration test for ENS-95: exercises the full manifest-fetch
+    /// path without hitting the network. Builds a fixture manifest + three
+    /// fixture binary files on disk, points ENSCRIVE_MANIFEST_URL at a
+    /// file:// URL for the manifest, and asserts that `init_self_managed`
+    /// lands all three binaries at `~/.local/share/enscrive/bin/` with
+    /// matching SHA256 and 0755 permissions.
+    ///
+    /// Also exercises `--force-refetch` by mutating the installed binary on
+    /// disk after the first fetch and confirming that the second init call
+    /// with `force_refetch: true` restores the manifest content.
+    #[tokio::test]
+    async fn init_self_managed_fetches_binaries_from_file_manifest() {
+        use sha2::{Digest, Sha256};
+
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+
+        // Fixture "binaries" — opaque byte blobs with known SHA256.
+        let dev_bytes = b"fake enscrive-developer content\n";
+        let obs_bytes = b"fake enscrive-observe content\n";
+        let emb_bytes = b"fake enscrive-embed content\n";
+
+        let fixtures_dir = temp.path().join("fixtures");
+        fs::create_dir_all(&fixtures_dir).unwrap();
+        let dev_src = fixtures_dir.join("enscrive-developer");
+        let obs_src = fixtures_dir.join("enscrive-observe");
+        let emb_src = fixtures_dir.join("enscrive-embed");
+        fs::write(&dev_src, dev_bytes).unwrap();
+        fs::write(&obs_src, obs_bytes).unwrap();
+        fs::write(&emb_src, emb_bytes).unwrap();
+
+        let dev_sha = format!("{:x}", Sha256::digest(dev_bytes));
+        let obs_sha = format!("{:x}", Sha256::digest(obs_bytes));
+        let emb_sha = format!("{:x}", Sha256::digest(emb_bytes));
+
+        let target = crate::release_channel::current_target();
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "version": "v-test-fixture",
+            "released_at": "2026-04-24T00:00:00Z",
+            "channel": "beta",
+            "binaries": {
+                "enscrive-developer": {
+                    "source_version": "v-test-fixture",
+                    "platforms": {
+                        target: {
+                            "url": format!("file://{}", dev_src.display()),
+                            "sha256": dev_sha.clone(),
+                            "size_bytes": dev_bytes.len() as u64,
+                        }
+                    }
+                },
+                "enscrive-observe": {
+                    "source_version": "v-test-fixture",
+                    "platforms": {
+                        target: {
+                            "url": format!("file://{}", obs_src.display()),
+                            "sha256": obs_sha.clone(),
+                            "size_bytes": obs_bytes.len() as u64,
+                        }
+                    }
+                },
+                "enscrive-embed": {
+                    "source_version": "v-test-fixture",
+                    "platforms": {
+                        target: {
+                            "url": format!("file://{}", emb_src.display()),
+                            "sha256": emb_sha.clone(),
+                            "size_bytes": emb_bytes.len() as u64,
+                        }
+                    }
+                }
+            },
+            "compatibility": { "min_cli_version": "v0.1.0-beta.1" },
+            "signature": null
+        });
+        let manifest_path = fixtures_dir.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let manifest_url = format!("file://{}", manifest_path.display());
+
+        // First init: should fetch all three binaries from the manifest.
+        init_self_managed(SelfManagedInitOptions {
+            profile_name: Some("local".to_string()),
+            with_grafana: false,
+            developer_port: None,
+            developer_bin: None,
+            observe_bin: None,
+            embed_bin: None,
+            openai_api_key: Some("sk-test".to_string()),
+            anthropic_api_key: None,
+            voyage_api_key: None,
+            nebius_api_key: None,
+            bge_endpoint: None,
+            bge_api_key: None,
+            bge_model_name: None,
+            set_default: true,
+            manifest_url: Some(manifest_url.clone()),
+            force_refetch: false,
+        })
+        .await
+        .unwrap();
+
+        let bin_dir = xdg_binary_dir(&cli_home().unwrap());
+        let dev_dest = bin_dir.join("enscrive-developer");
+        let obs_dest = bin_dir.join("enscrive-observe");
+        let emb_dest = bin_dir.join("enscrive-embed");
+
+        assert!(dev_dest.exists(), "developer binary should be installed");
+        assert!(obs_dest.exists(), "observe binary should be installed");
+        assert!(emb_dest.exists(), "embed binary should be installed");
+
+        assert_eq!(fs::read(&dev_dest).unwrap(), dev_bytes);
+        assert_eq!(fs::read(&obs_dest).unwrap(), obs_bytes);
+        assert_eq!(fs::read(&emb_dest).unwrap(), emb_bytes);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for dest in [&dev_dest, &obs_dest, &emb_dest] {
+                let mode = fs::metadata(dest).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o755, "{} should be chmod 0755", dest.display());
+            }
+        }
+
+        // Verify the profile records the XDG paths (not `/tmp/*` fallbacks).
+        let profiles = load_profiles().unwrap();
+        let local = profiles
+            .profiles
+            .get("local")
+            .and_then(|profile| profile.local.as_ref())
+            .unwrap();
+        assert_eq!(local.binaries.developer, dev_dest.display().to_string());
+        assert_eq!(local.binaries.observe, obs_dest.display().to_string());
+        assert_eq!(local.binaries.embed, emb_dest.display().to_string());
+
+        // Corrupt the installed developer binary, then re-run init with
+        // force_refetch=false. The idempotent fast-path only kicks in when
+        // the existing hash matches — a corrupted file must be re-fetched
+        // automatically.
+        fs::write(&dev_dest, b"corrupted-on-disk").unwrap();
+        init_self_managed(SelfManagedInitOptions {
+            profile_name: Some("local".to_string()),
+            with_grafana: false,
+            developer_port: None,
+            developer_bin: None,
+            observe_bin: None,
+            embed_bin: None,
+            openai_api_key: Some("sk-test".to_string()),
+            anthropic_api_key: None,
+            voyage_api_key: None,
+            nebius_api_key: None,
+            bge_endpoint: None,
+            bge_api_key: None,
+            bge_model_name: None,
+            set_default: true,
+            manifest_url: Some(manifest_url.clone()),
+            force_refetch: false,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read(&dev_dest).unwrap(),
+            dev_bytes,
+            "corrupted binary should have been refetched automatically"
+        );
+
+        // Now exercise --force-refetch explicitly: corrupt again, pass
+        // force_refetch=true, confirm the content is restored. (The same
+        // invariant as above, but via the explicit operator flag.)
+        fs::write(&dev_dest, b"corrupted-again").unwrap();
+        init_self_managed(SelfManagedInitOptions {
+            profile_name: Some("local".to_string()),
+            with_grafana: false,
+            developer_port: None,
+            developer_bin: None,
+            observe_bin: None,
+            embed_bin: None,
+            openai_api_key: Some("sk-test".to_string()),
+            anthropic_api_key: None,
+            voyage_api_key: None,
+            nebius_api_key: None,
+            bge_endpoint: None,
+            bge_api_key: None,
+            bge_model_name: None,
+            set_default: true,
+            manifest_url: Some(manifest_url),
+            force_refetch: true,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read(&dev_dest).unwrap(),
+            dev_bytes,
+            "force_refetch should have restored the manifest content"
+        );
+    }
+
+    /// Manifest-driven init must error clearly when the CLI's target triple
+    /// has no row in the manifest — no silent PATH fallback.
+    #[tokio::test]
+    async fn init_self_managed_reports_platform_missing_error() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+
+        let fixtures_dir = temp.path().join("fixtures");
+        fs::create_dir_all(&fixtures_dir).unwrap();
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "version": "v-test-platform-miss",
+            "binaries": {
+                "enscrive-developer": {
+                    "source_version": "v",
+                    "platforms": {
+                        // Deliberately a target the CLI is never built for.
+                        "riscv64-unknown-linux-gnu": {
+                            "url": "file:///dev/null",
+                            "sha256": "0",
+                        }
+                    }
+                },
+                "enscrive-observe": { "source_version": "v", "platforms": {} },
+                "enscrive-embed":   { "source_version": "v", "platforms": {} }
+            }
+        });
+        let manifest_path = fixtures_dir.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let manifest_url = format!("file://{}", manifest_path.display());
+
+        let err = init_self_managed(SelfManagedInitOptions {
+            profile_name: Some("local".to_string()),
+            with_grafana: false,
+            developer_port: None,
+            developer_bin: None,
+            observe_bin: None,
+            embed_bin: None,
+            openai_api_key: Some("sk-test".to_string()),
+            anthropic_api_key: None,
+            voyage_api_key: None,
+            nebius_api_key: None,
+            bge_endpoint: None,
+            bge_api_key: None,
+            bge_model_name: None,
+            set_default: true,
+            manifest_url: Some(manifest_url),
+            force_refetch: false,
+        })
+        .await
+        .expect_err("should error when platform missing for current target");
+
+        assert!(
+            err.contains(crate::release_channel::current_target()),
+            "error should mention the CLI's target triple: {err}"
+        );
+        assert!(
+            err.contains("does not include platform"),
+            "error should surface format_platform_missing wording: {err}"
+        );
+    }
+
     #[test]
     fn ensure_valid_developer_env_rewrites_invalid_aes_key() {
         let temp = TempDir::new().unwrap();
