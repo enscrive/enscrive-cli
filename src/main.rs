@@ -1,5 +1,4 @@
 mod client;
-mod deploy;
 mod evals2;
 mod fetch_verify;
 mod license;
@@ -14,11 +13,6 @@ use std::collections::HashMap;
 use std::fs;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
-use deploy::{
-    DeployApplyOptions, DeployBootstrapOptions, DeployFetchOptions, DeployFetchSource,
-    DeployInitOptions, DeployRenderOptions, DeploySecretsSource, DeployStatusOptions, DeployTarget,
-    DeployVerifyOptions,
-};
 use local::{
     InitMode, ManagedInitOptions, SelfManagedInitOptions, StartOptions, StatusOptions, StopOptions,
 };
@@ -83,12 +77,6 @@ enum Commands {
 
     /// Show resolved profile and local stack status
     Status(StatusArgs),
-
-    /// Operator-facing deployment profile and target commands
-    Deploy {
-        #[command(subcommand)]
-        sub: DeploySubcommand,
-    },
 
     /// Check stack health through /health
     Health,
@@ -327,175 +315,6 @@ struct StopArgs {
 
 #[derive(Args)]
 struct StatusArgs {}
-
-#[derive(Subcommand)]
-enum DeploySubcommand {
-    /// Initialize an operator-facing deploy profile for DEV/STAGE/US/EU/AP
-    Init(DeployInitArgs),
-
-    /// Show the configured deploy profile and current ESM detection status
-    Status(DeployStatusArgs),
-
-    /// Render deterministic managed-host artifacts for the selected deploy profile
-    Render(DeployRenderArgs),
-
-    /// Stage managed artifacts for the selected deploy profile from hosted manifest or local source builds
-    Fetch(DeployFetchArgs),
-
-    /// Install a rendered managed-host bundle onto the local host
-    Apply(DeployApplyArgs),
-
-    /// Verify the managed endpoint for the selected deploy profile through /health
-    Verify(DeployVerifyArgs),
-
-    /// Consume a signed bootstrap bundle and persist returned operator authority
-    Bootstrap(DeployBootstrapArgs),
-}
-
-#[derive(Args)]
-struct DeployInitArgs {
-    /// Deploy target profile: dev, stage, us, eu, ap
-    #[arg(long, value_enum)]
-    target: Option<DeployTarget>,
-
-    /// Managed API endpoint for this operator profile
-    #[arg(long)]
-    endpoint: Option<String>,
-
-    /// Deploy profile name to create or update
-    #[arg(long = "profile-name")]
-    profile_name: Option<String>,
-
-    /// Secrets source for operator rollout
-    #[arg(long = "secrets-source", value_enum)]
-    secrets_source: Option<DeploySecretsSource>,
-
-    /// Set this deploy profile as the default operator target
-    #[arg(long, default_value_t = false)]
-    set_default: bool,
-}
-
-#[derive(Args)]
-struct DeployStatusArgs {
-    /// Deploy profile name to inspect
-    #[arg(long = "profile-name")]
-    profile_name: Option<String>,
-}
-
-#[derive(Args)]
-struct DeployRenderArgs {
-    /// Deploy profile name to render
-    #[arg(long = "profile-name")]
-    profile_name: Option<String>,
-
-    /// Output directory for rendered artifacts
-    #[arg(long = "out-dir")]
-    out_dir: Option<String>,
-
-    /// Host root expected on the managed instance
-    #[arg(long = "host-root")]
-    host_root: Option<String>,
-
-    /// Trusted bootstrap public key to write into developer.env
-    #[arg(long = "eba-trusted-public-key")]
-    bootstrap_public_key: Option<String>,
-}
-
-#[derive(Args)]
-struct DeployFetchArgs {
-    /// Deploy profile name to fetch artifacts for
-    #[arg(long = "profile-name")]
-    profile_name: Option<String>,
-
-    /// Artifact source: hosted manifest or locally built workspace artifacts
-    #[arg(long, value_enum)]
-    source: Option<DeployFetchSource>,
-
-    /// Output directory for staged artifacts
-    #[arg(long = "out-dir")]
-    out_dir: Option<String>,
-
-    /// Explicit release manifest URL
-    #[arg(long = "manifest-url")]
-    manifest_url: Option<String>,
-
-    /// Enscrive workspace root for local-build artifact staging
-    #[arg(long = "workspace-root")]
-    workspace_root: Option<String>,
-
-    /// Build local artifacts from source before staging them
-    #[arg(long = "build", default_value_t = false)]
-    build_local: bool,
-}
-
-#[derive(Args)]
-struct DeployVerifyArgs {
-    /// Deploy profile name to verify
-    #[arg(long = "profile-name")]
-    profile_name: Option<String>,
-
-    /// Temporary endpoint override for verification
-    #[arg(long = "endpoint")]
-    endpoint: Option<String>,
-}
-
-#[derive(Args)]
-struct DeployApplyArgs {
-    /// Deploy profile name to apply
-    #[arg(long = "profile-name")]
-    profile_name: Option<String>,
-
-    /// Directory containing the previously rendered bundle
-    #[arg(long = "render-dir")]
-    render_dir: Option<String>,
-
-    /// Directory containing enscrive-developer, enscrive-observe, and enscrive-embed
-    #[arg(long = "binary-dir")]
-    binary_dir: Option<String>,
-
-    /// Site root for the developer portal bundle (must contain pkg/)
-    #[arg(long = "site-root")]
-    site_root: Option<String>,
-
-    /// Destination for installed systemd units
-    #[arg(long = "systemd-dir")]
-    systemd_dir: Option<String>,
-
-    /// Destination for installed nginx config
-    #[arg(long = "nginx-dir")]
-    nginx_dir: Option<String>,
-
-    /// Run systemctl daemon-reload after installing units
-    #[arg(long, default_value_t = false)]
-    reload_systemd: bool,
-
-    /// Enable and start enscrive services after installation
-    #[arg(long, default_value_t = false)]
-    start_services: bool,
-
-    /// Validate nginx config and reload nginx after installation
-    #[arg(long, default_value_t = false)]
-    reload_nginx: bool,
-}
-
-#[derive(Args)]
-struct DeployBootstrapArgs {
-    /// Deploy profile name to use
-    #[arg(long = "profile-name")]
-    profile_name: Option<String>,
-
-    /// Bootstrap endpoint hosting /bootstrap/consume; use this for first bring-up or private access
-    #[arg(long)]
-    endpoint: Option<String>,
-
-    /// Path to a signed bootstrap bundle TOML file
-    #[arg(long = "bundle-path")]
-    bundle_path: Option<String>,
-
-    /// ESM secret key containing the signed bootstrap bundle
-    #[arg(long = "bundle-secret-key")]
-    bundle_secret_key: Option<String>,
-}
 
 #[derive(Args)]
 struct SearchArgs {
@@ -3224,7 +3043,6 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
         | Commands::Stop(_)
         | Commands::Status(_)
         | Commands::Health
-        | Commands::Deploy { .. }
         | Commands::License { .. } => return None,
     };
     // Look up the computed key in COMMAND_TIERS to get a 'static reference.
@@ -3302,8 +3120,7 @@ async fn main() {
         Commands::Init(_)
         | Commands::Start(_)
         | Commands::Stop(_)
-        | Commands::Status(_)
-        | Commands::Deploy { .. } => None,
+        | Commands::Status(_) => None,
         Commands::Health => None,
         // CLI-TIER-007: license activation is a local filesystem write;
         // profile mode is consulted directly inside the handler so we can
@@ -3516,117 +3333,6 @@ async fn main() {
                 CliResponse::success("status", data).emit(fmt)
             }
             Err(e) => CliResponse::fail("status", e, FailureClass::Bug, EXIT_FAILURE).emit(fmt),
-        },
-        Commands::Deploy { sub } => match sub {
-            DeploySubcommand::Init(args) => {
-                match deploy::init(DeployInitOptions {
-                    target: args.target,
-                    endpoint_override: args.endpoint.clone(),
-                    profile_name: args.profile_name.clone(),
-                    secrets_source: args.secrets_source,
-                    set_default: args.set_default,
-                })
-                .await
-                {
-                    Ok(data) => CliResponse::success("deploy.init", data).emit(fmt),
-                    Err(e) => CliResponse::fail("deploy.init", e, FailureClass::Bug, EXIT_CONFIG)
-                        .emit(fmt),
-                }
-            }
-            DeploySubcommand::Status(args) => {
-                match deploy::status(DeployStatusOptions {
-                    profile_name: args.profile_name.clone(),
-                })
-                .await
-                {
-                    Ok(data) => CliResponse::success("deploy.status", data).emit(fmt),
-                    Err(e) => {
-                        CliResponse::fail("deploy.status", e, FailureClass::Bug, EXIT_FAILURE)
-                            .emit(fmt)
-                    }
-                }
-            }
-            DeploySubcommand::Render(args) => {
-                match deploy::render(DeployRenderOptions {
-                    profile_name: args.profile_name.clone(),
-                    output_dir: args.out_dir.clone(),
-                    host_root: args.host_root.clone(),
-                    bootstrap_public_key: args.bootstrap_public_key.clone(),
-                })
-                .await
-                {
-                    Ok(data) => CliResponse::success("deploy.render", data).emit(fmt),
-                    Err(e) => {
-                        CliResponse::fail("deploy.render", e, FailureClass::Bug, EXIT_FAILURE)
-                            .emit(fmt)
-                    }
-                }
-            }
-            DeploySubcommand::Fetch(args) => {
-                match deploy::fetch(DeployFetchOptions {
-                    profile_name: args.profile_name.clone(),
-                    output_dir: args.out_dir.clone(),
-                    manifest_url: args.manifest_url.clone(),
-                    source: args.source,
-                    workspace_root: args.workspace_root.clone(),
-                    build_local: args.build_local,
-                })
-                .await
-                {
-                    Ok(data) => CliResponse::success("deploy.fetch", data).emit(fmt),
-                    Err(e) => CliResponse::fail("deploy.fetch", e, FailureClass::Bug, EXIT_FAILURE)
-                        .emit(fmt),
-                }
-            }
-            DeploySubcommand::Apply(args) => {
-                match deploy::apply(DeployApplyOptions {
-                    profile_name: args.profile_name.clone(),
-                    render_dir: args.render_dir.clone(),
-                    binary_dir: args.binary_dir.clone(),
-                    site_root: args.site_root.clone(),
-                    systemd_dir: args.systemd_dir.clone(),
-                    nginx_dir: args.nginx_dir.clone(),
-                    reload_systemd: args.reload_systemd,
-                    start_services: args.start_services,
-                    reload_nginx: args.reload_nginx,
-                })
-                .await
-                {
-                    Ok(data) => CliResponse::success("deploy.apply", data).emit(fmt),
-                    Err(e) => CliResponse::fail("deploy.apply", e, FailureClass::Bug, EXIT_FAILURE)
-                        .emit(fmt),
-                }
-            }
-            DeploySubcommand::Verify(args) => {
-                match deploy::verify(DeployVerifyOptions {
-                    profile_name: args.profile_name.clone(),
-                    endpoint_override: args.endpoint.clone().or_else(|| cli.endpoint.clone()),
-                })
-                .await
-                {
-                    Ok(data) => CliResponse::success("deploy.verify", data).emit(fmt),
-                    Err(e) => {
-                        CliResponse::fail("deploy.verify", e, FailureClass::Bug, EXIT_FAILURE)
-                            .emit(fmt)
-                    }
-                }
-            }
-            DeploySubcommand::Bootstrap(args) => {
-                match deploy::bootstrap(DeployBootstrapOptions {
-                    profile_name: args.profile_name.clone(),
-                    endpoint_override: args.endpoint.clone().or_else(|| cli.endpoint.clone()),
-                    bundle_path: args.bundle_path.clone(),
-                    bundle_secret_key: args.bundle_secret_key.clone(),
-                })
-                .await
-                {
-                    Ok(data) => CliResponse::success("deploy.bootstrap", data).emit(fmt),
-                    Err(e) => {
-                        CliResponse::fail("deploy.bootstrap", e, FailureClass::Bug, EXIT_FAILURE)
-                            .emit(fmt)
-                    }
-                }
-            }
         },
         Commands::Health => {
             // Probe /v1/health, not /health. The edge /health can return 200 even
@@ -5225,40 +4931,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_deploy_init_command() {
-        let args = Cli::parse_from([
-            "enscrive",
-            "deploy",
-            "init",
-            "--target",
-            "stage",
-            "--endpoint",
-            "https://stage.api.enscrive.io",
-            "--secrets-source",
-            "esm",
-            "--set-default",
-        ]);
-        match args.command {
-            Commands::Deploy {
-                sub:
-                    DeploySubcommand::Init(DeployInitArgs {
-                        target,
-                        endpoint,
-                        secrets_source,
-                        set_default,
-                        ..
-                    }),
-            } => {
-                assert_eq!(target, Some(DeployTarget::Stage));
-                assert_eq!(endpoint.as_deref(), Some("https://stage.api.enscrive.io"));
-                assert_eq!(secrets_source, Some(DeploySecretsSource::Esm));
-                assert!(set_default);
-            }
-            _ => panic!("expected deploy init"),
-        }
-    }
-
-    #[test]
     fn parse_self_managed_init_with_custom_developer_port() {
         let args = Cli::parse_from([
             "enscrive",
@@ -5278,214 +4950,6 @@ mod tests {
                 assert_eq!(developer_port, Some(36300));
             }
             _ => panic!("expected init"),
-        }
-    }
-
-    #[test]
-    fn parse_deploy_status_command() {
-        let args = Cli::parse_from(["enscrive", "deploy", "status", "--profile-name", "stage"]);
-        match args.command {
-            Commands::Deploy {
-                sub: DeploySubcommand::Status(DeployStatusArgs { profile_name }),
-            } => {
-                assert_eq!(profile_name.as_deref(), Some("stage"));
-            }
-            _ => panic!("expected deploy status"),
-        }
-    }
-
-    #[test]
-    fn parse_deploy_render_command() {
-        let args = Cli::parse_from([
-            "enscrive",
-            "deploy",
-            "render",
-            "--profile-name",
-            "stage",
-            "--out-dir",
-            "./enscrive-deploy/stage",
-            "--host-root",
-            "/opt/enscrive/stage",
-            "--eba-trusted-public-key",
-            "test-bootstrap-public-key",
-        ]);
-        match args.command {
-            Commands::Deploy {
-                sub:
-                    DeploySubcommand::Render(DeployRenderArgs {
-                        profile_name,
-                        out_dir,
-                        host_root,
-                        bootstrap_public_key,
-                    }),
-            } => {
-                assert_eq!(profile_name.as_deref(), Some("stage"));
-                assert_eq!(out_dir.as_deref(), Some("./enscrive-deploy/stage"));
-                assert_eq!(host_root.as_deref(), Some("/opt/enscrive/stage"));
-                assert_eq!(
-                    bootstrap_public_key.as_deref(),
-                    Some("test-bootstrap-public-key")
-                );
-            }
-            _ => panic!("expected deploy render"),
-        }
-    }
-
-    #[test]
-    fn parse_deploy_verify_command() {
-        let args = Cli::parse_from([
-            "enscrive",
-            "deploy",
-            "verify",
-            "--profile-name",
-            "stage",
-            "--endpoint",
-            "https://stage.api.enscrive.io",
-        ]);
-        match args.command {
-            Commands::Deploy {
-                sub:
-                    DeploySubcommand::Verify(DeployVerifyArgs {
-                        profile_name,
-                        endpoint,
-                    }),
-            } => {
-                assert_eq!(profile_name.as_deref(), Some("stage"));
-                assert_eq!(endpoint.as_deref(), Some("https://stage.api.enscrive.io"));
-            }
-            _ => panic!("expected deploy verify"),
-        }
-    }
-
-    #[test]
-    fn parse_deploy_fetch_command() {
-        let args = Cli::parse_from([
-            "enscrive",
-            "deploy",
-            "fetch",
-            "--profile-name",
-            "stage",
-            "--source",
-            "local-build",
-            "--build",
-            "--workspace-root",
-            "/home/christopher/enscrive-io",
-            "--out-dir",
-            "./enscrive-artifacts/stage",
-            "--manifest-url",
-            "https://stage.enscrive.io/releases/stage/latest.json",
-        ]);
-        match args.command {
-            Commands::Deploy {
-                sub:
-                    DeploySubcommand::Fetch(DeployFetchArgs {
-                        profile_name,
-                        source,
-                        out_dir,
-                        manifest_url,
-                        workspace_root,
-                        build_local,
-                    }),
-            } => {
-                assert_eq!(profile_name.as_deref(), Some("stage"));
-                assert_eq!(source, Some(DeployFetchSource::LocalBuild));
-                assert_eq!(out_dir.as_deref(), Some("./enscrive-artifacts/stage"));
-                assert_eq!(
-                    manifest_url.as_deref(),
-                    Some("https://stage.enscrive.io/releases/stage/latest.json")
-                );
-                assert_eq!(
-                    workspace_root.as_deref(),
-                    Some("/home/christopher/enscrive-io")
-                );
-                assert!(build_local);
-            }
-            _ => panic!("expected deploy fetch"),
-        }
-    }
-
-    #[test]
-    fn parse_deploy_apply_command() {
-        let args = Cli::parse_from([
-            "enscrive",
-            "deploy",
-            "apply",
-            "--profile-name",
-            "stage",
-            "--render-dir",
-            "./enscrive-deploy/stage",
-            "--binary-dir",
-            "/tmp/bin",
-            "--site-root",
-            "/tmp/site",
-            "--systemd-dir",
-            "/tmp/systemd",
-            "--nginx-dir",
-            "/tmp/nginx",
-            "--reload-systemd",
-            "--start-services",
-            "--reload-nginx",
-        ]);
-        match args.command {
-            Commands::Deploy {
-                sub:
-                    DeploySubcommand::Apply(DeployApplyArgs {
-                        profile_name,
-                        render_dir,
-                        binary_dir,
-                        site_root,
-                        systemd_dir,
-                        nginx_dir,
-                        reload_systemd,
-                        start_services,
-                        reload_nginx,
-                    }),
-            } => {
-                assert_eq!(profile_name.as_deref(), Some("stage"));
-                assert_eq!(render_dir.as_deref(), Some("./enscrive-deploy/stage"));
-                assert_eq!(binary_dir.as_deref(), Some("/tmp/bin"));
-                assert_eq!(site_root.as_deref(), Some("/tmp/site"));
-                assert_eq!(systemd_dir.as_deref(), Some("/tmp/systemd"));
-                assert_eq!(nginx_dir.as_deref(), Some("/tmp/nginx"));
-                assert!(reload_systemd);
-                assert!(start_services);
-                assert!(reload_nginx);
-            }
-            _ => panic!("expected deploy apply"),
-        }
-    }
-
-    #[test]
-    fn parse_deploy_bootstrap_command() {
-        let args = Cli::parse_from([
-            "enscrive",
-            "deploy",
-            "bootstrap",
-            "--profile-name",
-            "stage",
-            "--bundle-secret-key",
-            "ENSCRIVE_BOOTSTRAP_BUNDLE",
-            "--endpoint",
-            "http://127.0.0.1:3000",
-        ]);
-        match args.command {
-            Commands::Deploy {
-                sub:
-                    DeploySubcommand::Bootstrap(DeployBootstrapArgs {
-                        profile_name,
-                        bundle_secret_key,
-                        endpoint,
-                        ..
-                    }),
-            } => {
-                assert_eq!(profile_name.as_deref(), Some("stage"));
-                assert_eq!(
-                    bundle_secret_key.as_deref(),
-                    Some("ENSCRIVE_BOOTSTRAP_BUNDLE")
-                );
-                assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:3000"));
-            }
-            _ => panic!("expected deploy bootstrap"),
         }
     }
 
