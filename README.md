@@ -201,12 +201,6 @@ Exit codes: `0` success, `1` bug, `2` unsupported, `3` config error, `4` plan re
 
 ---
 
-## Operators
-
-Running Enscrive-internal managed infrastructure? See [OPERATORS.md](./OPERATORS.md) for the `enscrive deploy` command family. Not relevant to developers using Enscrive as a service.
-
----
-
 ## Contributing
 
 Issues and PRs welcome at [github.com/enscrive/enscrive-cli](https://github.com/enscrive/enscrive-cli). See the issue tracker for open work.
