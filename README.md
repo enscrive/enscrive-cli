@@ -20,18 +20,45 @@ One binary. Same commands either way.
 
 ## Install
 
-Pre-beta, you'll compile from source. Once `v0.1.0-beta.1` cuts, this repo's Releases page will carry pre-built binaries for `x86_64`/`aarch64` Linux and macOS.
+### One-liner (beta channel)
+
+```sh
+curl -fsSL https://dev.enscrive.io/install | sh
+```
+
+Installs the `enscrive` CLI binary to `~/.local/bin/enscrive`. No sudo required.
+
+Supported platforms: `x86_64`/`aarch64` Linux (glibc and musl), `x86_64`/`arm64` macOS.
+
+> **Dev channel note.** The install URL above serves the `dev` channel while production
+> CloudFront (`enscrive.io/install`) is being provisioned. The production one-liner
+> `curl -fsSL https://enscrive.io/install | sh` will replace this pre-GA (tracked in ENS-81).
+
+**Options:**
+
+```sh
+# Override install directory (default: ~/.local/bin)
+curl -fsSL https://dev.enscrive.io/install | sh -s -- --prefix=/usr/local/bin
+
+# Cross-machine install (override platform detection)
+curl -fsSL https://dev.enscrive.io/install | sh -s -- --target=aarch64-apple-darwin
+
+# Skip cosign bundle verification (debug only)
+curl -fsSL https://dev.enscrive.io/install | sh -s -- --insecure
+```
+
+If `~/.local/bin` is not on your `PATH`, the installer will remind you how to add it.
+
+### Build from source
 
 ```bash
 # Prerequisites: Rust 1.85+ (rustup recommended)
 git clone https://github.com/enscrive/enscrive-cli.git
 cd enscrive-cli
 cargo build --release
-sudo install -m 0755 target/release/enscrive /usr/local/bin/enscrive
+install -m 0755 target/release/enscrive ~/.local/bin/enscrive
 enscrive --version
 ```
-
-A `curl -fsSL https://enscrive.io/install | sh` one-liner is planned and tracked in the project roadmap.
 
 ---
 
