@@ -816,6 +816,10 @@ struct CollectionsDeleteArgs {
     /// command short-circuits with FAIL_CONFIRMATION_REQUIRED.
     #[arg(long, default_value_t = false)]
     confirm: bool,
+
+    /// Confirmation token (required in managed mode; obtain via portal at https://enscrive.io/portal/confirmations)
+    #[arg(long, value_name = "TOKEN")]
+    confirm_token: Option<String>,
 }
 
 #[derive(Args)]
@@ -1040,6 +1044,10 @@ struct VoicesDeleteArgs {
     /// command short-circuits with FAIL_CONFIRMATION_REQUIRED.
     #[arg(long, default_value_t = false)]
     confirm: bool,
+
+    /// Confirmation token (required in managed mode; obtain via portal at https://enscrive.io/portal/confirmations)
+    #[arg(long, value_name = "TOKEN")]
+    confirm_token: Option<String>,
 }
 
 #[derive(Args)]
@@ -1359,6 +1367,10 @@ struct BackupRestoreArgs {
     /// Required explicit acknowledgement for destructive restore execution
     #[arg(long, default_value_t = false)]
     confirm: bool,
+
+    /// Confirmation token (required in managed mode; obtain via portal at https://enscrive.io/portal/confirmations)
+    #[arg(long, value_name = "TOKEN")]
+    confirm_token: Option<String>,
 }
 
 #[derive(Args)]
@@ -1947,6 +1959,32 @@ fn require_local_confirmation(
             )
             .emit(fmt);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLI-TIER-014 (ENS-69): managed-mode confirmation token validation.
+// ---------------------------------------------------------------------------
+
+/// Validate managed-mode confirmation token requirement.
+///
+/// Rules:
+///   - If profile_mode == "managed" and confirm_token is None or empty:
+///     emit FAIL_CONFIRMATION_REQUIRED with actionable message.
+///   - If profile_mode == "local": return Ok(None) (local mode uses --confirm).
+///   - If profile_mode == "managed" and token is present: return Ok(Some(token)).
+fn require_managed_confirmation(
+    profile_mode: &str,
+    confirm_token: Option<&str>,
+    _command: &str,
+) -> Result<Option<String>, FailureClass> {
+    if profile_mode == "managed" {
+        match confirm_token {
+            Some(t) if !t.is_empty() => Ok(Some(t.to_string())),
+            _ => Err(FailureClass::ConfirmationRequired),
+        }
+    } else {
+        Ok(None)  // local mode uses --confirm via require_local_confirmation
     }
 }
 
@@ -3846,16 +3884,41 @@ async fn main() {
                     }
                 }
                 CollectionsSubcommand::Delete(args) => {
-                    require_local_confirmation(
-                        &args.id,
-                        "collections delete",
-                        fmt,
-                        args.confirm,
-                    );
-                    let path = format!("/v1/collections/{}", args.id);
-                    match client.delete_json(&path).await {
-                        Ok(data) => CliResponse::success("collections delete", data).emit(fmt),
-                        Err(e) => request_failure("collections delete", e).emit(fmt),
+                    let deployment_mode = api_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.profile_mode.as_deref())
+                        .unwrap_or("local");
+
+                    // Check managed-mode confirmation token first
+                    match require_managed_confirmation(deployment_mode, args.confirm_token.as_deref(), "collections delete") {
+                        Err(FailureClass::ConfirmationRequired) => {
+                            CliResponse::fail(
+                                "collections delete",
+                                "'collections delete' requires a confirmation token in managed mode.\nObtain one at https://enscrive.io/portal/confirmations\n(or run locally with --mode self-managed and use --confirm)".to_string(),
+                                FailureClass::ConfirmationRequired,
+                                output::EXIT_CONFIRMATION_REQUIRED,
+                            ).emit(fmt);
+                        }
+                        Err(_) => unreachable!(),
+                        Ok(_) => {
+                            // Local mode: proceed with require_local_confirmation
+                            require_local_confirmation(
+                                &args.id,
+                                "collections delete",
+                                fmt,
+                                args.confirm,
+                            );
+                            let path = format!("/v1/collections/{}", args.id);
+                            // TODO(server-side, blocked on enscrive-developer): server endpoint for issuing tokens not yet built
+                            let mut body = json!({});
+                            if let Some(token) = &args.confirm_token {
+                                body["confirm_token"] = json!(token);
+                            }
+                            match client.delete_json(&path).await {
+                                Ok(data) => CliResponse::success("collections delete", data).emit(fmt),
+                                Err(e) => request_failure("collections delete", e).emit(fmt),
+                            }
+                        }
                     }
                 }
                 CollectionsSubcommand::Stats { id } => {
@@ -4101,11 +4164,32 @@ async fn main() {
                     }
                 }
                 VoicesSubcommand::Delete(args) => {
-                    require_local_confirmation(&args.id, "voices delete", fmt, args.confirm);
-                    let path = format!("/v1/voices/{}", args.id);
-                    match client.delete_json(&path).await {
-                        Ok(data) => CliResponse::success("voices delete", data).emit(fmt),
-                        Err(e) => request_failure("voices delete", e).emit(fmt),
+                    let deployment_mode = api_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.profile_mode.as_deref())
+                        .unwrap_or("local");
+
+                    // Check managed-mode confirmation token first
+                    match require_managed_confirmation(deployment_mode, args.confirm_token.as_deref(), "voices delete") {
+                        Err(FailureClass::ConfirmationRequired) => {
+                            CliResponse::fail(
+                                "voices delete",
+                                "'voices delete' requires a confirmation token in managed mode.\nObtain one at https://enscrive.io/portal/confirmations\n(or run locally with --mode self-managed and use --confirm)".to_string(),
+                                FailureClass::ConfirmationRequired,
+                                output::EXIT_CONFIRMATION_REQUIRED,
+                            ).emit(fmt);
+                        }
+                        Err(_) => unreachable!(),
+                        Ok(_) => {
+                            // Local mode: proceed with require_local_confirmation
+                            require_local_confirmation(&args.id, "voices delete", fmt, args.confirm);
+                            let path = format!("/v1/voices/{}", args.id);
+                            // TODO(server-side, blocked on enscrive-developer): server endpoint for issuing tokens not yet built
+                            match client.delete_json(&path).await {
+                                Ok(data) => CliResponse::success("voices delete", data).emit(fmt),
+                                Err(e) => request_failure("voices delete", e).emit(fmt),
+                            }
+                        }
                     }
                 }
                 VoicesSubcommand::Compare(args) => {
@@ -4613,23 +4697,46 @@ async fn main() {
                     }
                 }
                 BackupSubcommand::Restore(args) => {
-                    // CLI-TIER-013: unified --confirm flow for destructive ops.
-                    // Use target_time as the confirmation phrase for interactive
-                    // TTY double-check.
-                    require_local_confirmation(
-                        &args.target_time,
-                        "backup restore",
-                        fmt,
-                        args.confirm,
-                    );
+                    let deployment_mode = api_context
+                        .as_ref()
+                        .and_then(|ctx| ctx.profile_mode.as_deref())
+                        .unwrap_or("local");
 
-                    let body = json!({
-                        "target_time": args.target_time,
-                        "confirm": true,
-                    });
-                    match client.post_json("/v1/admin/restore", body).await {
-                        Ok(data) => CliResponse::success("backup restore", data).emit(fmt),
-                        Err(e) => request_failure("backup restore", e).emit(fmt),
+                    // Check managed-mode confirmation token first
+                    match require_managed_confirmation(deployment_mode, args.confirm_token.as_deref(), "backup restore") {
+                        Err(FailureClass::ConfirmationRequired) => {
+                            CliResponse::fail(
+                                "backup restore",
+                                "'backup restore' requires a confirmation token in managed mode.\nObtain one at https://enscrive.io/portal/confirmations\n(or run locally with --mode self-managed and use --confirm)".to_string(),
+                                FailureClass::ConfirmationRequired,
+                                output::EXIT_CONFIRMATION_REQUIRED,
+                            ).emit(fmt);
+                        }
+                        Err(_) => unreachable!(),
+                        Ok(_) => {
+                            // CLI-TIER-013: unified --confirm flow for destructive ops.
+                            // Use target_time as the confirmation phrase for interactive
+                            // TTY double-check.
+                            require_local_confirmation(
+                                &args.target_time,
+                                "backup restore",
+                                fmt,
+                                args.confirm,
+                            );
+
+                            let mut body = json!({
+                                "target_time": args.target_time,
+                                "confirm": true,
+                            });
+                            // TODO(server-side, blocked on enscrive-developer): server endpoint for issuing tokens not yet built
+                            if let Some(token) = &args.confirm_token {
+                                body["confirm_token"] = json!(token);
+                            }
+                            match client.post_json("/v1/admin/restore", body).await {
+                                Ok(data) => CliResponse::success("backup restore", data).emit(fmt),
+                                Err(e) => request_failure("backup restore", e).emit(fmt),
+                            }
+                        }
                     }
                 }
                 BackupSubcommand::DryRun(args) => {
@@ -6545,10 +6652,12 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                     BackupSubcommand::Restore(BackupRestoreArgs {
                         target_time,
                         confirm,
+                        confirm_token,
                     }),
             } => {
                 assert_eq!(target_time, "2026-03-15T00:00:00Z");
                 assert!(confirm);
+                assert_eq!(confirm_token, None);
             }
             _ => panic!("expected backup restore"),
         }
@@ -7371,10 +7480,11 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         let args = Cli::parse_from(["enscrive", "collections", "delete", "--id", "col-1"]);
         match args.command {
             Commands::Collections {
-                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs { id, confirm }),
+                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs { id, confirm, confirm_token }),
             } => {
                 assert_eq!(id, "col-1");
                 assert!(!confirm, "confirm must default to false");
+                assert_eq!(confirm_token, None);
             }
             _ => panic!("expected collections delete"),
         }
@@ -7386,10 +7496,11 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             Cli::parse_from(["enscrive", "collections", "delete", "--id", "col-1", "--confirm"]);
         match args.command {
             Commands::Collections {
-                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs { id, confirm }),
+                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs { id, confirm, confirm_token }),
             } => {
                 assert_eq!(id, "col-1");
                 assert!(confirm, "--confirm must flip confirm to true");
+                assert_eq!(confirm_token, None);
             }
             _ => panic!("expected collections delete"),
         }
@@ -7400,10 +7511,11 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         let args = Cli::parse_from(["enscrive", "voices", "delete", "--id", "voice-1"]);
         match args.command {
             Commands::Voices {
-                sub: VoicesSubcommand::Delete(VoicesDeleteArgs { id, confirm }),
+                sub: VoicesSubcommand::Delete(VoicesDeleteArgs { id, confirm, confirm_token }),
             } => {
                 assert_eq!(id, "voice-1");
                 assert!(!confirm);
+                assert_eq!(confirm_token, None);
             }
             _ => panic!("expected voices delete"),
         }
@@ -7416,10 +7528,11 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         ]);
         match args.command {
             Commands::Voices {
-                sub: VoicesSubcommand::Delete(VoicesDeleteArgs { id, confirm }),
+                sub: VoicesSubcommand::Delete(VoicesDeleteArgs { id, confirm, confirm_token }),
             } => {
                 assert_eq!(id, "voice-1");
                 assert!(confirm);
+                assert_eq!(confirm_token, None);
             }
             _ => panic!("expected voices delete"),
         }
@@ -7443,10 +7556,12 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                     BackupSubcommand::Restore(BackupRestoreArgs {
                         target_time,
                         confirm,
+                        confirm_token,
                     }),
             } => {
                 assert_eq!(target_time, "2026-04-23T00:00:00Z");
                 assert!(confirm);
+                assert_eq!(confirm_token, None);
             }
             _ => panic!("expected backup restore"),
         }
@@ -7558,5 +7673,50 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             }
             prev = Some(*cmd);
         }
+    }
+
+    #[test]
+    fn parse_collections_delete_with_confirm_token() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "collections",
+            "delete",
+            "--id",
+            "col123",
+            "--confirm-token",
+            "ecf_test_xyz",
+        ]);
+        match args.command {
+            Commands::Collections {
+                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs {
+                    id,
+                    confirm,
+                    confirm_token,
+                }),
+            } => {
+                assert_eq!(id, "col123");
+                assert!(!confirm);
+                assert_eq!(confirm_token, Some("ecf_test_xyz".to_string()));
+            }
+            _ => panic!("expected collections delete with confirm_token"),
+        }
+    }
+
+    #[test]
+    fn require_managed_confirmation_rejects_missing_token_in_managed() {
+        let result = require_managed_confirmation("managed", None, "test-cmd");
+        assert_eq!(result, Err(FailureClass::ConfirmationRequired));
+    }
+
+    #[test]
+    fn require_managed_confirmation_passes_through_in_local() {
+        let result = require_managed_confirmation("local", None, "test-cmd");
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn require_managed_confirmation_accepts_present_token_in_managed() {
+        let result = require_managed_confirmation("managed", Some("ecf_xyz"), "test-cmd");
+        assert_eq!(result, Ok(Some("ecf_xyz".to_string())));
     }
 }
