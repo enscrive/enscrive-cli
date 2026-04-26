@@ -172,7 +172,16 @@ extract_field() {
     _target="$2"     # target triple string
     _field="$3"      # "url" or "sha256"
 
-    # Use Python if available for reliable JSON parsing; fall back to awk grep.
+    # Prefer python3 (reliable JSON parsing); then jq; then a brace-aware awk
+    # scoped to the binaries.enscrive sub-object specifically.
+    #
+    # CRITICAL: the awk fallback MUST be scope-aware. The cross-repo manifest
+    # contains four `binaries.<repo>.platforms.<target>` blocks (enscrive,
+    # enscrive-developer, enscrive-observe, enscrive-embed) — each uses the
+    # same target triple keys. Earlier this fallback matched the first
+    # occurrence of the target string in the file and silently installed the
+    # wrong binary (whichever repo happened to appear first in the manifest's
+    # JSON), so tracking depth via brace count is required.
     if command -v python3 >/dev/null 2>&1; then
         python3 - "$_manifest" "$_target" "$_field" <<'PY'
 import json, sys, pathlib
@@ -186,16 +195,51 @@ except KeyError as e:
     print(f"error: manifest key not found: {e}", file=sys.stderr)
     sys.exit(1)
 PY
+    elif command -v jq >/dev/null 2>&1; then
+        jq -er --arg target "$_target" --arg field "$_field" \
+            '.binaries.enscrive.platforms[$target][$field]' "$_manifest"
     else
-        # Minimal awk fallback: works for well-formatted single-line-value JSON.
+        # Brace-aware awk fallback. Enters enscrive scope on `"enscrive":`
+        # (rejecting `"enscrive-developer":` etc. via the trailing `\":`
+        # marker plus a length check), counts depth across braces, and only
+        # extracts the target's field while inside that scope at depth >= 1.
         awk -v target="$_target" -v field="$_field" '
-            /\"'"$_target"'"/ { in_target=1 }
-            in_target && /\"'"$_field"'"/ {
-                match($0, /": *"([^"]+)"/, a)
-                # awk match with 3-arg not portable; use split instead
-                n = split($0, parts, "\"")
-                for (i=1;i<=n;i++) {
-                    if (parts[i] == field) { print parts[i+2]; exit }
+            BEGIN { in_enscrive = 0; depth = 0; in_target = 0 }
+            {
+                # Detect entry into the binaries.enscrive object. Match the
+                # exact key "enscrive": (NOT enscrive-developer, etc.).
+                if (!in_enscrive && match($0, /"enscrive"[[:space:]]*:[[:space:]]*\{/)) {
+                    in_enscrive = 1
+                    depth = 1
+                    next
+                }
+                if (in_enscrive) {
+                    # Count brace depth changes on this line.
+                    line = $0
+                    n_open = gsub(/\{/, "{", line)
+                    n_close = gsub(/\}/, "}", line)
+                    depth += n_open - n_close
+                    if (depth <= 0) { in_enscrive = 0; in_target = 0; next }
+
+                    # Inside enscrive scope. Watch for the target key.
+                    if (match($0, "\"" target "\"[[:space:]]*:[[:space:]]*\\{")) {
+                        in_target = 1
+                        next
+                    }
+                    if (in_target && match($0, "\"" field "\"[[:space:]]*:[[:space:]]*\"[^\"]+\"")) {
+                        n = split($0, parts, "\"")
+                        for (i = 1; i <= n; i++) {
+                            if (parts[i] == field) {
+                                print parts[i + 2]
+                                exit
+                            }
+                        }
+                    }
+                    # Leaving the target sub-object on a closing brace at
+                    # the right depth: rough heuristic. Once the field is
+                    # found and printed the script exits; otherwise the
+                    # in_target flag persists until the enscrive-scope
+                    # closing brace drops depth back to 0.
                 }
             }
         ' "$_manifest"
