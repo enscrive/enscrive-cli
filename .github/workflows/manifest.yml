@@ -123,16 +123,20 @@ jobs:
             BINARY="${BINARIES[$REPO]}"
             for TARGET in "${TARGETS[@]}"; do
               KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}"
-              SHA256_KEY="${KEY}.sha256"
 
-              # Capture sha256 (strip trailing filename if present)
-              RAW_HASH=$(aws s3 cp "s3://${S3_BUCKET}/${SHA256_KEY}" - 2>/dev/null | awk '{print $1}')
-              if [[ -z "${RAW_HASH}" ]]; then
-                echo "ERROR: could not read SHA256 for ${SHA256_KEY}"
+              # Compute SHA256 by streaming the binary itself. Per-binary
+              # `.sha256` sidecars are not produced uniformly across the
+              # service repos (only enscrive-cli ships them today), so
+              # hashing the artifact directly is the only consistent path
+              # and stays correct regardless of upstream workflow drift.
+              echo "Hashing s3://${S3_BUCKET}/${KEY} ..."
+              RAW_HASH=$(aws s3 cp "s3://${S3_BUCKET}/${KEY}" - 2>/dev/null | sha256sum | awk '{print $1}')
+              if [[ -z "${RAW_HASH}" || "${RAW_HASH}" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]]; then
+                # Empty SHA = empty stream (s3 cp failed silently or object missing).
+                echo "ERROR: empty SHA256 for ${KEY}; aws s3 cp likely failed"
                 exit 1
               fi
 
-              # Capture size from head-object ContentLength on the binary
               SIZE_BYTES=$(aws s3api head-object \
                 --bucket "${S3_BUCKET}" \
                 --key "${KEY}" \
