@@ -168,7 +168,16 @@ method = "POST"
 path = "/v1/collections/materialize-from-dataset"
 cli_command = "collections materialize-from-dataset"
 status = "implemented"
-note = "ENS-104 — materialize a collection from a dataset URL"
+note = "ENS-104 — materialize a collection from a dataset URL (combines steps 2+4 of the 5-step eval workflow; conflates create + populate)"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/collections/{id}/populate-from-dataset"
+cli_command = "collections populate-from-dataset"
+status = "implemented"
+note = "ENS-133 (parent ENS-132) — Step-4 primitive of the canonical 5-step eval workflow. Populates an existing empty collection with a dataset's corpus, chunked by the supplied voice. Returns 409 if collection already has documents."
 deployment_tier = "any-mode"
 required_plan = "free"
 

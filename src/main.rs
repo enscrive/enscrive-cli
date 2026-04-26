@@ -622,6 +622,15 @@ enum CollectionsSubcommand {
     /// the 5-step E2E evals vision: an 83-doc stratified sample re-embeds
     /// in seconds instead of hours.
     MaterializeFromDataset(CollectionsMaterializeFromDatasetArgs),
+
+    /// Populate an existing empty collection with a dataset's corpus,
+    /// chunked by the supplied voice (ENS-133, parent ENS-132). The
+    /// canonical Step-4 primitive of the 5-step Enscrive eval workflow
+    /// (voice + empty collection + dataset → populate → eval). The
+    /// collection's existing model + dimensions bind the embedding
+    /// space; the voice's embedding_model is advisory only. Returns 409
+    /// if the collection already has documents.
+    PopulateFromDataset(CollectionsPopulateFromDatasetArgs),
 }
 
 /// CLI-TIER-013: args for `enscrive collections delete`.
@@ -718,6 +727,25 @@ struct CollectionsMaterializeFromDatasetArgs {
     /// When omitted, a baseline text-embedding-3-small config is used.
     #[arg(long = "voice-id")]
     voice_id: Option<String>,
+}
+
+/// ENS-133: Arguments for `enscrive collections populate-from-dataset`.
+#[derive(Args)]
+struct CollectionsPopulateFromDatasetArgs {
+    /// Existing collection UUID to populate. Must currently have
+    /// `document_count == 0`; the server returns 409 otherwise.
+    #[arg(long = "collection")]
+    collection_id: String,
+
+    /// Dataset UUID whose corpus to ingest.
+    #[arg(long = "dataset-id")]
+    dataset_id: String,
+
+    /// Voice UUID whose chunking strategy + parameters drive the ingest.
+    /// Voice's `embedding_model` is advisory only — the COLLECTION's
+    /// model binds the embedding space.
+    #[arg(long = "voice-id")]
+    voice_id: String,
 }
 
 /// J-020: Arguments for `enscrive collections metrics`.
@@ -2936,7 +2964,8 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
             | CollectionsSubcommand::Revert { .. }
             | CollectionsSubcommand::Commits(_)
             | CollectionsSubcommand::Metrics(_)
-            | CollectionsSubcommand::MaterializeFromDataset(_) => return None,
+            | CollectionsSubcommand::MaterializeFromDataset(_)
+            | CollectionsSubcommand::PopulateFromDataset(_) => return None,
         },
         Commands::Voices { sub } => match sub {
             VoicesSubcommand::List => "voices list",
@@ -3751,6 +3780,33 @@ async fn main() {
                         }
                         Err(e) => request_failure("collections materialize-from-dataset", e)
                             .emit(fmt),
+                    }
+                }
+                // ENS-133 (parent ENS-132): the canonical Step-4 primitive
+                // of the 5-step Enscrive eval workflow. Populates an
+                // existing empty collection with a dataset's corpus,
+                // chunked by the supplied voice. Returns 409 if the
+                // collection already has documents.
+                CollectionsSubcommand::PopulateFromDataset(args) => {
+                    let body = serde_json::json!({
+                        "dataset_id": args.dataset_id,
+                        "voice_id":   args.voice_id,
+                    });
+                    let path = format!(
+                        "/v1/collections/{}/populate-from-dataset",
+                        args.collection_id,
+                    );
+                    match client.post_json(&path, body).await {
+                        Ok(data) => CliResponse::success(
+                            "collections populate-from-dataset",
+                            data,
+                        )
+                        .emit(fmt),
+                        Err(e) => request_failure(
+                            "collections populate-from-dataset",
+                            e,
+                        )
+                        .emit(fmt),
                     }
                 }
                 // J-020: vector-space metrics endpoint.
