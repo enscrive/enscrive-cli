@@ -1735,7 +1735,10 @@ fn sanitize_name(value: &str) -> String {
 
 /// XDG-style destination for fetched service binaries: `~/.local/share/enscrive/bin/`.
 fn xdg_binary_dir(home: &CliHome) -> PathBuf {
-    home.data_root.join("enscrive").join("bin")
+    // home.data_root is already $XDG_DATA_HOME/enscrive (or
+    // $HOME/.local/share/enscrive), so this returns
+    // $HOME/.local/share/enscrive/bin — NOT a doubled "enscrive/enscrive/bin".
+    home.data_root.join("bin")
 }
 
 /// Resolve the three service binaries for `init --mode self-managed`.
