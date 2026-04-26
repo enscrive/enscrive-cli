@@ -291,9 +291,11 @@ struct InitArgs {
     #[arg(long, default_value_t = false)]
     set_default: bool,
 
-    /// Override the release manifest URL. Defaults to
-    /// `https://enscrive.io/releases/manifest.json`. Supports `file://` for
-    /// offline harnesses. Also reads `ENSCRIVE_MANIFEST_URL`.
+    /// Override the release manifest URL. Defaults to the dev channel at
+    /// `https://dev.enscrive.io/releases/dev/latest.json` (matching
+    /// `install.sh`); will be re-pointed once production CloudFront is
+    /// provisioned (tracked under ENS-81). Supports `file://` for offline
+    /// harnesses. Also reads `ENSCRIVE_MANIFEST_URL`.
     #[arg(long = "manifest-url", env = "ENSCRIVE_MANIFEST_URL")]
     manifest_url: Option<String>,
 

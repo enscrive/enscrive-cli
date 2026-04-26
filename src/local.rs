@@ -58,8 +58,11 @@ pub struct SelfManagedInitOptions {
     pub bge_api_key: Option<String>,
     pub bge_model_name: Option<String>,
     pub set_default: bool,
-    /// Override the release manifest URL. Defaults to
-    /// `https://enscrive.io/releases/manifest.json`. Supports `file://` for
+    /// Override the release manifest URL. Defaults to the dev channel at
+    /// `https://dev.enscrive.io/releases/dev/latest.json` (matching
+    /// `install.sh`'s `DEV_MANIFEST_URL`); will be re-pointed to a
+    /// `https://enscrive.io/...` production URL once the prod CloudFront
+    /// is provisioned (tracked alongside ENS-81). Supports `file://` for
     /// offline harnesses. Also readable from `ENSCRIVE_MANIFEST_URL`.
     pub manifest_url: Option<String>,
     /// Re-download service binaries even if they already exist and match the
@@ -67,7 +70,7 @@ pub struct SelfManagedInitOptions {
     pub force_refetch: bool,
 }
 
-pub const DEFAULT_RELEASE_MANIFEST_URL: &str = "https://enscrive.io/releases/manifest.json";
+pub const DEFAULT_RELEASE_MANIFEST_URL: &str = "https://dev.enscrive.io/releases/dev/latest.json";
 
 #[derive(Debug, Clone)]
 pub struct StartOptions {
