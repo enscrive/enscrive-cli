@@ -277,13 +277,21 @@ jobs:
           echo "  s3://${S3_BUCKET}/releases/${CHANNEL}/${VERSION}/manifest.json"
           echo "  s3://${S3_BUCKET}/releases/${CHANNEL}/latest.json"
 
-      - name: Invalidate CloudFront cache and wait
+      - name: Invalidate CloudFront cache (fire and forget)
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
 
+          # Note: the OIDC role `enscrive-releases-publisher` has
+          # `cloudfront:CreateInvalidation` but not
+          # `cloudfront:GetInvalidation` — so we cannot `wait` here. The
+          # invalidation is submitted and typically completes within
+          # 60–120s. Consumers reading via CloudFront should retry once
+          # if a fresh manifest hasn't propagated. Tracked: founder-IAM
+          # task to add GetInvalidation if a synchronous publish gate
+          # becomes worth it.
           INVALIDATION_ID=$(aws cloudfront create-invalidation \
             --distribution-id "${CF_DISTRIBUTION_ID}" \
             --paths \
@@ -292,14 +300,8 @@ jobs:
             --query 'Invalidation.Id' \
             --output text)
 
-          echo "CloudFront invalidation created: ${INVALIDATION_ID}"
-          echo "Waiting for invalidation to complete..."
-
-          aws cloudfront wait invalidation-completed \
-            --distribution-id "${CF_DISTRIBUTION_ID}" \
-            --id "${INVALIDATION_ID}"
-
-          echo "CloudFront invalidation complete."
+          echo "CloudFront invalidation submitted: ${INVALIDATION_ID}"
+          echo "(Workflow does not wait — see code comment for IAM context.)"
 
       - name: manifest published
         run: echo "manifest published"
