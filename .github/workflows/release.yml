@@ -34,9 +34,11 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            cross: false
+          # x86_64-apple-darwin dropped 2026-04-26: GitHub macos-13 runner
+          # capacity is permanently starved (Apple/GH deprecating Intel Mac
+          # builds). Apple Silicon users are served by aarch64-apple-darwin;
+          # remaining Intel Mac users build from source or run aarch64 under
+          # Rosetta. Enscrive Deploy Modernization tracks this in DEPLOY-012.
           - target: aarch64-apple-darwin
             os: macos-latest
             cross: false
@@ -264,7 +266,6 @@ jobs:
             x86_64-unknown-linux-gnu
             aarch64-unknown-linux-gnu
             x86_64-unknown-linux-musl
-            x86_64-apple-darwin
             aarch64-apple-darwin
           )
 
