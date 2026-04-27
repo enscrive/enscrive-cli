@@ -819,11 +819,36 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         ));
     }
 
-    let started_developer = spawn_service(
+    // ENS-140: enscrive-developer ships as a tar.gz archive containing both
+    // the server binary and a site/ directory of Leptos hydrate assets. The
+    // archive extracts to <data>/services/enscrive-developer/, which puts
+    // the binary at <...>/enscrive-developer and the assets at <...>/site/.
+    // Set LEPTOS_SITE_ROOT to the archive's site/ so the runtime serves
+    // /pkg/enscrive-developer.{js,wasm,css} from there. The other two
+    // LEPTOS_* vars match what cargo-leptos baked at build time.
+    let developer_extra_env: Vec<(&str, String)> = {
+        let bin_path = std::path::PathBuf::from(&local.binaries.developer);
+        if let Some(archive_root) = bin_path.parent() {
+            let site_dir = archive_root.join("site");
+            if site_dir.is_dir() {
+                vec![
+                    ("LEPTOS_SITE_ROOT", site_dir.display().to_string()),
+                    ("LEPTOS_OUTPUT_NAME", "enscrive-developer".to_string()),
+                    ("LEPTOS_SITE_PKG_DIR", "pkg".to_string()),
+                ]
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    };
+    let started_developer = spawn_service_with_extra_env(
         "enscrive-developer",
         &local.binaries.developer,
         Path::new(&local.developer_env_file),
         log_dir,
+        &developer_extra_env,
     )?;
     if service_was_newly_started(&started_developer) {
         started_services.push("enscrive-developer");
@@ -1741,6 +1766,15 @@ fn xdg_binary_dir(home: &CliHome) -> PathBuf {
     home.data_root.join("bin")
 }
 
+/// Root directory for archive-kind extracted artifacts. Each archive binary
+/// extracts to `<site_root>/<binary_name>/`, which holds both the executable
+/// at `<site_root>/<binary_name>/<binary_name>` and the Leptos `site/` tree
+/// at `<site_root>/<binary_name>/site/`. The CLI's `start` path then sets
+/// `LEPTOS_SITE_ROOT=<site_root>/<binary_name>/site` when spawning.
+fn xdg_site_dir(home: &CliHome) -> PathBuf {
+    home.data_root.join("services")
+}
+
 /// Resolve the three service binaries for `init --mode self-managed`.
 ///
 /// Per-binary policy (ENS-95):
@@ -1798,8 +1832,11 @@ async fn resolve_self_managed_binaries(
 
     let target = crate::release_channel::current_target();
     let bin_dir = xdg_binary_dir(home);
+    let site_root = xdg_site_dir(home);
     fs::create_dir_all(&bin_dir)
         .map_err(|e| format!("create binary dir '{}': {e}", bin_dir.display()))?;
+    fs::create_dir_all(&site_root)
+        .map_err(|e| format!("create site root '{}': {e}", site_root.display()))?;
 
     let resolve_one = async |binary_name: &'static str, override_path: Option<&String>| -> Result<String, String> {
         if let Some(path) = override_path {
@@ -1821,20 +1858,42 @@ async fn resolve_self_managed_binaries(
             ));
         }
 
-        let dest = bin_dir.join(binary_name);
-
-        if opts.force_refetch && dest.exists() {
-            // Force-refetch: clear the stale file so fetch_and_verify always
-            // re-downloads rather than hitting its idempotent fast-path.
-            fs::remove_file(&dest)
-                .map_err(|e| format!("force-refetch: remove '{}': {e}", dest.display()))?;
+        match entry.kind {
+            crate::fetch_verify::ArtifactKind::Binary => {
+                let dest = bin_dir.join(binary_name);
+                if opts.force_refetch && dest.exists() {
+                    fs::remove_file(&dest)
+                        .map_err(|e| format!("force-refetch: remove '{}': {e}", dest.display()))?;
+                }
+                crate::fetch_verify::fetch_and_verify(entry, target, &dest)
+                    .await
+                    .map_err(|e| format!("fetch '{binary_name}' from '{manifest_url}': {e}"))?;
+                Ok(dest.display().to_string())
+            }
+            crate::fetch_verify::ArtifactKind::Archive => {
+                // Archives extract to <site_root>/<binary_name>/, which gives
+                // <site_root>/<binary_name>/<binary_name> (the binary) and
+                // <site_root>/<binary_name>/site/ (the Leptos asset tree).
+                // Spawning the service then sets LEPTOS_SITE_ROOT to that dir.
+                let archive_root = site_root.join(binary_name);
+                if opts.force_refetch && archive_root.exists() {
+                    fs::remove_dir_all(&archive_root)
+                        .map_err(|e| format!("force-refetch: remove '{}': {e}", archive_root.display()))?;
+                }
+                fs::create_dir_all(&archive_root).map_err(|e| {
+                    format!("create archive_root '{}': {e}", archive_root.display())
+                })?;
+                crate::fetch_verify::fetch_and_extract_archive(
+                    entry,
+                    target,
+                    &archive_root,
+                    binary_name,
+                )
+                .await
+                .map_err(|e| format!("fetch+extract '{binary_name}' from '{manifest_url}': {e}"))?;
+                Ok(archive_root.join(binary_name).display().to_string())
+            }
         }
-
-        crate::fetch_verify::fetch_and_verify(entry, target, &dest)
-            .await
-            .map_err(|e| format!("fetch '{binary_name}' from '{manifest_url}': {e}"))?;
-
-        Ok(dest.display().to_string())
     };
 
     let developer = resolve_one(BINARY_DEVELOPER, opts.developer_bin.as_ref()).await?;
@@ -2108,6 +2167,16 @@ fn spawn_service(
     env_file: &Path,
     log_dir: &Path,
 ) -> Result<Value, String> {
+    spawn_service_with_extra_env(service_name, binary, env_file, log_dir, &[])
+}
+
+fn spawn_service_with_extra_env(
+    service_name: &str,
+    binary: &str,
+    env_file: &Path,
+    log_dir: &Path,
+    extra_env: &[(&str, String)],
+) -> Result<Value, String> {
     let pid_path = pid_file(log_dir, service_name);
     if let Some(pid) = read_pid(&pid_path)? {
         if pid_is_running(pid) {
@@ -2134,6 +2203,12 @@ fn spawn_service(
         .stderr(Stdio::from(stderr));
 
     for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    // Caller-supplied envs take precedence (last write wins) — used for the
+    // LEPTOS_* family on enscrive-developer so the binary finds the
+    // sibling-extracted site/ tree at runtime.
+    for (key, value) in extra_env {
         cmd.env(key, value);
     }
 

@@ -36,7 +36,12 @@ use sha2::{Digest, Sha256};
 use crate::release_channel;
 
 /// Highest manifest schema version this CLI understands.
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+///
+/// schema_version=1 — original (DESIGN.md §2.3).
+/// schema_version=2 — adds per-binary `kind` field ("binary" | "archive").
+///   "archive" entries are tar.gz packages containing a server binary plus
+///   a `site/` directory of static assets (Leptos SSR + hydrate apps).
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
 
 /// A parsed release manifest.
 ///
@@ -57,9 +62,30 @@ pub struct Manifest {
     pub signature: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArtifactKind {
+    /// Plain executable. Place at the destination path; chmod 0755.
+    Binary,
+    /// tar.gz containing a server binary at the archive root plus a
+    /// `site/` directory. Extract; place binary at the destination
+    /// path; place site/ at a sibling location managed by the caller.
+    Archive,
+}
+
+impl Default for ArtifactKind {
+    fn default() -> Self {
+        Self::Binary
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BinaryEntry {
     pub source_version: String,
+    /// schema_version >= 2 carries this; absent on schema_version=1
+    /// manifests where it defaults to `Binary` (back-compat).
+    #[serde(default)]
+    pub kind: ArtifactKind,
     pub platforms: HashMap<String, PlatformEntry>,
 }
 
@@ -231,6 +257,117 @@ pub async fn fetch_and_verify(
     }
 
     set_executable(dest)?;
+    Ok(())
+}
+
+/// Download `binary.platforms[target]` (a tar.gz archive), verify SHA256 of
+/// the archive itself, and extract its contents into `dest_root`.
+///
+/// The archive is expected to contain at minimum a top-level executable named
+/// `<binary_basename>` and (optionally) a top-level `site/` directory of
+/// static assets. After extraction:
+///
+/// - `<dest_root>/<binary_basename>` is the executable (chmod 0755 set).
+/// - `<dest_root>/site/...` mirrors the archive's site tree.
+///
+/// `dest_root` is created if missing. Existing contents are preserved unless
+/// they conflict with archive entries, in which case the archive entry wins
+/// (overwritten in place). The caller is responsible for choosing whether to
+/// clear `dest_root` before calling this; idempotent re-runs against the same
+/// archive content are safe.
+///
+/// Mismatch on the archive's SHA256 deletes the temp tar.gz and errors;
+/// nothing is extracted in that case.
+pub async fn fetch_and_extract_archive(
+    binary: &BinaryEntry,
+    target: &str,
+    dest_root: &Path,
+    binary_basename: &str,
+) -> Result<(), FetchError> {
+    let platform = binary.platforms.get(target).ok_or_else(|| {
+        let available: Vec<String> = binary.platforms.keys().cloned().collect();
+        FetchError::PlatformMissing(release_channel::format_platform_missing(
+            "<manifest>",
+            target,
+            &available,
+        ))
+    })?;
+
+    let bytes = read_url_bytes(&platform.url)
+        .await
+        .map_err(|e| match e {
+            FetchError::ManifestRead(m) => FetchError::Download(m),
+            other => other,
+        })?;
+
+    let got = format!("{:x}", Sha256::digest(&bytes));
+    if !got.eq_ignore_ascii_case(&platform.sha256) {
+        return Err(FetchError::ChecksumMismatch {
+            artifact: platform.url.clone(),
+            expected: platform.sha256.clone(),
+            got,
+        });
+    }
+
+    fs::create_dir_all(dest_root).map_err(|e| {
+        FetchError::Io(format!(
+            "create dest_root '{}': {e}",
+            dest_root.display()
+        ))
+    })?;
+
+    // Decompress + untar in one shot. Refuse paths that escape dest_root
+    // (`..` traversal) — defensive belt-and-suspenders even though our own
+    // workflows produce well-formed archives.
+    let cursor = std::io::Cursor::new(&bytes);
+    let gz = flate2::read::GzDecoder::new(cursor);
+    let mut archive = tar::Archive::new(gz);
+    archive.set_preserve_mtime(false);
+
+    for entry in archive.entries().map_err(|e| {
+        FetchError::Io(format!("read tar entries from '{}': {e}", platform.url))
+    })? {
+        let mut entry = entry
+            .map_err(|e| FetchError::Io(format!("read tar entry: {e}")))?;
+        let entry_path = entry
+            .path()
+            .map_err(|e| FetchError::Io(format!("decode tar entry path: {e}")))?
+            .into_owned();
+        if entry_path.is_absolute()
+            || entry_path.components().any(|c| {
+                matches!(c, std::path::Component::ParentDir)
+            })
+        {
+            return Err(FetchError::Io(format!(
+                "refusing tar entry with traversal path: '{}'",
+                entry_path.display()
+            )));
+        }
+        let dst = dest_root.join(&entry_path);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).map_err(|e| {
+                FetchError::Io(format!(
+                    "create entry parent '{}': {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+        entry
+            .unpack(&dst)
+            .map_err(|e| FetchError::Io(format!("unpack '{}': {e}", dst.display())))?;
+    }
+
+    // Ensure the binary at dest_root/<basename> is executable.
+    let bin_path = dest_root.join(binary_basename);
+    if bin_path.is_file() {
+        set_executable(&bin_path)?;
+    } else {
+        return Err(FetchError::Io(format!(
+            "archive at '{}' did not contain expected top-level binary '{}'",
+            platform.url,
+            binary_basename
+        )));
+    }
     Ok(())
 }
 
@@ -450,6 +587,7 @@ mod tests {
             },
         );
         let entry = BinaryEntry {
+            kind: ArtifactKind::Binary,
             source_version: "v-test".to_string(),
             platforms,
         };
@@ -487,6 +625,7 @@ mod tests {
             },
         );
         let entry = BinaryEntry {
+            kind: ArtifactKind::Binary,
             source_version: "v-test".to_string(),
             platforms,
         };
@@ -533,6 +672,7 @@ mod tests {
             },
         );
         let entry = BinaryEntry {
+            kind: ArtifactKind::Binary,
             source_version: "v-test".to_string(),
             platforms,
         };
@@ -547,6 +687,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_and_verify_missing_platform_surfaces_error() {
         let entry = BinaryEntry {
+            kind: ArtifactKind::Binary,
             source_version: "v-test".to_string(),
             platforms: HashMap::new(),
         };
@@ -581,6 +722,7 @@ mod tests {
             },
         );
         let entry = BinaryEntry {
+            kind: ArtifactKind::Binary,
             source_version: "v".to_string(),
             platforms,
         };

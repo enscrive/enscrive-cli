@@ -57,6 +57,15 @@ jobs:
           BINARIES["enscrive-observe"]="enscrive-observe"
           BINARIES["enscrive-embed"]="enscrive-embed"
 
+          # ENS-140: enscrive-developer ships as a tar.gz (server binary +
+          # site/ directory). Other binaries are plain executables.
+          # The S3 key suffix differs accordingly.
+          declare -A ARTIFACT_KIND
+          ARTIFACT_KIND["enscrive-cli"]="binary"
+          ARTIFACT_KIND["enscrive-developer"]="archive"
+          ARTIFACT_KIND["enscrive-observe"]="binary"
+          ARTIFACT_KIND["enscrive-embed"]="binary"
+
           TARGETS=(
             x86_64-unknown-linux-gnu
             aarch64-unknown-linux-gnu
@@ -67,8 +76,13 @@ jobs:
           MISSING=0
           for REPO in "${!BINARIES[@]}"; do
             BINARY="${BINARIES[$REPO]}"
+            KIND="${ARTIFACT_KIND[$REPO]}"
             for TARGET in "${TARGETS[@]}"; do
-              KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}"
+              if [[ "${KIND}" = "archive" ]]; then
+                KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}.tar.gz"
+              else
+                KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}"
+              fi
               echo "Checking s3://${S3_BUCKET}/${KEY} ..."
               if ! aws s3api head-object \
                     --bucket "${S3_BUCKET}" \
@@ -108,6 +122,13 @@ jobs:
           BINARIES["enscrive-observe"]="enscrive-observe"
           BINARIES["enscrive-embed"]="enscrive-embed"
 
+          # ENS-140: archive vs plain-binary kind per repo.
+          declare -A ARTIFACT_KIND
+          ARTIFACT_KIND["enscrive-cli"]="binary"
+          ARTIFACT_KIND["enscrive-developer"]="archive"
+          ARTIFACT_KIND["enscrive-observe"]="binary"
+          ARTIFACT_KIND["enscrive-embed"]="binary"
+
           TARGETS=(
             x86_64-unknown-linux-gnu
             aarch64-unknown-linux-gnu
@@ -115,24 +136,28 @@ jobs:
             aarch64-apple-darwin
           )
 
-          # Emit one line per artifact: REPO TARGET BINARY SHA256 SIZE_BYTES
+          # Emit one line per artifact:
+          #   REPO TARGET BINARY KIND S3_KEY_SUFFIX SHA256 SIZE_BYTES
           METADATA_FILE="/tmp/manifest-work/metadata.tsv"
           : > "${METADATA_FILE}"
 
           for REPO in "${!BINARIES[@]}"; do
             BINARY="${BINARIES[$REPO]}"
+            KIND="${ARTIFACT_KIND[$REPO]}"
+            if [[ "${KIND}" = "archive" ]]; then
+              SUFFIX="${BINARY}.tar.gz"
+            else
+              SUFFIX="${BINARY}"
+            fi
             for TARGET in "${TARGETS[@]}"; do
-              KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}"
+              KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${SUFFIX}"
 
-              # Compute SHA256 by streaming the binary itself. Per-binary
-              # `.sha256` sidecars are not produced uniformly across the
-              # service repos (only enscrive-cli ships them today), so
-              # hashing the artifact directly is the only consistent path
-              # and stays correct regardless of upstream workflow drift.
+              # Compute SHA256 by streaming the artifact itself. Robust
+              # against per-binary `.sha256` sidecars not being produced
+              # uniformly across upstream workflows.
               echo "Hashing s3://${S3_BUCKET}/${KEY} ..."
               RAW_HASH=$(aws s3 cp "s3://${S3_BUCKET}/${KEY}" - 2>/dev/null | sha256sum | awk '{print $1}')
               if [[ -z "${RAW_HASH}" || "${RAW_HASH}" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]]; then
-                # Empty SHA = empty stream (s3 cp failed silently or object missing).
                 echo "ERROR: empty SHA256 for ${KEY}; aws s3 cp likely failed"
                 exit 1
               fi
@@ -143,7 +168,7 @@ jobs:
                 --query 'ContentLength' \
                 --output text)
 
-              echo -e "${REPO}\t${TARGET}\t${BINARY}\t${RAW_HASH}\t${SIZE_BYTES}" >> "${METADATA_FILE}"
+              echo -e "${REPO}\t${TARGET}\t${BINARY}\t${KIND}\t${SUFFIX}\t${RAW_HASH}\t${SIZE_BYTES}" >> "${METADATA_FILE}"
             done
           done
 
@@ -186,19 +211,27 @@ jobs:
           BINARIES["enscrive-observe"]="enscrive-observe"
           BINARIES["enscrive-embed"]="enscrive-embed"
 
+          declare -A ARTIFACT_KIND
+          ARTIFACT_KIND["enscrive-cli"]="binary"
+          ARTIFACT_KIND["enscrive-developer"]="archive"
+          ARTIFACT_KIND["enscrive-observe"]="binary"
+          ARTIFACT_KIND["enscrive-embed"]="binary"
+
           # Build per-binary platform objects via jq.
           # Start with an empty binaries object and accumulate.
           BINARIES_JSON="{}"
 
           for REPO in "${!BINARIES[@]}"; do
             BINARY="${BINARIES[$REPO]}"
+            KIND="${ARTIFACT_KIND[$REPO]}"
 
-            # Extract rows for this binary from the TSV
+            # Extract rows for this binary from the TSV.
+            # New column layout: REPO TARGET BINARY KIND SUFFIX SHA256 SIZE.
             PLATFORMS_JSON="{}"
-            while IFS=$'\t' read -r ROW_REPO ROW_TARGET ROW_BINARY ROW_SHA256 ROW_SIZE; do
+            while IFS=$'\t' read -r ROW_REPO ROW_TARGET ROW_BINARY ROW_KIND ROW_SUFFIX ROW_SHA256 ROW_SIZE; do
               [[ "${ROW_REPO}" != "${REPO}" ]] && continue
 
-              ARTIFACT_URL="${BASE_URL}/releases/${CHANNEL}/${VERSION}/${ROW_TARGET}/${ROW_BINARY}"
+              ARTIFACT_URL="${BASE_URL}/releases/${CHANNEL}/${VERSION}/${ROW_TARGET}/${ROW_SUFFIX}"
 
               PLATFORM_ENTRY=$(jq -n \
                 --arg url "${ARTIFACT_URL}" \
@@ -212,10 +245,14 @@ jobs:
                 '. + {($target): $entry}')
             done < "${METADATA_FILE}"
 
+            # Per-binary entry now carries `kind`. Consumers branch on it
+            # to decide whether to treat the artifact as a plain executable
+            # or extract a tar.gz containing both binary and a `site/` tree.
             BINARY_ENTRY=$(jq -n \
               --arg source_version "${VERSION}" \
+              --arg kind "${KIND}" \
               --argjson platforms "${PLATFORMS_JSON}" \
-              '{"source_version": $source_version, "platforms": $platforms}')
+              '{"source_version": $source_version, "kind": $kind, "platforms": $platforms}')
 
             BINARIES_JSON=$(echo "${BINARIES_JSON}" | jq \
               --arg binary "${BINARY}" \
@@ -223,9 +260,12 @@ jobs:
               '. + {($binary): $entry}')
           done
 
-          # Assemble final manifest
+          # Assemble final manifest. schema_version=2: adds per-binary
+          # `kind` field ("binary" | "archive"). Consumers that only
+          # understand schema_version=1 should reject schema_version >= 2
+          # rather than silently treat archives as plain binaries.
           jq -n \
-            --argjson schema_version 1 \
+            --argjson schema_version 2 \
             --arg version "${VERSION}" \
             --arg released_at "${GENERATED_AT}" \
             --arg channel "${CHANNEL_LABEL}" \
