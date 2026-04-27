@@ -606,7 +606,18 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
             admin_username: "admin".to_string(),
             admin_password: generate_secret(24),
             developer_username: "developer".to_string(),
-            developer_password: generate_secret(24),
+            // Default seeded end-user password is the literal "developer" so
+            // a fresh `enscrive init && enscrive start` lands an evaluator
+            // straight in the portal without first spelunking through
+            // ~/.config/enscrive/profiles.toml. Override via env var for
+            // anyone who wants a unique password on day one. The realm
+            // admin password (`admin_password` above) stays randomized —
+            // that one is privileged and gets written only to the profile
+            // file with 600 perms.
+            developer_password: std::env::var("ENSCRIVE_LOCAL_DEVELOPER_PASSWORD")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "developer".to_string()),
         });
 
     let local = LocalProfile {

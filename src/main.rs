@@ -1837,6 +1837,39 @@ fn require_managed_confirmation(
     }
 }
 
+/// ENS-145: human-readable login block emitted after `enscrive start`
+/// succeeds. Reads credentials out of the success-response JSON so a
+/// custom `ENSCRIVE_LOCAL_DEVELOPER_PASSWORD` override is reflected
+/// rather than hardcoded.
+fn print_local_login_block(data: &Value) {
+    let Some(login) = data.get("login") else {
+        return;
+    };
+    let portal = login.get("portal").and_then(|v| v.as_str()).unwrap_or("");
+    let username = login
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let password = login
+        .get("password")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if portal.is_empty() || username.is_empty() || password.is_empty() {
+        return;
+    }
+    println!();
+    println!("✓ Local stack ready.");
+    println!();
+    println!("Login at {}/auth/login", portal);
+    println!("    username: {}", username);
+    println!("    password: {}", password);
+    println!();
+    println!("Override the password by setting ENSCRIVE_LOCAL_DEVELOPER_PASSWORD");
+    println!("before running `enscrive init`, or by editing the local profile in");
+    println!("~/.config/enscrive/profiles.toml and re-running `enscrive start`.");
+    println!();
+}
+
 fn local_runtime_failure(command: &str, error: String) -> CliResponse {
     let lower = error.to_lowercase();
     if lower.contains("self-managed local mode requires docker")
@@ -3257,7 +3290,17 @@ async fn main() {
         })
         .await
         {
-            Ok(data) => CliResponse::success("start", data).emit(fmt),
+            Ok(data) => {
+                // ENS-145: print a clear login block before the JSON dump so
+                // human evaluators see how to log in to the portal without
+                // grep'ing through pretty-printed JSON. JSON callers see
+                // only the structured response (login.{username,password}
+                // is in the data object either way).
+                if matches!(fmt, OutputFormat::Human) {
+                    print_local_login_block(&data);
+                }
+                CliResponse::success("start", data).emit(fmt)
+            }
             Err(e) => local_runtime_failure("start", e).emit(fmt),
         },
         Commands::Stop(args) => match local::stop(StopOptions {
