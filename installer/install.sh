@@ -1,15 +1,18 @@
 #!/bin/sh
 # ENS-81 CLI-REL-010: enscrive CLI installer
 #
-# One-liner (dev channel — active while production CloudFront is not yet provisioned):
-#   curl -fsSL https://dev.enscrive.io/install | sh
+# Public install command:
+#   curl -fsSL https://install.enscrive.io/install.sh | sh
 #
-# Production one-liner (post-GA, tracked as a sub-ticket of ENS-81):
-#   curl -fsSL https://enscrive.io/install | sh
+# install.enscrive.io is a public alias on CloudFront distribution
+# EWE9BH1POOS0A fronting s3://enscrive-install-artifacts-dev. WAF was
+# dropped 2026-04-27; the path is open from anywhere on Earth.
 #
-# TODO(team-lead): after merging this branch, publish the script to S3 / invalidate CDN:
-#   aws s3 cp installer/install.sh s3://enscrive-install-artifacts-dev/install.sh
-#   aws cloudfront create-invalidation --distribution-id EWE9BH1POOS0A --paths /install
+# Re-publish after edits:
+#   aws s3 cp installer/install.sh s3://enscrive-install-artifacts-dev/install.sh \
+#     --content-type 'text/x-shellscript; charset=utf-8' \
+#     --cache-control 'public, max-age=300'
+#   aws cloudfront create-invalidation --distribution-id EWE9BH1POOS0A --paths '/install.sh'
 #
 # Design decision — CLI-only install (ENS-81 resolved):
 #   install.sh fetches ONLY the `enscrive` CLI binary.  The three service binaries
@@ -39,9 +42,9 @@ set -eu
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-DEV_MANIFEST_URL="https://dev.enscrive.io/releases/dev/latest.json"
+DEFAULT_MANIFEST_URL="https://install.enscrive.io/releases/dev/latest.json"
 DEFAULT_PREFIX="$HOME/.local/bin"
-MANIFEST_URL="${ENSCRIVE_MANIFEST_URL:-$DEV_MANIFEST_URL}"
+MANIFEST_URL="${ENSCRIVE_MANIFEST_URL:-$DEFAULT_MANIFEST_URL}"
 PREFIX="${ENSCRIVE_INSTALL_PREFIX:-$DEFAULT_PREFIX}"
 TARGET_OVERRIDE=""
 INSECURE=0
