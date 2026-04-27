@@ -107,22 +107,24 @@ open http://localhost:13001
 
 You should see the Enscrive developer portal as a fresh-eval user would.
 
-## Default credentials
+## Default end-user account
 
-For the self-managed dev/eval flow, Keycloak admin defaults to
-`developer` / `developer` (see push-back note below — this is a
-deliberate convenience for local evaluation, not a security stance).
-Login at `http://localhost:13001/auth/admin` if you need to inspect realm
-state.
+The self-managed install seeds a **pre-created end-user** in the Keycloak
+realm so evaluators can log in to the developer portal immediately
+without going through email-verified signup:
 
-> **Push back available.** `developer/developer` is fine for local-dev
-> convenience but should be (1) printed loudly at install time so the
-> user knows they exist and could change them, and (2) overrideable via
-> `--admin-password=...` flag for users who'd prefer a unique password
-> on day one. If a user accidentally exposes `:8080` (Keycloak) to the
-> internet, well-known credentials become a finding. We accept this risk
-> for *local* dev; it must NOT be the default in any deployment that
-> isn't strictly self-managed-on-laptop.
+- Username: `developer`
+- Password: `developer`
+- Login URL: `http://localhost:13001/auth/login`
+
+This is a normal realm user (not the realm admin). Same pattern as
+WordPress's `admin/admin`, Postman demo accounts, localstack defaults —
+intended to remove first-run friction for local evaluation.
+
+The Keycloak **realm admin** (account that manages the realm itself at
+`/auth/admin`) is separate — it should be randomized at install time and
+printed loudly to the operator, since that one is privileged. Tracked
+as a follow-on if not already implemented in `enscrive init`.
 
 ## Teardown
 
