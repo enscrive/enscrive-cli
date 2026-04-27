@@ -66,18 +66,24 @@ jobs:
           ARTIFACT_KIND["enscrive-observe"]="binary"
           ARTIFACT_KIND["enscrive-embed"]="binary"
 
-          TARGETS=(
-            x86_64-unknown-linux-gnu
-            aarch64-unknown-linux-gnu
-            x86_64-unknown-linux-musl
-            aarch64-apple-darwin
-          )
+          # Per-binary platform availability. enscrive-developer is a
+          # server-only binary, deployed exclusively to x86_64 Linux EC2 —
+          # it does not (and will not) ship for macOS, ARM Linux, or musl.
+          # The other three binaries are end-user / general-purpose and
+          # ship for every platform we support.
+          ALL_TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin"
+          DEVELOPER_TARGETS="x86_64-unknown-linux-gnu"
+          declare -A PLATFORMS
+          PLATFORMS["enscrive-cli"]="${ALL_TARGETS}"
+          PLATFORMS["enscrive-developer"]="${DEVELOPER_TARGETS}"
+          PLATFORMS["enscrive-observe"]="${ALL_TARGETS}"
+          PLATFORMS["enscrive-embed"]="${ALL_TARGETS}"
 
           MISSING=0
           for REPO in "${!BINARIES[@]}"; do
             BINARY="${BINARIES[$REPO]}"
             KIND="${ARTIFACT_KIND[$REPO]}"
-            for TARGET in "${TARGETS[@]}"; do
+            for TARGET in ${PLATFORMS[$REPO]}; do
               if [[ "${KIND}" = "archive" ]]; then
                 KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}.tar.gz"
               else
@@ -129,12 +135,18 @@ jobs:
           ARTIFACT_KIND["enscrive-observe"]="binary"
           ARTIFACT_KIND["enscrive-embed"]="binary"
 
-          TARGETS=(
-            x86_64-unknown-linux-gnu
-            aarch64-unknown-linux-gnu
-            x86_64-unknown-linux-musl
-            aarch64-apple-darwin
-          )
+          # Per-binary platform availability. enscrive-developer is a
+          # server-only binary, deployed exclusively to x86_64 Linux EC2 —
+          # it does not (and will not) ship for macOS, ARM Linux, or musl.
+          # The other three binaries are end-user / general-purpose and
+          # ship for every platform we support.
+          ALL_TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin"
+          DEVELOPER_TARGETS="x86_64-unknown-linux-gnu"
+          declare -A PLATFORMS
+          PLATFORMS["enscrive-cli"]="${ALL_TARGETS}"
+          PLATFORMS["enscrive-developer"]="${DEVELOPER_TARGETS}"
+          PLATFORMS["enscrive-observe"]="${ALL_TARGETS}"
+          PLATFORMS["enscrive-embed"]="${ALL_TARGETS}"
 
           # Emit one line per artifact:
           #   REPO TARGET BINARY KIND S3_KEY_SUFFIX SHA256 SIZE_BYTES
@@ -149,7 +161,7 @@ jobs:
             else
               SUFFIX="${BINARY}"
             fi
-            for TARGET in "${TARGETS[@]}"; do
+            for TARGET in ${PLATFORMS[$REPO]}; do
               KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${SUFFIX}"
 
               # Compute SHA256 by streaming the artifact itself. Robust
@@ -189,7 +201,12 @@ jobs:
           METADATA_FILE="/tmp/manifest-work/metadata.tsv"
           MANIFEST_FILE="/tmp/manifest-work/manifest.json"
           GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          BASE_URL="https://dev.enscrive.io"
+          # Public install hostname. Both install.enscrive.io and
+          # dev.enscrive.io alias the same CloudFront distribution today,
+          # but install.* is the documented public surface (curl
+          # install.enscrive.io | sh) and what we want hardcoded into
+          # manifests so released CLIs hit the public path forever.
+          BASE_URL="https://install.enscrive.io"
 
           # Derive channel label for the manifest's "channel" field.
           # Tags like v0.1.0-beta.x map to "beta"; others to "internal" for now.
