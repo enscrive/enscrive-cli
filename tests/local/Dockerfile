@@ -10,12 +10,20 @@
 FROM fedora:42
 
 RUN dnf -y install --setopt=install_weak_deps=False \
-        curl sudo procps-ng iproute iptables findutils tar gzip xz which jq \
+        curl sudo procps-ng iproute iptables-nft iptables-services \
+        findutils tar gzip xz which jq \
         ca-certificates dnf-plugins-core \
     && dnf -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin \
         || (dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo && \
             dnf -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin) \
-    && dnf clean all
+    && dnf clean all \
+    # Switch iptables/ip6tables to the nftables backend. Fedora 42 host
+    # kernels run nf_tables and don't load the legacy ip_tables module;
+    # without this, dockerd's bridge driver fails to set up the NAT chain
+    # ("Module ip_tables not found"). iptables-nft speaks the same syntax
+    # but talks to nf_tables under the hood.
+    && (update-alternatives --set iptables /usr/sbin/iptables-nft || true) \
+    && (update-alternatives --set ip6tables /usr/sbin/ip6tables-nft || true)
 
 # Non-root test user. The default end-user persona — matches what a
 # developer-evaluating-Enscrive runs as on their own laptop.
