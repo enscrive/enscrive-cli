@@ -2790,10 +2790,23 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .await
         .map_err(|e| format!("check keycloak realm: {e}"))?;
     if realm_resp.status() == reqwest::StatusCode::NOT_FOUND {
+        // ENS-153: verifyEmail=false on local realm. The seeded
+        // developer/developer end-user (ENS-145) needs to log in
+        // immediately; there is no SMTP wired in self-managed local
+        // mode, so an email-verification interstitial would dead-end
+        // the user. loginWithEmailAllowed stays true so users can
+        // self-register additional accounts using their email as the
+        // login identifier.
         let create = client
             .post(format!("{}/admin/realms", base))
             .header("Authorization", &auth)
-            .json(&json!({"realm": local.keycloak.realm, "enabled": true}))
+            .json(&json!({
+                "realm": local.keycloak.realm,
+                "enabled": true,
+                "verifyEmail": false,
+                "loginWithEmailAllowed": true,
+                "registrationEmailAsUsername": false,
+            }))
             .send()
             .await
             .map_err(|e| format!("create keycloak realm: {e}"))?;
@@ -2804,6 +2817,28 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
     } else if !realm_resp.status().is_success() {
         let body = realm_resp.text().await.unwrap_or_default();
         return Err(format!("check keycloak realm failed: {}", body));
+    }
+
+    // ENS-153: unconditional PUT to apply verifyEmail=false on
+    // already-existing realms (so re-init from a pre-ENS-153 install
+    // flips the flag without requiring --clean). Idempotent on fresh
+    // realms — same body the create POST used.
+    let realm_put = client
+        .put(format!("{}/admin/realms/{}", base, local.keycloak.realm))
+        .header("Authorization", &auth)
+        .json(&json!({
+            "realm": local.keycloak.realm,
+            "enabled": true,
+            "verifyEmail": false,
+            "loginWithEmailAllowed": true,
+            "registrationEmailAsUsername": false,
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("update keycloak realm: {e}"))?;
+    if !realm_put.status().is_success() {
+        let body = realm_put.text().await.unwrap_or_default();
+        return Err(format!("update keycloak realm failed: {}", body));
     }
 
     let clients_resp = client
