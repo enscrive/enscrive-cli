@@ -692,6 +692,10 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         &render_local_loki_config(),
     )?;
     write_text(
+        &config_dir.join("vector.toml"),
+        &render_local_vector_config(),
+    )?;
+    write_text(
         &config_dir.join("infra.env"),
         &render_infra_env(&local, &postgres_password, &qdrant_api_key),
     )?;
@@ -1173,6 +1177,43 @@ CREATE DATABASE enscrive_embed_backup;
     .to_string()
 }
 
+/// ENS-153: Vector config for the self-managed local stack. Tails the
+/// three service log files at `/var/log/enscrive/*.log` (bind-mounted
+/// from the host's per-profile log dir) and ships to the in-network
+/// Loki container at `http://loki:3100`. Single tenant ("system") so
+/// labels match what enscrive-deploy publishes.
+fn render_local_vector_config() -> String {
+    r#"
+data_dir = "/var/lib/vector"
+
+[sources.enscrive_logs]
+type = "file"
+include = ["/var/log/enscrive/*.log"]
+read_from = "beginning"
+ignore_older_secs = 86400
+
+[transforms.parse_service]
+type = "remap"
+inputs = ["enscrive_logs"]
+source = '''
+. |= parse_regex!(.file, r'/var/log/enscrive/(?P<service>[^/]+)\.log$') ?? {}
+.service = .service || "unknown"
+'''
+
+[sinks.loki]
+type = "loki"
+inputs = ["parse_service"]
+endpoint = "http://loki:3100"
+encoding.codec = "text"
+labels.service = "{{ service }}"
+labels.source = "self-managed"
+tenant_id = "system"
+out_of_order_action = "accept"
+"#
+    .trim_start()
+    .to_string()
+}
+
 fn render_local_loki_config() -> String {
     r#"
 auth_enabled: true
@@ -1287,6 +1328,15 @@ services:
     volumes:
       - "{loki_config}:/etc/loki/config.yaml:ro,Z"
       - "{loki_data}:/loki:Z"
+
+  vector:
+    image: timberio/vector:0.41.1-debian
+    restart: unless-stopped
+    depends_on:
+      - loki
+    volumes:
+      - "{vector_config}:/etc/vector/vector.toml:ro,Z"
+      - "{log_dir}:/var/log/enscrive:ro,Z"
 {grafana_service}
 "#,
         postgres_port = local.ports.postgres,
@@ -1303,6 +1353,8 @@ services:
         loki_port = local.ports.loki,
         loki_config = config_dir.join("loki-config.yaml").display(),
         loki_data = data_dir.join("loki").display(),
+        vector_config = config_dir.join("vector.toml").display(),
+        log_dir = local.log_dir,
         grafana_service = grafana_service.trim_end(),
     )
     .trim()
