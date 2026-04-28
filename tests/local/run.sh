@@ -23,8 +23,26 @@ set -euo pipefail
 
 IMAGE="${PLAYGROUND_IMAGE:-enscrive-playground:latest}"
 NAME="${PLAYGROUND_NAME:-enscrive-playground}"
-HOST_DEV_PORT="${HOST_DEV_PORT:-13001}"
+HOST_DEV_PORT="${HOST_DEV_PORT:-13002}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Auto-pick a free host port if the requested one is busy. Walks 13002 →
+# 13099 looking for a hole. Prints the chosen port so the user knows.
+# Override with HOST_DEV_PORT=<n> if you want a specific port.
+port_in_use() {
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${1}\$"
+}
+if [ -z "${HOST_DEV_PORT_LOCKED:-}" ] && port_in_use "$HOST_DEV_PORT"; then
+    orig="$HOST_DEV_PORT"
+    for cand in $(seq 13002 13099); do
+        if ! port_in_use "$cand"; then
+            HOST_DEV_PORT="$cand"
+            echo "Note: host port ${orig} is busy; using ${HOST_DEV_PORT} instead."
+            echo "      Pin a specific port with: HOST_DEV_PORT=<n> tests/local/run.sh"
+            break
+        fi
+    done
+fi
 
 cmd="${1:-test}"
 

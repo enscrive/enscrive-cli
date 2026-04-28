@@ -12,8 +12,19 @@ tests/local/run.sh teardown  # stop + remove the playground container
 
 After a successful run:
 
-- Browser → `http://localhost:13001` → playground's developer portal
+- Browser → `http://localhost:13002` → playground's developer portal
+  (or whatever the script tells you it picked — see "Host port selection" below)
 - Login: `developer` / `developer`
+
+## Host port selection
+
+The script defaults to host `:13002`. If that's busy, it auto-walks
+`13003 → 13099` looking for a hole and reports the port it picked.
+
+Pin a specific port with `HOST_DEV_PORT=<n> tests/local/run.sh`. We avoid
+`:13001` and `:13000` deliberately because those are commonly bound by
+`enscrive-deploy provision --target dev --build local` (cargo-leptos
+serves the dev portal there in default and dev-watch configs).
 
 ## Why DinD instead of `-v /var/run/docker.sock`
 
@@ -50,9 +61,9 @@ Playground container (own dockerd inside)
   ├─ 127.0.0.1:3100   loki                    │  Invisible to your host.
   └─ 127.0.0.1:8084   observe rest         ───┘
                                                 ▼
-                                       host :13001 (single -p map)
+                                       host :13002 (single -p map; auto-picked)
                                                 ▼
-                                       browser → http://localhost:13001
+                                       browser → http://localhost:13002
 ```
 
 If you want to inspect Keycloak admin or Grafana from your host, pop into
