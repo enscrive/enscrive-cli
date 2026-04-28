@@ -11,7 +11,7 @@ FROM fedora:42
 
 RUN dnf -y install --setopt=install_weak_deps=False \
         curl sudo procps-ng iproute iptables-nft iptables-services \
-        findutils tar gzip xz which jq \
+        findutils tar gzip xz which jq socat \
         ca-certificates dnf-plugins-core \
     && dnf -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin \
         || (dnf config-manager addrepo --from-repofile=https://download.docker.com/linux/fedora/docker-ce.repo && \

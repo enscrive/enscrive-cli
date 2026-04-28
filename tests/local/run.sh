@@ -74,7 +74,7 @@ case "$cmd" in
     exec docker run --rm -it \
       --privileged \
       --name "$NAME" \
-      -p "${HOST_DEV_PORT}:3000" \
+      -p "${HOST_DEV_PORT}:3001" \
       -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
       -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
       -e "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}" \
@@ -87,7 +87,7 @@ case "$cmd" in
     docker run -d \
       --privileged \
       --name "$NAME" \
-      -p "${HOST_DEV_PORT}:3000" \
+      -p "${HOST_DEV_PORT}:3001" \
       -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
       -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
       -e "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}" \

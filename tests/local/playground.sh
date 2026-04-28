@@ -53,10 +53,27 @@ for i in $(seq 1 60); do
   [ "$i" = "60" ] && fail "developer portal didn't come up on :${DEV_PORT} within 120s"
 done
 
+step "Step 5: Expose dev portal on container eth0 via socat"
+# enscrive init binds the developer service to 127.0.0.1:3000 (container
+# loopback). Docker `-p host:container` forwards traffic to the
+# container's eth0, NOT its loopback — so a host browser cannot reach
+# the loopback-bound service. Spawn a socat that listens on eth0:3001
+# and forwards to 127.0.0.1:3000. The host port mapping in run.sh maps
+# its host port to container :3001 so the proxy chain completes.
+#
+# Long-term fix (filed as a Linear ticket): add an --developer-bind
+# flag to `enscrive init` so this socat shim becomes unnecessary.
+sudo nohup socat \
+  TCP-LISTEN:3001,bind=0.0.0.0,fork,reuseaddr \
+  TCP:127.0.0.1:${DEV_PORT} \
+  > /tmp/socat.log 2>&1 &
+sleep 1
+ss -ltn | awk '$4 ~ /:3001$/ {print "  socat listening on", $4}' || true
+
 step "Smoke complete"
 echo
 echo "Stack is running inside this playground container."
-echo "  developer portal: http://127.0.0.1:${DEV_PORT} (mapped to host :13001)"
+echo "  developer portal: http://127.0.0.1:${DEV_PORT} (loopback) + 0.0.0.0:3001 (eth0 via socat)"
 echo "  log in: developer / developer"
 echo
 echo "Other services (Keycloak, Qdrant, Loki, etc.) are reachable inside the"
