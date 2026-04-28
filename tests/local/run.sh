@@ -79,6 +79,7 @@ case "$cmd" in
       -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
       -e "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}" \
       -e "NEBIUS_API_KEY=${NEBIUS_API_KEY:-}" \
+      -v "${SCRIPT_DIR}/playground.sh:/usr/local/bin/playground.sh:ro" \
       "$IMAGE" bash
     ;;
   test)
@@ -91,6 +92,7 @@ case "$cmd" in
       -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
       -e "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}" \
       -e "NEBIUS_API_KEY=${NEBIUS_API_KEY:-}" \
+      -v "${SCRIPT_DIR}/playground.sh:/usr/local/bin/playground.sh:ro" \
       "$IMAGE" tail -f /dev/null
     # Run the smoke script inside the container as tester. Output to host stdout.
     docker exec -u tester "$NAME" bash -lc 'bash /usr/local/bin/playground.sh'
