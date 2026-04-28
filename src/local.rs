@@ -806,11 +806,32 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
 
     let keycloak_user = bootstrap_keycloak(&local).await?;
 
-    let started_embed = spawn_service(
+    // ENS-153: per-service ESM env wiring. Each service binary gets
+    // ESM_BINARY (so its embedded SecretsManager shells out to the right
+    // executable), its own per-service ESM_VAULT_PATH, and ESM_KEY_FILE
+    // pointing at the master-key file (file-based so the master key
+    // never appears in process listings). When services migrate from
+    // std::env::var to SecretsManager::get, these env vars are what
+    // unlock the vault.
+    let runtime_path = std::path::PathBuf::from(&local.runtime_dir);
+    let master_key_path = esm_master_key_path(&runtime_path);
+    let embed_vault_path = esm_service_vault(&runtime_path, "enscrive-embed");
+    let observe_vault_path = esm_service_vault(&runtime_path, "enscrive-observe");
+    let developer_vault_path = esm_service_vault(&runtime_path, "enscrive-developer");
+    let esm_binary_path = local.binaries.esm.clone();
+    let master_key_str = master_key_path.display().to_string();
+
+    let embed_esm_env: Vec<(&str, String)> = vec![
+        ("ESM_BINARY", esm_binary_path.clone()),
+        ("ESM_VAULT_PATH", embed_vault_path.display().to_string()),
+        ("ESM_KEY_FILE", master_key_str.clone()),
+    ];
+    let started_embed = spawn_service_with_extra_env(
         "enscrive-embed",
         &local.binaries.embed,
         Path::new(&local.embed_env_file),
         log_dir,
+        &embed_esm_env,
     )?;
     if service_was_newly_started(&started_embed) {
         started_services.push("enscrive-embed");
@@ -825,11 +846,17 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         return Err(format_service_start_error(error, "enscrive-embed", log_dir));
     }
 
-    let started_observe = spawn_service(
+    let observe_esm_env: Vec<(&str, String)> = vec![
+        ("ESM_BINARY", esm_binary_path.clone()),
+        ("ESM_VAULT_PATH", observe_vault_path.display().to_string()),
+        ("ESM_KEY_FILE", master_key_str.clone()),
+    ];
+    let started_observe = spawn_service_with_extra_env(
         "enscrive-observe",
         &local.binaries.observe,
         Path::new(&local.observe_env_file),
         log_dir,
+        &observe_esm_env,
     )?;
     if service_was_newly_started(&started_observe) {
         started_services.push("enscrive-observe");
@@ -855,23 +882,23 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
     // Set LEPTOS_SITE_ROOT to the archive's site/ so the runtime serves
     // /pkg/enscrive-developer.{js,wasm,css} from there. The other two
     // LEPTOS_* vars match what cargo-leptos baked at build time.
-    let developer_extra_env: Vec<(&str, String)> = {
+    let mut developer_extra_env: Vec<(&str, String)> = vec![
+        ("ESM_BINARY", esm_binary_path.clone()),
+        ("ESM_VAULT_PATH", developer_vault_path.display().to_string()),
+        ("ESM_KEY_FILE", master_key_str.clone()),
+    ];
+    {
         let bin_path = std::path::PathBuf::from(&local.binaries.developer);
         if let Some(archive_root) = bin_path.parent() {
             let site_dir = archive_root.join("site");
             if site_dir.is_dir() {
-                vec![
-                    ("LEPTOS_SITE_ROOT", site_dir.display().to_string()),
-                    ("LEPTOS_OUTPUT_NAME", "enscrive-developer".to_string()),
-                    ("LEPTOS_SITE_PKG_DIR", "pkg".to_string()),
-                ]
-            } else {
-                Vec::new()
+                developer_extra_env.push(("LEPTOS_SITE_ROOT", site_dir.display().to_string()));
+                developer_extra_env
+                    .push(("LEPTOS_OUTPUT_NAME", "enscrive-developer".to_string()));
+                developer_extra_env.push(("LEPTOS_SITE_PKG_DIR", "pkg".to_string()));
             }
-        } else {
-            Vec::new()
         }
-    };
+    }
     let started_developer = spawn_service_with_extra_env(
         "enscrive-developer",
         &local.binaries.developer,
