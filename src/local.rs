@@ -50,6 +50,12 @@ pub struct SelfManagedInitOptions {
     pub developer_bin: Option<String>,
     pub observe_bin: Option<String>,
     pub embed_bin: Option<String>,
+    /// ENS-153: explicit override for the `esm` binary path. When unset,
+    /// `enscrive init` discovers `esm` via PATH lookup (the binary is
+    /// expected to be globally installed today, built from ENSCRIBE-SECRETS).
+    /// Future release-pipeline work will let init fetch it from the
+    /// manifest like the other binaries.
+    pub esm_bin: Option<String>,
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
     pub voyage_api_key: Option<String>,
@@ -145,6 +151,11 @@ struct LocalBinaries {
     developer: String,
     observe: String,
     embed: String,
+    /// ENS-153: esm binary used to synthesize and access per-service ESM
+    /// vaults at init/start time. Globally installed today (built from
+    /// ENSCRIBE-SECRETS); a future release-pipeline change will publish
+    /// it in the manifest alongside the other binaries.
+    esm: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1812,9 +1823,33 @@ async fn resolve_self_managed_binaries(
     const BINARY_DEVELOPER: &str = "enscrive-developer";
     const BINARY_OBSERVE: &str = "enscrive-observe";
     const BINARY_EMBED: &str = "enscrive-embed";
+    const BINARY_ESM: &str = "esm";
 
-    // Short-circuit when all three are operator-supplied. No manifest fetch
-    // required, which means no network call and no XDG directory creation.
+    // ENS-153: resolve the esm binary first. It's globally installed on
+    // operator machines today (built from ENSCRIBE-SECRETS). Discovery
+    // order: explicit --esm-bin override → `which esm` in PATH → error
+    // pointing at the install instructions. Manifest fetch will become
+    // a fallback once the parallel release-pipeline work for
+    // chrisroge/enscribe-secrets ships.
+    let esm = if let Some(path) = opts.esm_bin.as_ref() {
+        path.clone()
+    } else if let Some(found) = which_in_path(BINARY_ESM) {
+        found.display().to_string()
+    } else {
+        return Err(format!(
+            "esm binary not found on PATH and no --esm-bin override provided.\n\
+             \n\
+             enscrive init --mode self-managed needs `esm` to synthesize\n\
+             per-service secrets vaults. Install it from the ENSCRIBE-SECRETS\n\
+             repo (cargo install --path /path/to/ENSCRIBE-SECRETS) or pass\n\
+             --esm-bin <path>. A future enscrive-cli release will fetch esm\n\
+             from the cross-repo manifest automatically."
+        ));
+    };
+
+    // Short-circuit when all three service binaries are operator-supplied.
+    // No manifest fetch required, which means no network call and no XDG
+    // directory creation. (esm is already resolved above.)
     if let (Some(dev), Some(obs), Some(emb)) = (
         opts.developer_bin.as_ref(),
         opts.observe_bin.as_ref(),
@@ -1824,6 +1859,7 @@ async fn resolve_self_managed_binaries(
             developer: dev.clone(),
             observe: obs.clone(),
             embed: emb.clone(),
+            esm,
         });
     }
 
@@ -1915,6 +1951,7 @@ async fn resolve_self_managed_binaries(
         developer,
         observe,
         embed,
+        esm,
     })
 }
 
@@ -3369,6 +3406,7 @@ mod tests {
                 developer: "/tmp/enscrive-developer".to_string(),
                 observe: "/tmp/enscrive-observe".to_string(),
                 embed: "/tmp/enscrive-embed".to_string(),
+                esm: "/tmp/esm".to_string(),
             },
             ports: LocalPorts {
                 developer: 3000,
@@ -3505,6 +3543,7 @@ mod tests {
                 developer: "/tmp/enscrive-developer".to_string(),
                 observe: "/tmp/enscrive-observe".to_string(),
                 embed: "/tmp/enscrive-embed".to_string(),
+                esm: "/tmp/esm".to_string(),
             },
             ports: LocalPorts {
                 developer: 3000,
