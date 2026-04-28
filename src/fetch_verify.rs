@@ -41,7 +41,12 @@ use crate::release_channel;
 /// schema_version=2 — adds per-binary `kind` field ("binary" | "archive").
 ///   "archive" entries are tar.gz packages containing a server binary plus
 ///   a `site/` directory of static assets (Leptos SSR + hydrate apps).
-pub const SUPPORTED_SCHEMA_VERSION: u32 = 2;
+/// schema_version=3 — `source_version` is now populated for every binary,
+///   enabling mixed distribution patterns in a single manifest: Pattern A
+///   binaries (enscrive-cli, enscrive-developer, enscrive-observe,
+///   enscrive-embed, esm) ride the unified platform tag; Pattern B binaries
+///   (enscrive-docs) pin their own independent semver tag.
+pub const SUPPORTED_SCHEMA_VERSION: u32 = 3;
 
 /// A parsed release manifest.
 ///
@@ -486,8 +491,9 @@ mod tests {
 
     fn fixture_manifest_json() -> String {
         // Mirrors DESIGN.md §2.3 verbatim enough to exercise parse paths.
+        // schema_version=3 exercises the current supported maximum.
         r#"{
-            "schema_version": 1,
+            "schema_version": 3,
             "version": "v0.1.0-beta.1",
             "released_at": "2026-05-10T14:00:00Z",
             "channel": "beta",
@@ -528,7 +534,7 @@ mod tests {
         let url = format!("file://{}", path.display());
         let manifest = fetch_manifest(&url).await.unwrap();
 
-        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.schema_version, 3);
         assert_eq!(manifest.version, "v0.1.0-beta.1");
         assert_eq!(manifest.channel.as_deref(), Some("beta"));
         assert_eq!(manifest.binaries.len(), 3);

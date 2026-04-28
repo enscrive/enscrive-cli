@@ -1,16 +1,28 @@
 name: manifest
 
 # ENS-91 / RB-005 — Manifest generator + publication workflow.
-# Operator-dispatched: must only run after all four per-repo release workflows
+# Operator-dispatched: must only run after all per-repo release workflows
 # have completed for the given version tag. No push trigger by design.
+#
+# Distribution patterns:
+#   Pattern A ("ride the herd"): binary tag == unified Enscrive platform version.
+#     Applies to: enscrive-cli, enscrive-developer, enscrive-observe,
+#                 enscrive-embed, esm.
+#   Pattern B ("pinned per-binary"): binary owns its own semver cadence;
+#     the manifest pins which version to bundle. Applies to enscrive-docs.
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version tag (e.g. v0.1.0-beta.1)"
+        description: "Unified Enscrive release version tag (e.g. v0.1.0-beta.3)"
         required: true
         type: string
+      enscrive_docs_version:
+        description: "enscrive-docs version tag to bundle (leave empty to resolve the latest tag automatically)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   id-token: write
@@ -41,21 +53,74 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # ---------------------------------------------------------------------------
+      # Resolve the concrete enscrive-docs version tag.
+      # If the operator supplied enscrive_docs_version, use it directly.
+      # Otherwise query the enscrive-docs repo for its most recent v* release tag.
+      # The resolved value is cached in a step output so every subsequent step
+      # uses exactly the same tag — no repeated gh calls, no drift.
+      # ---------------------------------------------------------------------------
+      - name: Resolve enscrive-docs version
+        id: resolve_docs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENSCRIVE_DOCS_VERSION_INPUT: ${{ inputs.enscrive_docs_version }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${ENSCRIVE_DOCS_VERSION_INPUT}" ]]; then
+            DOCS_VERSION="${ENSCRIVE_DOCS_VERSION_INPUT}"
+            echo "enscrive-docs version pinned by operator: ${DOCS_VERSION}"
+          else
+            echo "enscrive-docs version not pinned — resolving latest tag from enscrive/enscrive-docs ..."
+            DOCS_VERSION=$(gh release list \
+              --repo enscrive/enscrive-docs \
+              --limit 1 \
+              --json tagName \
+              --jq '.[0].tagName')
+            if [[ -z "${DOCS_VERSION}" ]]; then
+              echo "ERROR: could not resolve latest enscrive-docs release tag. Pass enscrive_docs_version explicitly."
+              exit 1
+            fi
+            echo "Resolved enscrive-docs latest tag: ${DOCS_VERSION}"
+          fi
+
+          echo "docs_version=${DOCS_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      # ---------------------------------------------------------------------------
       # Gate: verify all expected artifacts exist in S3 before generating a manifest.
       # Fail fast if any binary is missing — partial manifests must not be published.
+      #
+      # SOURCE_VERSIONS maps each repo to the S3 version path it was published under.
+      # Pattern A binaries use $VERSION (the unified platform tag).
+      # Pattern B binaries (enscrive-docs) use their own independently resolved tag.
       # ---------------------------------------------------------------------------
       - name: Verify all artifacts exist in S3
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
+          ENSCRIVE_DOCS_VERSION: ${{ steps.resolve_docs.outputs.docs_version }}
         run: |
           set -euo pipefail
+
+          # Per-binary source version (S3 path segment).
+          # Pattern A — ride the herd: use the unified platform version.
+          # Pattern B — pinned:        use the binary's own resolved version.
+          declare -A SOURCE_VERSIONS
+          SOURCE_VERSIONS["enscrive-cli"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-developer"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-observe"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-embed"]="${VERSION}"
+          SOURCE_VERSIONS["esm"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-docs"]="${ENSCRIVE_DOCS_VERSION}"
 
           declare -A BINARIES
           BINARIES["enscrive-cli"]="enscrive"
           BINARIES["enscrive-developer"]="enscrive-developer"
           BINARIES["enscrive-observe"]="enscrive-observe"
           BINARIES["enscrive-embed"]="enscrive-embed"
+          BINARIES["esm"]="esm"
+          BINARIES["enscrive-docs"]="enscrive-docs"
 
           # ENS-140: enscrive-developer ships as a tar.gz (server binary +
           # site/ directory). Other binaries are plain executables.
@@ -65,12 +130,14 @@ jobs:
           ARTIFACT_KIND["enscrive-developer"]="archive"
           ARTIFACT_KIND["enscrive-observe"]="binary"
           ARTIFACT_KIND["enscrive-embed"]="binary"
+          ARTIFACT_KIND["esm"]="binary"
+          ARTIFACT_KIND["enscrive-docs"]="binary"
 
           # Per-binary platform availability. enscrive-developer is a
           # server-only binary, deployed exclusively to x86_64 Linux EC2 —
           # it does not (and will not) ship for macOS, ARM Linux, or musl.
-          # The other three binaries are end-user / general-purpose and
-          # ship for every platform we support.
+          # The other binaries are end-user / general-purpose and ship for
+          # every platform we support.
           ALL_TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin"
           DEVELOPER_TARGETS="x86_64-unknown-linux-gnu"
           declare -A PLATFORMS
@@ -78,16 +145,19 @@ jobs:
           PLATFORMS["enscrive-developer"]="${DEVELOPER_TARGETS}"
           PLATFORMS["enscrive-observe"]="${ALL_TARGETS}"
           PLATFORMS["enscrive-embed"]="${ALL_TARGETS}"
+          PLATFORMS["esm"]="${ALL_TARGETS}"
+          PLATFORMS["enscrive-docs"]="${ALL_TARGETS}"
 
           MISSING=0
           for REPO in "${!BINARIES[@]}"; do
             BINARY="${BINARIES[$REPO]}"
             KIND="${ARTIFACT_KIND[$REPO]}"
+            SRC_VER="${SOURCE_VERSIONS[$REPO]}"
             for TARGET in ${PLATFORMS[$REPO]}; do
               if [[ "${KIND}" = "archive" ]]; then
-                KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}.tar.gz"
+                KEY="releases/${CHANNEL}/${SRC_VER}/${TARGET}/${BINARY}.tar.gz"
               else
-                KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${BINARY}"
+                KEY="releases/${CHANNEL}/${SRC_VER}/${TARGET}/${BINARY}"
               fi
               echo "Checking s3://${S3_BUCKET}/${KEY} ..."
               if ! aws s3api head-object \
@@ -117,16 +187,28 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
+          ENSCRIVE_DOCS_VERSION: ${{ steps.resolve_docs.outputs.docs_version }}
         run: |
           set -euo pipefail
 
           mkdir -p /tmp/manifest-work
+
+          # Per-binary source version (S3 path segment).
+          declare -A SOURCE_VERSIONS
+          SOURCE_VERSIONS["enscrive-cli"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-developer"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-observe"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-embed"]="${VERSION}"
+          SOURCE_VERSIONS["esm"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-docs"]="${ENSCRIVE_DOCS_VERSION}"
 
           declare -A BINARIES
           BINARIES["enscrive-cli"]="enscrive"
           BINARIES["enscrive-developer"]="enscrive-developer"
           BINARIES["enscrive-observe"]="enscrive-observe"
           BINARIES["enscrive-embed"]="enscrive-embed"
+          BINARIES["esm"]="esm"
+          BINARIES["enscrive-docs"]="enscrive-docs"
 
           # ENS-140: archive vs plain-binary kind per repo.
           declare -A ARTIFACT_KIND
@@ -134,12 +216,10 @@ jobs:
           ARTIFACT_KIND["enscrive-developer"]="archive"
           ARTIFACT_KIND["enscrive-observe"]="binary"
           ARTIFACT_KIND["enscrive-embed"]="binary"
+          ARTIFACT_KIND["esm"]="binary"
+          ARTIFACT_KIND["enscrive-docs"]="binary"
 
-          # Per-binary platform availability. enscrive-developer is a
-          # server-only binary, deployed exclusively to x86_64 Linux EC2 —
-          # it does not (and will not) ship for macOS, ARM Linux, or musl.
-          # The other three binaries are end-user / general-purpose and
-          # ship for every platform we support.
+          # Per-binary platform availability.
           ALL_TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin"
           DEVELOPER_TARGETS="x86_64-unknown-linux-gnu"
           declare -A PLATFORMS
@@ -147,22 +227,25 @@ jobs:
           PLATFORMS["enscrive-developer"]="${DEVELOPER_TARGETS}"
           PLATFORMS["enscrive-observe"]="${ALL_TARGETS}"
           PLATFORMS["enscrive-embed"]="${ALL_TARGETS}"
+          PLATFORMS["esm"]="${ALL_TARGETS}"
+          PLATFORMS["enscrive-docs"]="${ALL_TARGETS}"
 
           # Emit one line per artifact:
-          #   REPO TARGET BINARY KIND S3_KEY_SUFFIX SHA256 SIZE_BYTES
+          #   REPO TARGET BINARY KIND S3_KEY_SUFFIX SHA256 SIZE_BYTES SOURCE_VERSION
           METADATA_FILE="/tmp/manifest-work/metadata.tsv"
           : > "${METADATA_FILE}"
 
           for REPO in "${!BINARIES[@]}"; do
             BINARY="${BINARIES[$REPO]}"
             KIND="${ARTIFACT_KIND[$REPO]}"
+            SRC_VER="${SOURCE_VERSIONS[$REPO]}"
             if [[ "${KIND}" = "archive" ]]; then
               SUFFIX="${BINARY}.tar.gz"
             else
               SUFFIX="${BINARY}"
             fi
             for TARGET in ${PLATFORMS[$REPO]}; do
-              KEY="releases/${CHANNEL}/${VERSION}/${TARGET}/${SUFFIX}"
+              KEY="releases/${CHANNEL}/${SRC_VER}/${TARGET}/${SUFFIX}"
 
               # Compute SHA256 by streaming the artifact itself. Robust
               # against per-binary `.sha256` sidecars not being produced
@@ -180,7 +263,7 @@ jobs:
                 --query 'ContentLength' \
                 --output text)
 
-              echo -e "${REPO}\t${TARGET}\t${BINARY}\t${KIND}\t${SUFFIX}\t${RAW_HASH}\t${SIZE_BYTES}" >> "${METADATA_FILE}"
+              echo -e "${REPO}\t${TARGET}\t${BINARY}\t${KIND}\t${SUFFIX}\t${RAW_HASH}\t${SIZE_BYTES}\t${SRC_VER}" >> "${METADATA_FILE}"
             done
           done
 
@@ -227,12 +310,16 @@ jobs:
           BINARIES["enscrive-developer"]="enscrive-developer"
           BINARIES["enscrive-observe"]="enscrive-observe"
           BINARIES["enscrive-embed"]="enscrive-embed"
+          BINARIES["esm"]="esm"
+          BINARIES["enscrive-docs"]="enscrive-docs"
 
           declare -A ARTIFACT_KIND
           ARTIFACT_KIND["enscrive-cli"]="binary"
           ARTIFACT_KIND["enscrive-developer"]="archive"
           ARTIFACT_KIND["enscrive-observe"]="binary"
           ARTIFACT_KIND["enscrive-embed"]="binary"
+          ARTIFACT_KIND["esm"]="binary"
+          ARTIFACT_KIND["enscrive-docs"]="binary"
 
           # Build per-binary platform objects via jq.
           # Start with an empty binaries object and accumulate.
@@ -243,12 +330,14 @@ jobs:
             KIND="${ARTIFACT_KIND[$REPO]}"
 
             # Extract rows for this binary from the TSV.
-            # New column layout: REPO TARGET BINARY KIND SUFFIX SHA256 SIZE.
+            # Column layout: REPO TARGET BINARY KIND SUFFIX SHA256 SIZE SOURCE_VERSION
             PLATFORMS_JSON="{}"
-            while IFS=$'\t' read -r ROW_REPO ROW_TARGET ROW_BINARY ROW_KIND ROW_SUFFIX ROW_SHA256 ROW_SIZE; do
+            SOURCE_VER=""
+            while IFS=$'\t' read -r ROW_REPO ROW_TARGET ROW_BINARY ROW_KIND ROW_SUFFIX ROW_SHA256 ROW_SIZE ROW_SRC_VER; do
               [[ "${ROW_REPO}" != "${REPO}" ]] && continue
+              SOURCE_VER="${ROW_SRC_VER}"
 
-              ARTIFACT_URL="${BASE_URL}/releases/${CHANNEL}/${VERSION}/${ROW_TARGET}/${ROW_SUFFIX}"
+              ARTIFACT_URL="${BASE_URL}/releases/${CHANNEL}/${ROW_SRC_VER}/${ROW_TARGET}/${ROW_SUFFIX}"
 
               PLATFORM_ENTRY=$(jq -n \
                 --arg url "${ARTIFACT_URL}" \
@@ -262,11 +351,13 @@ jobs:
                 '. + {($target): $entry}')
             done < "${METADATA_FILE}"
 
-            # Per-binary entry now carries `kind`. Consumers branch on it
-            # to decide whether to treat the artifact as a plain executable
-            # or extract a tar.gz containing both binary and a `site/` tree.
+            # Per-binary entry carries `kind` and `source_version`.
+            # `source_version` distinguishes Pattern A (matches unified version)
+            # from Pattern B (pinned independently, e.g. enscrive-docs).
+            # Consumers branch on `kind` to decide whether to treat the artifact
+            # as a plain executable or extract a tar.gz containing binary + site/.
             BINARY_ENTRY=$(jq -n \
-              --arg source_version "${VERSION}" \
+              --arg source_version "${SOURCE_VER}" \
               --arg kind "${KIND}" \
               --argjson platforms "${PLATFORMS_JSON}" \
               '{"source_version": $source_version, "kind": $kind, "platforms": $platforms}')
@@ -277,12 +368,13 @@ jobs:
               '. + {($binary): $entry}')
           done
 
-          # Assemble final manifest. schema_version=2: adds per-binary
-          # `kind` field ("binary" | "archive"). Consumers that only
-          # understand schema_version=1 should reject schema_version >= 2
-          # rather than silently treat archives as plain binaries.
+          # Assemble final manifest. schema_version=3: extends schema_version=2
+          # (per-binary `kind`) with populated `source_version` per binary,
+          # enabling mixed distribution patterns in the same manifest.
+          # Consumers that only understand schema_version <= 2 should reject
+          # schema_version=3 rather than silently ignore source_version.
           jq -n \
-            --argjson schema_version 2 \
+            --argjson schema_version 3 \
             --arg version "${VERSION}" \
             --arg released_at "${GENERATED_AT}" \
             --arg channel "${CHANNEL_LABEL}" \

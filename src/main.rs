@@ -265,6 +265,11 @@ struct InitArgs {
     #[arg(long = "esm-bin")]
     esm_bin: Option<String>,
 
+    /// Path to enscrive-docs binary for self-managed mode. When unset,
+    /// init fetches it from the release manifest at the "enscrive-docs" key.
+    #[arg(long = "docs-bin")]
+    docs_bin: Option<String>,
+
     /// Bring-your-own OpenAI key for local embeddings and optional LLM chunking
     #[arg(long = "openai-api-key")]
     openai_api_key: Option<String>,
@@ -3272,6 +3277,7 @@ async fn main() {
                         observe_bin: args.observe_bin.clone(),
                         embed_bin: args.embed_bin.clone(),
                         esm_bin: args.esm_bin.clone(),
+                        docs_bin: args.docs_bin.clone(),
                         openai_api_key: args.openai_api_key.clone(),
                         anthropic_api_key: args.anthropic_api_key.clone(),
                         voyage_api_key: args.voyage_api_key.clone(),

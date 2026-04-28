@@ -56,6 +56,11 @@ pub struct SelfManagedInitOptions {
     /// Future release-pipeline work will let init fetch it from the
     /// manifest like the other binaries.
     pub esm_bin: Option<String>,
+    /// ENS-153 (4b): explicit override for the `enscrive-docs` binary path.
+    /// When unset, `enscrive init` fetches it from the release manifest
+    /// (kind: binary) at the "enscrive-docs" key. Override for local dev
+    /// or CI with `--docs-bin /path/to/enscrive-docs`.
+    pub docs_bin: Option<String>,
     pub openai_api_key: Option<String>,
     pub anthropic_api_key: Option<String>,
     pub voyage_api_key: Option<String>,
@@ -129,6 +134,9 @@ struct LocalProfile {
     developer_env_file: String,
     observe_env_file: String,
     embed_env_file: String,
+    /// ENS-153 (4b): env file for the enscrive-docs sidecar.
+    #[serde(default)]
+    docs_env_file: String,
     log_dir: String,
     docker_project: String,
     binaries: LocalBinaries,
@@ -156,6 +164,11 @@ struct LocalBinaries {
     /// ENSCRIBE-SECRETS); a future release-pipeline change will publish
     /// it in the manifest alongside the other binaries.
     esm: String,
+    /// ENS-153 (4b): enscrive-docs sidecar binary. Fetched from the release
+    /// manifest under the "enscrive-docs" key, or overridden via --docs-bin.
+    /// Spawned after enscrive-developer is healthy so the /docs endpoint is
+    /// served immediately after `enscrive start` completes.
+    docs: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +185,10 @@ struct LocalPorts {
     keycloak: u16,
     loki: u16,
     grafana: Option<u16>,
+    /// ENS-153 (4b): port the enscrive-docs sidecar binds on loopback.
+    /// 8088 is unused by any other local stack service.
+    #[serde(default = "default_docs_port")]
+    docs: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -552,6 +569,7 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
     let developer_env_path = config_dir.join("developer.env");
     let observe_env_path = config_dir.join("observe.env");
     let embed_env_path = config_dir.join("embed.env");
+    let docs_env_path = config_dir.join("docs.env");
     let existing_local = profiles
         .profiles
         .get(&profile_name)
@@ -578,6 +596,7 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         keycloak: 8180,
         loki: 3100,
         grafana: opts.with_grafana.then_some(3003),
+        docs: default_docs_port(),
     };
 
     let providers = resolve_local_provider_config(existing_local.as_ref(), &opts)?;
@@ -605,6 +624,11 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         .or_else(|| database_url_password(&developer_env_path))
         .or_else(|| database_url_password(&observe_env_path))
         .unwrap_or_else(|| generate_secret(24));
+    // ENS-153 (4b): generate a stable docs API key. Persisted in docs.env so
+    // the sidecar reads it as ENSCRIVE_API_KEY on every start. Reading back
+    // from the existing env file makes re-init idempotent.
+    let docs_api_key = read_env_value(&docs_env_path, "ENSCRIVE_API_KEY")
+        .unwrap_or_else(|| generate_secret(48));
     let docker_project = format!("enscrive-local-{}", sanitize_name(&profile_name));
 
     let keycloak = existing_local
@@ -640,6 +664,7 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         developer_env_file: developer_env_path.display().to_string(),
         observe_env_file: observe_env_path.display().to_string(),
         embed_env_file: embed_env_path.display().to_string(),
+        docs_env_file: docs_env_path.display().to_string(),
         log_dir: log_dir.display().to_string(),
         docker_project,
         binaries,
@@ -719,6 +744,20 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         &config_dir.join("embed.env"),
         &render_embed_env(&local, &qdrant_api_key, &lab_secret),
     )?;
+    // ENS-153 (4b): write the enscrive-docs sidecar env and config files.
+    // docs.env holds ENSCRIVE_API_KEY (never appears in the toml).
+    // enscrive-docs.toml is the sidecar's main config.
+    write_text(&config_dir.join("docs.env"), &render_local_docs_env(&docs_api_key))?;
+    write_text(
+        &config_dir.join("enscrive-docs.toml"),
+        &render_local_docs_config(&local, &docs_api_key),
+    )?;
+    // Ensure the empty corpus directory exists. The sidecar serves its
+    // built-in corpus via rust-embed; the on-disk dir satisfies the toml
+    // path reference and is where v0.2 corpus extraction will land.
+    let corpus_dir = Path::new(&local.runtime_dir).join("data").join("docs-corpus");
+    std::fs::create_dir_all(&corpus_dir)
+        .map_err(|e| format!("create docs-corpus dir '{}': {e}", corpus_dir.display()))?;
 
     // ENS-153: synthesize per-service ESM vaults from the just-written
     // env files. Keeps the env files as today (services still read them
@@ -753,7 +792,9 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
             "enscrive-developer": local.binaries.developer,
             "enscrive-observe": local.binaries.observe,
             "enscrive-embed": local.binaries.embed,
+            "enscrive-docs": local.binaries.docs,
         },
+        "docs_endpoint": format!("http://127.0.0.1:{}/docs", local.ports.docs),
         "provider_configured": provider_configured_json(&local.providers),
         "login": {
             "url": format!("http://127.0.0.1:{}/auth/login", local.ports.developer),
@@ -927,6 +968,44 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         ));
     }
 
+    // ENS-153 (4b): spawn the enscrive-docs sidecar after enscrive-developer
+    // is healthy. The sidecar authenticates against /v1 via ENSCRIVE_API_KEY
+    // (in docs.env) and serves the bundled docs corpus at /docs.
+    // docs_env_file may be empty on profiles created before this commit;
+    // fall back gracefully to skipping the docs spawn in that case.
+    let started_docs = if !local.docs_env_file.is_empty()
+        && Path::new(&local.docs_env_file).exists()
+        && !local.binaries.docs.is_empty()
+    {
+        let docs_extra_env: Vec<(&str, String)> = vec![];
+        let docs_result = spawn_service_with_extra_env(
+            "enscrive-docs",
+            &local.binaries.docs,
+            Path::new(&local.docs_env_file),
+            log_dir,
+            &docs_extra_env,
+        )?;
+        if service_was_newly_started(&docs_result) {
+            started_services.push("enscrive-docs");
+        }
+        if let Err(error) =
+            wait_for_tcp("127.0.0.1", local.ports.docs, Duration::from_secs(30))
+        {
+            cleanup_started_services(&started_services, log_dir);
+            return Err(format_service_start_error(
+                error,
+                "enscrive-docs",
+                log_dir,
+            ));
+        }
+        docs_result
+    } else {
+        json!({
+            "status": "skipped",
+            "reason": "docs env file missing or binary path empty; re-run `enscrive init` to configure"
+        })
+    };
+
     let bootstrap = match bootstrap_local_stack(
         &profile.endpoint,
         &local,
@@ -968,6 +1047,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
             "enscrive-embed": started_embed,
             "enscrive-observe": started_observe,
             "enscrive-developer": started_developer,
+            "enscrive-docs": started_docs,
         },
         "login": {
             "portal": profile.endpoint,
@@ -987,6 +1067,7 @@ pub async fn stop(opts: StopOptions) -> Result<Value, String> {
         .ok_or_else(|| format!("profile '{}' is not self-managed", profile_name))?;
 
     let stopped = vec![
+        stop_service("enscrive-docs", Path::new(&local.log_dir))?,
         stop_service("enscrive-developer", Path::new(&local.log_dir))?,
         stop_service("enscrive-observe", Path::new(&local.log_dir))?,
         stop_service("enscrive-embed", Path::new(&local.log_dir))?,
@@ -1515,6 +1596,79 @@ fn render_embed_env(local: &LocalProfile, qdrant_api_key: &str, lab_secret: &str
             .embedding_bge_model_name()
             .unwrap_or_default(),
         lab_secret = lab_secret,
+    )
+}
+
+fn default_docs_port() -> u16 {
+    8088
+}
+
+/// Render `docs.env` — the env file for the `enscrive-docs` sidecar.
+///
+/// The sidecar reads `ENSCRIVE_API_KEY` from this file to authenticate
+/// against `enscrive-developer /v1`. The key is generated at init time
+/// and stored here; the developer service will also be configured to
+/// accept it as a first-party docs tenant key via its bootstrap secret.
+fn render_local_docs_env(docs_api_key: &str) -> String {
+    format!("ENSCRIVE_API_KEY={docs_api_key}\n")
+}
+
+/// Render `enscrive-docs.toml` — the sidecar's config file.
+///
+/// Adapted from `enscrive-deploy/src/render.rs::docs_toml` for the local
+/// self-managed stack. Key differences:
+/// - endpoint is `http://127.0.0.1:{developer_port}` (loopback; no TLS)
+/// - port is `local.ports.docs` (default 8088)
+/// - corpus `path` points at the `corpus/` dir under `runtime_dir`; for
+///   tonight's scope the directory is empty and the sidecar serves the
+///   rust-embed corpus baked into the binary. TODO (v0.2): extend the
+///   release manifest to include a corpus archive and extract it here.
+fn render_local_docs_config(local: &LocalProfile, _docs_api_key: &str) -> String {
+    let developer_port = local.ports.developer;
+    let docs_port = local.ports.docs;
+    let corpus_path = std::path::Path::new(&local.runtime_dir)
+        .join("data")
+        .join("docs-corpus");
+    format!(
+        "# Rendered by enscrive-cli. Re-generated on each `enscrive init`.\n\
+\n\
+[enscrive]\n\
+endpoint = \"http://127.0.0.1:{developer_port}\"\n\
+# ENSCRIVE_API_KEY is sourced from the docs.env EnvironmentFile\n\
+\n\
+[site]\n\
+title = \"Enscrive Developer Docs\"\n\
+description = \"Public API, CLI, and admin patterns for the Enscrive platform.\"\n\
+base_path = \"/docs\"\n\
+\n\
+[theme]\n\
+variant = \"enscrive\"\n\
+\n\
+[serve]\n\
+port = {docs_port}\n\
+\n\
+[search]\n\
+default_voice = \"docs-default\"\n\
+results_per_page = 10\n\
+include_snippets = true\n\
+\n\
+[[collections]]\n\
+name = \"enscrive-platform-docs-local\"\n\
+voice = \"docs-default\"\n\
+path = \"{corpus_path}\"\n\
+glob = \"**/*.md\"\n\
+embedding_model = \"text-embedding-3-small\"\n\
+description = \"Local Enscrive platform documentation\"\n\
+\n\
+[[voices]]\n\
+name = \"docs-default\"\n\
+chunking_strategy = \"baseline\"\n\
+score_threshold = 0.0\n\
+default_limit = 10\n\
+description = \"Default voice for the Enscrive developer documentation corpus\"\n",
+        developer_port = developer_port,
+        docs_port = docs_port,
+        corpus_path = corpus_path.display(),
     )
 }
 
@@ -2111,6 +2265,7 @@ async fn resolve_self_managed_binaries(
     const BINARY_OBSERVE: &str = "enscrive-observe";
     const BINARY_EMBED: &str = "enscrive-embed";
     const BINARY_ESM: &str = "esm";
+    const BINARY_DOCS: &str = "enscrive-docs";
 
     // ENS-153: resolve the esm binary first. It's globally installed on
     // operator machines today (built from ENSCRIBE-SECRETS). Discovery
@@ -2134,19 +2289,21 @@ async fn resolve_self_managed_binaries(
         ));
     };
 
-    // Short-circuit when all three service binaries are operator-supplied.
+    // Short-circuit when all four service binaries are operator-supplied.
     // No manifest fetch required, which means no network call and no XDG
     // directory creation. (esm is already resolved above.)
-    if let (Some(dev), Some(obs), Some(emb)) = (
+    if let (Some(dev), Some(obs), Some(emb), Some(docs)) = (
         opts.developer_bin.as_ref(),
         opts.observe_bin.as_ref(),
         opts.embed_bin.as_ref(),
+        opts.docs_bin.as_ref(),
     ) {
         return Ok(LocalBinaries {
             developer: dev.clone(),
             observe: obs.clone(),
             embed: emb.clone(),
             esm,
+            docs: docs.clone(),
         });
     }
 
@@ -2233,12 +2390,14 @@ async fn resolve_self_managed_binaries(
     let developer = resolve_one(BINARY_DEVELOPER, opts.developer_bin.as_ref()).await?;
     let observe = resolve_one(BINARY_OBSERVE, opts.observe_bin.as_ref()).await?;
     let embed = resolve_one(BINARY_EMBED, opts.embed_bin.as_ref()).await?;
+    let docs = resolve_one(BINARY_DOCS, opts.docs_bin.as_ref()).await?;
 
     Ok(LocalBinaries {
         developer,
         observe,
         embed,
         esm,
+        docs,
     })
 }
 
@@ -3165,6 +3324,7 @@ mod tests {
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
             esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: Some("anth-test".to_string()),
             voyage_api_key: None,
@@ -3209,6 +3369,7 @@ mod tests {
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
             esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3269,6 +3430,7 @@ mod tests {
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
             esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: None,
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3312,6 +3474,7 @@ mod tests {
             observe_bin: Some("/tmp/enscrive-observe-v2".to_string()),
             embed_bin: Some("/tmp/enscrive-embed-v2".to_string()),
             esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-second".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3374,6 +3537,7 @@ mod tests {
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
             esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3504,6 +3668,7 @@ mod tests {
             observe_bin: None,
             embed_bin: None,
             esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3564,6 +3729,7 @@ mod tests {
             observe_bin: None,
             embed_bin: None,
             esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3595,6 +3761,7 @@ mod tests {
             observe_bin: None,
             embed_bin: None,
             esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3659,6 +3826,7 @@ mod tests {
             observe_bin: None,
             embed_bin: None,
             esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3731,6 +3899,7 @@ mod tests {
             developer_env_file: "/tmp/developer.env".to_string(),
             observe_env_file: "/tmp/observe.env".to_string(),
             embed_env_file: "/tmp/embed.env".to_string(),
+            docs_env_file: "/tmp/docs.env".to_string(),
             log_dir: "/tmp/logs".to_string(),
             docker_project: "enscrive-local-local".to_string(),
             binaries: LocalBinaries {
@@ -3738,6 +3907,7 @@ mod tests {
                 observe: "/tmp/enscrive-observe".to_string(),
                 embed: "/tmp/enscrive-embed".to_string(),
                 esm: "/tmp/esm".to_string(),
+                docs: "/tmp/enscrive-docs".to_string(),
             },
             ports: LocalPorts {
                 developer: 3000,
@@ -3752,6 +3922,7 @@ mod tests {
                 keycloak: 8180,
                 loki: 3100,
                 grafana: None,
+                docs: 8088,
             },
             features: LocalFeatures {
                 with_grafana: false,
@@ -3868,6 +4039,7 @@ mod tests {
             developer_env_file: "/tmp/developer.env".to_string(),
             observe_env_file: "/tmp/observe.env".to_string(),
             embed_env_file: "/tmp/embed.env".to_string(),
+            docs_env_file: "/tmp/docs.env".to_string(),
             log_dir: "/tmp/logs".to_string(),
             docker_project: "enscrive-local-local".to_string(),
             binaries: LocalBinaries {
@@ -3875,6 +4047,7 @@ mod tests {
                 observe: "/tmp/enscrive-observe".to_string(),
                 embed: "/tmp/enscrive-embed".to_string(),
                 esm: "/tmp/esm".to_string(),
+                docs: "/tmp/enscrive-docs".to_string(),
             },
             ports: LocalPorts {
                 developer: 3000,
@@ -3889,6 +4062,7 @@ mod tests {
                 keycloak: 8180,
                 loki: 3100,
                 grafana: None,
+                docs: 8088,
             },
             features: LocalFeatures {
                 with_grafana: false,
