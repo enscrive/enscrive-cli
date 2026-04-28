@@ -30,8 +30,15 @@ export PATH="$HOME/.local/bin:$PATH"
 command -v enscrive >/dev/null || fail "enscrive not on PATH after install"
 enscrive --version
 
-step "Step 2: enscrive init --mode self-managed --yes"
-enscrive init --mode self-managed --yes
+step "Step 2: enscrive init --mode self-managed"
+# init is non-interactive when --mode is supplied; there is no --yes flag.
+# It requires at least one embedding-provider key so the local embed
+# service has something to call. Pass the operator's real OPENAI_API_KEY
+# through the container if set, otherwise use a placeholder so the
+# install/init/start plumbing still exercises end-to-end (the embed
+# service will boot but report degraded — fine for install-path smoke).
+OPENAI_KEY="${OPENAI_API_KEY:-sk-placeholder-for-playground-smoke}"
+enscrive init --mode self-managed --openai-api-key "$OPENAI_KEY"
 
 step "Step 3: enscrive start"
 enscrive start

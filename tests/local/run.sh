@@ -75,6 +75,10 @@ case "$cmd" in
       --privileged \
       --name "$NAME" \
       -p "${HOST_DEV_PORT}:3000" \
+      -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
+      -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
+      -e "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}" \
+      -e "NEBIUS_API_KEY=${NEBIUS_API_KEY:-}" \
       "$IMAGE" bash
     ;;
   test)
@@ -83,6 +87,10 @@ case "$cmd" in
       --privileged \
       --name "$NAME" \
       -p "${HOST_DEV_PORT}:3000" \
+      -e "OPENAI_API_KEY=${OPENAI_API_KEY:-}" \
+      -e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}" \
+      -e "VOYAGE_API_KEY=${VOYAGE_API_KEY:-}" \
+      -e "NEBIUS_API_KEY=${NEBIUS_API_KEY:-}" \
       "$IMAGE" tail -f /dev/null
     # Run the smoke script inside the container as tester. Output to host stdout.
     docker exec -u tester "$NAME" bash -lc 'bash /usr/local/bin/playground.sh'
