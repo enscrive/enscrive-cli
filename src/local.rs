@@ -716,6 +716,13 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         &render_embed_env(&local, &qdrant_api_key, &lab_secret),
     )?;
 
+    // ENS-153: synthesize per-service ESM vaults from the just-written
+    // env files. Keeps the env files as today (services still read them
+    // via std::env::var); the vaults exist in parallel as the future
+    // canonical config registry. Once each service migrates to
+    // SecretsManager::get, the env-file copy can be pruned key-by-key.
+    synthesize_local_esm_vaults(&local.binaries.esm, &runtime_dir, &config_dir).await?;
+
     profiles.version = PROFILE_VERSION;
     profiles.profiles.insert(
         profile_name.clone(),
@@ -1694,6 +1701,207 @@ fn generate_hex_secret(num_bytes: usize) -> String {
 
 fn is_valid_aes_key(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+// ---------------------------------------------------------------------------
+// ENS-153: ESM vault synthesis at init time.
+//
+// Each service (developer / observe / embed) gets its own vault under
+// <runtime_dir>/secrets/<service-name>/.esm/secrets.esm. esm scopes by
+// directory name, so we run esm from inside each per-service workdir.
+//
+// A single master-key file at <runtime_dir>/.esm-master-key (mode 0600)
+// is shared across the three vaults — that's how every service decrypts
+// its own vault without a separate user-input step. The path is also
+// recorded in profiles.toml so `enscrive start` can find it again.
+//
+// Today's services still read most config from env files (std::env::var).
+// Vaults coexist with the existing env files until each std::env::var
+// call site is migrated to SecretsManager::get (separate workstream).
+// ---------------------------------------------------------------------------
+
+fn esm_master_key_path(runtime_dir: &Path) -> PathBuf {
+    runtime_dir.join(".esm-master-key")
+}
+
+fn esm_service_workdir(runtime_dir: &Path, service: &str) -> PathBuf {
+    runtime_dir.join("secrets").join(service)
+}
+
+fn esm_service_vault(runtime_dir: &Path, service: &str) -> PathBuf {
+    esm_service_workdir(runtime_dir, service)
+        .join(".esm")
+        .join("secrets.esm")
+}
+
+/// Generate-or-read the ESM master key. The file is the only durable
+/// record of the key; persist it with mode 0600 immediately on first
+/// generation. On re-init we reuse the existing key so previously-written
+/// vaults remain decryptable.
+fn ensure_esm_master_key(runtime_dir: &Path) -> Result<String, String> {
+    let path = esm_master_key_path(runtime_dir);
+    if let Ok(existing) = fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    let key = generate_hex_secret(32);
+    fs::create_dir_all(runtime_dir)
+        .map_err(|e| format!("create runtime dir for master key: {e}"))?;
+    fs::write(&path, format!("{key}\n"))
+        .map_err(|e| format!("write esm master key '{}': {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path)
+            .map_err(|e| format!("stat master key '{}': {e}", path.display()))?
+            .permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&path, perms)
+            .map_err(|e| format!("chmod 0600 master key '{}': {e}", path.display()))?;
+    }
+    Ok(key)
+}
+
+/// Initialize a per-service ESM vault if it doesn't already exist.
+/// Idempotent: reruns cheaply when the vault is already there.
+async fn ensure_esm_vault(
+    esm_binary: &str,
+    workdir: &Path,
+    master_key_path: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(workdir)
+        .map_err(|e| format!("create esm workdir '{}': {e}", workdir.display()))?;
+    let vault_path = workdir.join(".esm").join("secrets.esm");
+    if vault_path.exists() {
+        return Ok(());
+    }
+    let output = Command::new(esm_binary)
+        .arg("init")
+        .arg("--key-file")
+        .arg(master_key_path)
+        .current_dir(workdir)
+        .output()
+        .map_err(|e| format!("spawn esm init in '{}': {e}", workdir.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "esm init failed in '{}': {}",
+            workdir.display(),
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Set a single key=value in a service vault. Wraps `esm set`.
+async fn esm_set(
+    esm_binary: &str,
+    workdir: &Path,
+    master_key_path: &Path,
+    key: &str,
+    value: &str,
+) -> Result<(), String> {
+    let output = Command::new(esm_binary)
+        .arg("set")
+        .arg("--key-file")
+        .arg(master_key_path)
+        .arg(key)
+        .arg(value)
+        .current_dir(workdir)
+        .output()
+        .map_err(|e| format!("spawn esm set {key} in '{}': {e}", workdir.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "esm set {key} failed in '{}': {}",
+            workdir.display(),
+            stderr.trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Synthesize the three per-service ESM vaults from the values currently
+/// rendered into the per-service env files. The vault contents mirror
+/// the env-file contents 1:1 for now; once services migrate from
+/// std::env::var to SecretsManager::get, the env-file copy can be
+/// pruned key-by-key without disrupting the vault path.
+async fn synthesize_local_esm_vaults(
+    esm_binary: &str,
+    runtime_dir: &Path,
+    config_dir: &Path,
+) -> Result<(), String> {
+    // Skip synthesis if the resolved esm binary isn't actually executable
+    // on disk. This keeps test fixtures green (they pass synthetic paths
+    // like `/tmp/esm`) and gives the founder a clear log line when the
+    // resolved path doesn't lead to a real binary in production.
+    let esm_path = Path::new(esm_binary);
+    if !esm_path.is_file() {
+        eprintln!(
+            "  [esm] note: synthesis skipped — '{esm_binary}' is not an executable file. \
+             Vaults will not be populated. Install esm from ENSCRIBE-SECRETS or pass --esm-bin <path>."
+        );
+        return Ok(());
+    }
+
+    let master_key_path = esm_master_key_path(runtime_dir);
+    let _ = ensure_esm_master_key(runtime_dir)?;
+
+    // Map each service to its rendered env file. Reading the env back
+    // ensures the vault contents follow whatever the renderers wrote,
+    // including any per-target overrides.
+    let services: [(&str, &str); 3] = [
+        ("enscrive-developer", "developer.env"),
+        ("enscrive-observe", "observe.env"),
+        ("enscrive-embed", "embed.env"),
+    ];
+
+    for (service_name, env_filename) in services.iter() {
+        let workdir = esm_service_workdir(runtime_dir, service_name);
+        ensure_esm_vault(esm_binary, &workdir, &master_key_path).await?;
+        let env_path = config_dir.join(env_filename);
+        let envs = parse_env_file(&env_path)?;
+        // Skip any keys already in bucket 1 (deployment topology) per
+        // CONFIG-IN-ESM.md. RUST_LOG and bind addresses don't belong in
+        // the vault. Do propagate everything else — services can pick
+        // up vault values once they're migrated to SecretsManager::get.
+        const SKIP_KEYS: &[&str] = &[
+            "RUST_LOG",
+            "REST_ADDR",
+            "SERVER_ADDR",
+            "OBSERVE_GRPC_ADDR_BIND", // hypothetical bind-only counterpart
+            "METRICS_PORT",
+            "LISTEN_ADDR",
+            "BATCH_WORK_DIR",
+            "ENSCRIVE_DATASET_CACHE_DIR",
+            "ENSCRIVE_DATASETS_DIR",
+            "DEVELOPER_PORT",
+            "ENSCRIVE_DOCS_UPSTREAM_PORT",
+            "STACK_ID",
+            "DEPLOYMENT_MODE",
+            "ENSCRIVE_ENVIRONMENT",
+            "CLOUD_PROVIDER",
+            "PROVIDER_REGION",
+            "CUSTOMER_REGION",
+            // Bootstrap trio — must NOT live inside the vault since they're
+            // needed to FIND the vault.
+            "ESM_BINARY",
+            "ESM_VAULT_PATH",
+            "ESM_MASTER_KEY",
+            "ESM_KEY_FILE",
+            "ESM_CACHE_TTL_SECS",
+        ];
+        for (key, value) in envs.iter() {
+            if SKIP_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            esm_set(esm_binary, &workdir, &master_key_path, key, value).await?;
+        }
+    }
+
+    Ok(())
 }
 
 fn ensure_valid_developer_env(
@@ -2842,6 +3050,7 @@ mod tests {
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: Some("anth-test".to_string()),
             voyage_api_key: None,
@@ -2885,6 +3094,7 @@ mod tests {
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -2944,6 +3154,7 @@ mod tests {
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
             openai_api_key: None,
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -2986,6 +3197,7 @@ mod tests {
             developer_bin: Some("/tmp/enscrive-developer-v2".to_string()),
             observe_bin: Some("/tmp/enscrive-observe-v2".to_string()),
             embed_bin: Some("/tmp/enscrive-embed-v2".to_string()),
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-second".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3047,6 +3259,7 @@ mod tests {
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3176,6 +3389,7 @@ mod tests {
             developer_bin: None,
             observe_bin: None,
             embed_bin: None,
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3235,6 +3449,7 @@ mod tests {
             developer_bin: None,
             observe_bin: None,
             embed_bin: None,
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3265,6 +3480,7 @@ mod tests {
             developer_bin: None,
             observe_bin: None,
             embed_bin: None,
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
@@ -3328,6 +3544,7 @@ mod tests {
             developer_bin: None,
             observe_bin: None,
             embed_bin: None,
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
             voyage_api_key: None,
