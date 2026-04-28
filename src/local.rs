@@ -2267,42 +2267,38 @@ async fn resolve_self_managed_binaries(
     const BINARY_ESM: &str = "esm";
     const BINARY_DOCS: &str = "enscrive-docs";
 
-    // ENS-153: resolve the esm binary first. It's globally installed on
-    // operator machines today (built from ENSCRIBE-SECRETS). Discovery
-    // order: explicit --esm-bin override → `which esm` in PATH → error
-    // pointing at the install instructions. Manifest fetch will become
-    // a fallback once the parallel release-pipeline work for
-    // chrisroge/enscribe-secrets ships.
-    let esm = if let Some(path) = opts.esm_bin.as_ref() {
-        path.clone()
+    // ENS-153: resolve the esm binary. Discovery order:
+    //   1. explicit --esm-bin override
+    //   2. `which esm` in PATH (operator workstations have it pre-installed
+    //      from the enscrive-secrets-manager repo; saves the manifest fetch)
+    //   3. fall through to the manifest fetch path below (Pattern A; esm
+    //      ships under the same unified release tag as the herd)
+    //
+    // Setting `esm` to None here defers the resolution until the manifest
+    // fetch loop builds it like the other binaries.
+    let esm_override: Option<String> = if let Some(path) = opts.esm_bin.as_ref() {
+        Some(path.clone())
     } else if let Some(found) = which_in_path(BINARY_ESM) {
-        found.display().to_string()
+        Some(found.display().to_string())
     } else {
-        return Err(format!(
-            "esm binary not found on PATH and no --esm-bin override provided.\n\
-             \n\
-             enscrive init --mode self-managed needs `esm` to synthesize\n\
-             per-service secrets vaults. Install it from the ENSCRIBE-SECRETS\n\
-             repo (cargo install --path /path/to/ENSCRIBE-SECRETS) or pass\n\
-             --esm-bin <path>. A future enscrive-cli release will fetch esm\n\
-             from the cross-repo manifest automatically."
-        ));
+        None
     };
 
-    // Short-circuit when all four service binaries are operator-supplied.
-    // No manifest fetch required, which means no network call and no XDG
-    // directory creation. (esm is already resolved above.)
-    if let (Some(dev), Some(obs), Some(emb), Some(docs)) = (
+    // Short-circuit when all five binaries are operator-supplied (esm
+    // override-or-PATH counts). No manifest fetch required, which means
+    // no network call and no XDG directory creation.
+    if let (Some(dev), Some(obs), Some(emb), Some(docs), Some(esm_resolved)) = (
         opts.developer_bin.as_ref(),
         opts.observe_bin.as_ref(),
         opts.embed_bin.as_ref(),
         opts.docs_bin.as_ref(),
+        esm_override.as_ref(),
     ) {
         return Ok(LocalBinaries {
             developer: dev.clone(),
             observe: obs.clone(),
             embed: emb.clone(),
-            esm,
+            esm: esm_resolved.clone(),
             docs: docs.clone(),
         });
     }
@@ -2391,6 +2387,11 @@ async fn resolve_self_managed_binaries(
     let observe = resolve_one(BINARY_OBSERVE, opts.observe_bin.as_ref()).await?;
     let embed = resolve_one(BINARY_EMBED, opts.embed_bin.as_ref()).await?;
     let docs = resolve_one(BINARY_DOCS, opts.docs_bin.as_ref()).await?;
+    // ENS-153: esm falls through to manifest fetch if neither --esm-bin nor
+    // PATH lookup found it. Until enscrive-secrets-manager publishes its
+    // first tagged release, this path errors with the same clear message
+    // pointing at the install instructions; afterward it Just Works.
+    let esm = resolve_one(BINARY_ESM, esm_override.as_ref()).await?;
 
     Ok(LocalBinaries {
         developer,
