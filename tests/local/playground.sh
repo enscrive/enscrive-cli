@@ -7,7 +7,7 @@
 #   1. curl install.enscrive.io/install.sh | sh   — fetch enscrive CLI
 #   2. enscrive init --mode self-managed --yes    — fetch services + write profile
 #   3. enscrive start                             — bring up infra (compose) + bins
-#   4. probe http://127.0.0.1:3000/healthz        — confirm dev portal up
+#   4. probe http://127.0.0.1:3000/health        — confirm dev portal up
 #
 # Exit codes: 0 = green; non-zero = failure with the failing step in the log.
 set -euo pipefail
@@ -45,7 +45,7 @@ enscrive start
 
 step "Step 4: Wait for developer portal"
 for i in $(seq 1 60); do
-  if curl -fsS -o /dev/null "http://127.0.0.1:${DEV_PORT}/healthz"; then
+  if curl -fsS -o /dev/null "http://127.0.0.1:${DEV_PORT}/health"; then
     echo "  developer portal up after ${i}s"
     break
   fi
