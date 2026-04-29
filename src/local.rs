@@ -978,9 +978,16 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         && !local.binaries.docs.is_empty()
     {
         let docs_extra_env: Vec<(&str, String)> = vec![];
-        let docs_result = spawn_service_with_extra_env(
+        // enscrive-docs is a multi-subcommand CLI; the daemon mode is
+        // `serve`. Pass --config so the sidecar reads the rendered toml
+        // from the per-profile config dir rather than CWD.
+        let docs_config_path = Path::new(&local.config_dir).join("enscrive-docs.toml");
+        let docs_config_arg = docs_config_path.display().to_string();
+        let docs_args = ["serve", "--config", docs_config_arg.as_str()];
+        let docs_result = spawn_service_full(
             "enscrive-docs",
             &local.binaries.docs,
+            &docs_args,
             Path::new(&local.docs_env_file),
             log_dir,
             &docs_extra_env,
@@ -2672,6 +2679,21 @@ fn spawn_service_with_extra_env(
     log_dir: &Path,
     extra_env: &[(&str, String)],
 ) -> Result<Value, String> {
+    spawn_service_full(service_name, binary, &[], env_file, log_dir, extra_env)
+}
+
+/// Same as spawn_service_with_extra_env but accepts CLI args for the spawned
+/// binary. The existing service binaries (developer/observe/embed) take no
+/// args and run as a daemon by default; enscrive-docs is a multi-subcommand
+/// CLI that needs `serve --config <path>` to start its HTTP listener.
+fn spawn_service_full(
+    service_name: &str,
+    binary: &str,
+    args: &[&str],
+    env_file: &Path,
+    log_dir: &Path,
+    extra_env: &[(&str, String)],
+) -> Result<Value, String> {
     let pid_path = pid_file(log_dir, service_name);
     if let Some(pid) = read_pid(&pid_path)? {
         if pid_is_running(pid) {
@@ -2693,6 +2715,9 @@ fn spawn_service_with_extra_env(
         .map_err(|e| format!("clone log file '{}': {e}", log_path.display()))?;
 
     let mut cmd = Command::new(binary);
+    if !args.is_empty() {
+        cmd.args(args);
+    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
