@@ -50,10 +50,16 @@ pub enum Datasets2Subcommand {
 
 #[derive(Args, Clone)]
 pub struct DatasetsCreateArgs {
-    /// HuggingFace URL. Accepts `huggingface:BeIR/fiqa`,
+    /// Source URL. For `huggingface`: accepts `huggingface:BeIR/fiqa`,
     /// `https://huggingface.co/datasets/BeIR/fiqa`, or short `BeIR/fiqa`.
-    #[arg(long = "from-url")]
+    /// For `croissant`: any HTTPS URL pointing to a Croissant JSON-LD
+    /// manifest (e.g. `https://huggingface.co/api/datasets/BeIR/scifact/croissant`).
+    #[arg(long = "from-url", alias = "source-url")]
     pub from_url: String,
+    /// Source adapter. `huggingface` (default) for the BeIR JSONL pipeline;
+    /// `croissant` for any HTTPS Croissant JSON-LD manifest URL.
+    #[arg(long = "source-type", default_value = "huggingface")]
+    pub source_type: String,
     /// Dataset display name.
     #[arg(long)]
     pub name: String,
@@ -327,7 +333,7 @@ async fn handle_datasets_create(
 ) -> i32 {
     let mut body = json!({
         "name": args.name,
-        "source_type": "huggingface",
+        "source_type": args.source_type,
         "source_url": args.from_url,
     });
     if let Some(d) = args.description {
