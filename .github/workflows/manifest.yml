@@ -7,7 +7,7 @@ name: manifest
 # Distribution patterns:
 #   Pattern A ("ride the herd"): binary tag == unified Enscrive platform version.
 #     Applies to: enscrive-cli, enscrive-developer, enscrive-observe,
-#                 enscrive-embed, esm.
+#                 enscrive-embed, esm, enscrive-metering-sentinel.
 #   Pattern B ("pinned per-binary"): binary owns its own semver cadence;
 #     the manifest pins which version to bundle. Applies to enscrive-docs.
 
@@ -112,6 +112,7 @@ jobs:
           SOURCE_VERSIONS["enscrive-observe"]="${VERSION}"
           SOURCE_VERSIONS["enscrive-embed"]="${VERSION}"
           SOURCE_VERSIONS["esm"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-metering-sentinel"]="${VERSION}"
           SOURCE_VERSIONS["enscrive-docs"]="${ENSCRIVE_DOCS_VERSION}"
 
           declare -A BINARIES
@@ -120,6 +121,7 @@ jobs:
           BINARIES["enscrive-observe"]="enscrive-observe"
           BINARIES["enscrive-embed"]="enscrive-embed"
           BINARIES["esm"]="esm"
+          BINARIES["enscrive-metering-sentinel"]="enscrive-metering-sentinel"
           BINARIES["enscrive-docs"]="enscrive-docs"
 
           # ENS-140: enscrive-developer ships as a tar.gz (server binary +
@@ -131,6 +133,7 @@ jobs:
           ARTIFACT_KIND["enscrive-observe"]="binary"
           ARTIFACT_KIND["enscrive-embed"]="binary"
           ARTIFACT_KIND["esm"]="binary"
+          ARTIFACT_KIND["enscrive-metering-sentinel"]="binary"
           ARTIFACT_KIND["enscrive-docs"]="binary"
 
           # Per-binary platform availability. enscrive-developer is a
@@ -146,6 +149,7 @@ jobs:
           PLATFORMS["enscrive-observe"]="${ALL_TARGETS}"
           PLATFORMS["enscrive-embed"]="${ALL_TARGETS}"
           PLATFORMS["esm"]="${ALL_TARGETS}"
+          PLATFORMS["enscrive-metering-sentinel"]="${ALL_TARGETS}"
           PLATFORMS["enscrive-docs"]="${ALL_TARGETS}"
 
           MISSING=0
@@ -200,6 +204,7 @@ jobs:
           SOURCE_VERSIONS["enscrive-observe"]="${VERSION}"
           SOURCE_VERSIONS["enscrive-embed"]="${VERSION}"
           SOURCE_VERSIONS["esm"]="${VERSION}"
+          SOURCE_VERSIONS["enscrive-metering-sentinel"]="${VERSION}"
           SOURCE_VERSIONS["enscrive-docs"]="${ENSCRIVE_DOCS_VERSION}"
 
           declare -A BINARIES
@@ -208,6 +213,7 @@ jobs:
           BINARIES["enscrive-observe"]="enscrive-observe"
           BINARIES["enscrive-embed"]="enscrive-embed"
           BINARIES["esm"]="esm"
+          BINARIES["enscrive-metering-sentinel"]="enscrive-metering-sentinel"
           BINARIES["enscrive-docs"]="enscrive-docs"
 
           # ENS-140: archive vs plain-binary kind per repo.
@@ -217,6 +223,7 @@ jobs:
           ARTIFACT_KIND["enscrive-observe"]="binary"
           ARTIFACT_KIND["enscrive-embed"]="binary"
           ARTIFACT_KIND["esm"]="binary"
+          ARTIFACT_KIND["enscrive-metering-sentinel"]="binary"
           ARTIFACT_KIND["enscrive-docs"]="binary"
 
           # Per-binary platform availability.
@@ -228,6 +235,7 @@ jobs:
           PLATFORMS["enscrive-observe"]="${ALL_TARGETS}"
           PLATFORMS["enscrive-embed"]="${ALL_TARGETS}"
           PLATFORMS["esm"]="${ALL_TARGETS}"
+          PLATFORMS["enscrive-metering-sentinel"]="${ALL_TARGETS}"
           PLATFORMS["enscrive-docs"]="${ALL_TARGETS}"
 
           # Emit one line per artifact:
@@ -311,6 +319,7 @@ jobs:
           BINARIES["enscrive-observe"]="enscrive-observe"
           BINARIES["enscrive-embed"]="enscrive-embed"
           BINARIES["esm"]="esm"
+          BINARIES["enscrive-metering-sentinel"]="enscrive-metering-sentinel"
           BINARIES["enscrive-docs"]="enscrive-docs"
 
           declare -A ARTIFACT_KIND
@@ -319,6 +328,7 @@ jobs:
           ARTIFACT_KIND["enscrive-observe"]="binary"
           ARTIFACT_KIND["enscrive-embed"]="binary"
           ARTIFACT_KIND["esm"]="binary"
+          ARTIFACT_KIND["enscrive-metering-sentinel"]="binary"
           ARTIFACT_KIND["enscrive-docs"]="binary"
 
           # Build per-binary platform objects via jq.
