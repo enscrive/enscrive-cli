@@ -1659,7 +1659,7 @@ default_voice = \"docs-default\"\n\
 results_per_page = 10\n\
 include_snippets = true\n\
 \n\
-[[collections]]\n\
+[[corpora]]\n\
 name = \"enscrive-platform-docs-local\"\n\
 voice = \"docs-default\"\n\
 path = \"{corpus_path}\"\n\

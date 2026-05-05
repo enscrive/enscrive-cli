@@ -174,9 +174,9 @@ pub struct EvalDefsCreateArgs {
     /// Dataset UUID this eval targets.
     #[arg(long)]
     pub dataset: String,
-    /// Collection UUID (where search runs).
-    #[arg(long)]
-    pub collection: String,
+    /// Corpus UUID (where search runs).
+    #[arg(long = "corpus")]
+    pub corpus: String,
     /// Optional voice UUID.
     #[arg(long)]
     pub voice: Option<String>,
@@ -244,7 +244,7 @@ pub struct EvalRunsDiagnoseArgs {
 pub enum VoiceDiff2Subcommand {
     /// Diff a voice against an earlier version (or between two versions).
     Diff(VoicesDiffArgs),
-    /// Estimate money + time cost of applying the diff to a collection.
+    /// Estimate money + time cost of applying the diff to a corpus.
     DiffCost(VoicesDiffCostArgs),
     /// Diff the live voice against a proposed config from a JSON file.
     DiffProposal(VoicesDiffProposalArgs),
@@ -269,9 +269,9 @@ pub struct VoicesDiffCostArgs {
     /// Version to diff AGAINST.
     #[arg(long)]
     pub against: u32,
-    /// Target collection UUID.
-    #[arg(long)]
-    pub collection: String,
+    /// Target corpus UUID.
+    #[arg(long = "corpus")]
+    pub corpus: String,
     /// Whether to model batch-API pricing (default true).
     #[arg(long, default_value_t = true)]
     pub batch: bool,
@@ -581,7 +581,7 @@ async fn handle_eval_defs_create(
     let mut body = json!({
         "name": args.name,
         "dataset_id": args.dataset,
-        "collection_id": args.collection,
+        "corpus_id": args.corpus,
     });
     if let Some(v) = args.voice {
         body["voice_id"] = Value::String(v);
@@ -744,7 +744,7 @@ pub async fn run_voice_diff(
             let path = format!("/v1/voices/{}/diff-cost", args.id);
             let qs = [
                 ("against", args.against.to_string()),
-                ("collection", args.collection.clone()),
+                ("corpus", args.corpus.clone()),
                 ("batch", args.batch.to_string()),
             ];
             match client.get_json_with_query(&path, &qs).await {

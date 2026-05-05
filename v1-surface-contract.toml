@@ -31,79 +31,79 @@ status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
-# ── Collections ─────────────────────────────────────────
+# ── Corpora ──────────────────────────────────────────────
 
 [[endpoint]]
 method = "GET"
-path = "/v1/collections"
-cli_command = "collections list"
+path = "/v1/corpora"
+cli_command = "corpus list"
 status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "POST"
-path = "/v1/collections"
-cli_command = "collections create"
+path = "/v1/corpora"
+cli_command = "corpus create"
 status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "GET"
-path = "/v1/collections/{id}"
-cli_command = "collections get"
+path = "/v1/corpora/{id}"
+cli_command = "corpus get"
 status = "implemented"
-note = "J-004c — detail route exposing a single collection"
+note = "J-004c — detail route exposing a single corpus"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "PATCH"
-path = "/v1/collections/{id}"
-cli_command = "collections update"
+path = "/v1/corpora/{id}"
+cli_command = "corpus update"
 status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "DELETE"
-path = "/v1/collections/{id}"
-cli_command = "collections delete"
+path = "/v1/corpora/{id}"
+cli_command = "corpus delete"
 status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "GET"
-path = "/v1/collections/{id}/stats"
-cli_command = "collections stats"
+path = "/v1/corpora/{id}/stats"
+cli_command = "corpus stats"
 status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "GET"
-path = "/v1/collections/{id}/documents"
-cli_command = "collections documents"
+path = "/v1/corpora/{id}/documents"
+cli_command = "corpus documents"
 status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "GET"
-path = "/v1/collections/{id}/documents/{doc_id}/chunks"
-cli_command = "collections chunks"
+path = "/v1/corpora/{id}/documents/{doc_id}/chunks"
+cli_command = "corpus chunks"
 status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
-# ── Collection Staging ──────────────────────────────────
+# ── Corpus Staging ──────────────────────────────────────
 
 [[endpoint]]
 method = "POST"
-path = "/v1/collections/{id}/stage"
-cli_command = "collections stage"
+path = "/v1/corpora/{id}/stage"
+cli_command = "corpus stage"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
 deployment_tier = "any-mode"
@@ -111,8 +111,8 @@ required_plan = "free"
 
 [[endpoint]]
 method = "POST"
-path = "/v1/collections/{id}/commit"
-cli_command = "collections commit"
+path = "/v1/corpora/{id}/commit"
+cli_command = "corpus commit"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
 deployment_tier = "any-mode"
@@ -120,8 +120,8 @@ required_plan = "free"
 
 [[endpoint]]
 method = "GET"
-path = "/v1/collections/{id}/pending"
-cli_command = "collections pending"
+path = "/v1/corpora/{id}/pending"
+cli_command = "corpus pending"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
 deployment_tier = "any-mode"
@@ -129,8 +129,8 @@ required_plan = "free"
 
 [[endpoint]]
 method = "DELETE"
-path = "/v1/collections/{id}/pending/{doc_id}"
-cli_command = "collections pending-delete"
+path = "/v1/corpora/{id}/pending/{doc_id}"
+cli_command = "corpus pending-delete"
 status = "implemented"
 note = "P0 gap closure — client method added this session"
 deployment_tier = "any-mode"
@@ -138,8 +138,8 @@ required_plan = "free"
 
 [[endpoint]]
 method = "POST"
-path = "/v1/collections/{id}/revert"
-cli_command = "collections revert"
+path = "/v1/corpora/{id}/revert"
+cli_command = "corpus revert"
 status = "implemented"
 note = "J-004c — revert uncommitted pending changes"
 deployment_tier = "any-mode"
@@ -147,17 +147,17 @@ required_plan = "free"
 
 [[endpoint]]
 method = "GET"
-path = "/v1/collections/{id}/commits"
-cli_command = "collections commits"
+path = "/v1/corpora/{id}/commits"
+cli_command = "corpus commits"
 status = "implemented"
-note = "J-004c — commit history for the collection"
+note = "J-004c — commit history for the corpus"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "GET"
-path = "/v1/collections/{id}/metrics"
-cli_command = "collections metrics"
+path = "/v1/corpora/{id}/metrics"
+cli_command = "corpus metrics"
 status = "implemented"
 note = "J-020 — vector-space metrics (density, diversity, drift)"
 deployment_tier = "any-mode"
@@ -165,19 +165,19 @@ required_plan = "free"
 
 [[endpoint]]
 method = "POST"
-path = "/v1/collections/materialize-from-dataset"
-cli_command = "collections materialize-from-dataset"
+path = "/v1/corpora/materialize-from-dataset"
+cli_command = "corpus materialize-from-dataset"
 status = "implemented"
-note = "ENS-104 — materialize a collection from a dataset URL (combines steps 2+4 of the 5-step eval workflow; conflates create + populate)"
+note = "ENS-104 — materialize a corpus from a dataset URL (combines steps 2+4 of the 5-step eval workflow; conflates create + populate)"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "POST"
-path = "/v1/collections/{id}/populate-from-dataset"
-cli_command = "collections populate-from-dataset"
+path = "/v1/corpora/{id}/populate-from-dataset"
+cli_command = "corpus populate-from-dataset"
 status = "implemented"
-note = "ENS-133 (parent ENS-132) — Step-4 primitive of the canonical 5-step eval workflow. Populates an existing empty collection with a dataset's corpus, chunked by the supplied voice. Returns 409 if collection already has documents."
+note = "ENS-133 (parent ENS-132) — Step-4 primitive of the canonical 5-step eval workflow. Populates an existing empty corpus with a dataset's corpus, chunked by the supplied voice. Returns 409 if corpus already has documents."
 deployment_tier = "any-mode"
 required_plan = "free"
 
@@ -277,10 +277,10 @@ required_plan = "free"
 
 [[endpoint]]
 method = "GET"
-path = "/v1/collections/{id}/batch-sets"
+path = "/v1/corpora/{id}/batch-sets"
 cli_command = "batch-sets list"
 status = "implemented"
-note = "J-024 Unit 5 — list batch sets for a collection"
+note = "J-024 Unit 5 — list batch sets for a corpus"
 deployment_tier = "any-mode"
 required_plan = "free"
 

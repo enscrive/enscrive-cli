@@ -116,7 +116,7 @@ def request(
 def wait_for_search_hit(
     base_url: str,
     api_key: str,
-    collection_id: str,
+    corpus_id: str,
     document_id: str,
     query: str,
     metadata_key: str,
@@ -134,7 +134,7 @@ def wait_for_search_hit(
             "/v1/search",
             {
                 "query": query,
-                "collection_id": collection_id,
+                "corpus_id": corpus_id,
                 "limit": 5,
                 "include_vectors": False,
                 "filters": {
@@ -222,27 +222,27 @@ def main():
     args.base_url = canonicalize_loopback_base_url(args.base_url)
 
     suffix = str(int(time.time()))
-    collection_name = f"{args.prefix}-current-truth-{suffix}"
+    corpus_name = f"{args.prefix}-current-truth-{suffix}"
     document_id = f"{args.prefix}-current-truth-doc-{suffix}"
     search_query = f"{args.prefix} mars basalt telemetry fixture"
     metadata_key = "fixture_case"
     metadata_value = f"{args.prefix}-metadata-{suffix}"
     logs_start = iso_now()
 
-    collection = request(
+    corpus = request(
         args.base_url,
         args.api_key,
         "POST",
-        "/v1/collections",
+        "/v1/corpora",
         {
-            "name": collection_name,
+            "name": corpus_name,
             "description": "Codex live validation current-truth fixture",
             "embedding_model": args.embedding_model,
             "dimensions": args.dimensions,
         },
         embedding_provider_key=args.embedding_provider_key,
     )
-    collection_id = collection["id"]
+    corpus_id = corpus["id"]
 
     request(
         args.base_url,
@@ -250,7 +250,7 @@ def main():
         "POST",
         "/v1/ingest-prepared",
         {
-            "collection_id": collection_id,
+            "corpus_id": corpus_id,
             "document_id": document_id,
             "segments": [
                 {
@@ -278,7 +278,7 @@ def main():
     wait_for_search_hit(
         args.base_url,
         args.api_key,
-        collection_id,
+        corpus_id,
         document_id,
         search_query,
         metadata_key,
@@ -294,7 +294,7 @@ def main():
         "/v1/query-embeddings",
         {
             "texts": [search_query],
-            "collection_id": collection_id,
+            "corpus_id": corpus_id,
         },
         embedding_provider_key=args.embedding_provider_key,
     )
@@ -306,10 +306,10 @@ def main():
         Path(args.out) if args.out else None,
         {
             "ENSCRIVE_REPO_ROOT": os.environ["ENSCRIVE_REPO_ROOT"],
-            "ENSCRIVE_COLLECTION_ID": collection_id,
-            "ENSCRIVE_COLLECTION_NAME": collection_name,
-            "ENSCRIVE_COLLECTION_EMBEDDING_MODEL": args.embedding_model,
-            "ENSCRIVE_COLLECTION_EMBEDDING_DIMENSIONS": str(args.dimensions),
+            "ENSCRIVE_CORPUS_ID": corpus_id,
+            "ENSCRIVE_CORPUS_NAME": corpus_name,
+            "ENSCRIVE_CORPUS_EMBEDDING_MODEL": args.embedding_model,
+            "ENSCRIVE_CORPUS_EMBEDDING_DIMENSIONS": str(args.dimensions),
             "ENSCRIVE_EXPECT_DOCUMENT_ID": document_id,
             "ENSCRIVE_SEARCH_QUERY": search_query,
             "ENSCRIVE_METADATA_KEY": metadata_key,

@@ -36,16 +36,16 @@ MODEL_DIMENSIONS = {
 
 CORE_MANIFESTS = [
     ".enscrive/health/live.json",
-    ".enscrive/v1/collections/list/live-fixture.json",
-    ".enscrive/v1/collections/stats/live-fixture.json",
-    ".enscrive/v1/query-embeddings/collection-model/live-bge-cpu.json",
+    ".enscrive/v1/corpora/list/live-fixture.json",
+    ".enscrive/v1/corpora/stats/live-fixture.json",
+    ".enscrive/v1/query-embeddings/corpus-model/live-bge-cpu.json",
     ".enscrive/v1/query-embeddings/invalid-voice/live-bge-cpu.json",
     ".enscrive/v1/ingest-prepared/live-bge-cpu.json",
-    ".enscrive/v1/collections/documents/live-bge-cpu.json",
-    ".enscrive/v1/collections/chunks/live-bge-cpu.json",
+    ".enscrive/v1/corpora/documents/live-bge-cpu.json",
+    ".enscrive/v1/corpora/chunks/live-bge-cpu.json",
     ".enscrive/v1/search/basic/live-fixture.json",
     ".enscrive/v1/search/metadata-filter/live-fixture.json",
-    ".enscrive/v1/search/invalid-collection/live.json",
+    ".enscrive/v1/search/invalid-corpus/live.json",
     ".enscrive/v1/usage/live-bge-cpu.json",
     ".enscrive/v1/logs/search/live-observe.json",
     ".enscrive/v1/logs/metrics/live-observe.json",
@@ -257,7 +257,7 @@ def main():
     parser.add_argument(
         "--fixture-embedding-model",
         default=os.environ.get("ENSCRIVE_FIXTURE_EMBEDDING_MODEL"),
-        help="Override the fixture collection embedding model",
+        help="Override the fixture corpus embedding model",
     )
     parser.add_argument(
         "--fixture-dimensions",
@@ -267,7 +267,7 @@ def main():
             if os.environ.get("ENSCRIVE_FIXTURE_EMBEDDING_DIMENSIONS")
             else None
         ),
-        help="Override the fixture collection embedding dimensions",
+        help="Override the fixture corpus embedding dimensions",
     )
     parser.add_argument(
         "--health-timeout-secs",
@@ -287,7 +287,7 @@ def main():
     parser.add_argument(
         "--skip-current-truth-prepare",
         action="store_true",
-        help="Do not create a fresh collection/document current-truth fixture",
+        help="Do not create a fresh corpus/document current-truth fixture",
     )
     args = parser.parse_args()
 

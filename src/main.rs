@@ -81,7 +81,7 @@ enum Commands {
     /// Check stack health through /health
     Health,
 
-    /// Search collections through /v1/search
+    /// Search corpora through /v1/search
     Search(SearchArgs),
 
     /// Embedding commands
@@ -114,10 +114,10 @@ enum Commands {
         sub: ModelsSubcommand,
     },
 
-    /// Collection commands
-    Collections {
+    /// Corpus commands
+    Corpus {
         #[command(subcommand)]
-        sub: CollectionsSubcommand,
+        sub: CorpusSubcommand,
     },
 
     /// Voice commands
@@ -335,9 +335,9 @@ struct SearchArgs {
     #[arg(long)]
     query: String,
 
-    /// Optional collection ID
+    /// Optional corpus ID
     #[arg(long)]
-    collection: Option<String>,
+    corpus: Option<String>,
 
     /// Number of results to return
     #[arg(long, default_value_t = 10)]
@@ -463,15 +463,15 @@ struct EmbeddingsQueryArgs {
     #[arg(long)]
     voice_id: Option<String>,
 
-    /// Optional collection ID to resolve the collection embedding model
+    /// Optional corpus ID to resolve the corpus embedding model
     #[arg(long)]
-    collection: Option<String>,
+    corpus: Option<String>,
 }
 
 #[derive(Args)]
 struct IngestPreparedArgs {
-    #[arg(long = "collection-id")]
-    collection_id: String,
+    #[arg(long = "corpus-id")]
+    corpus_id: String,
 
     #[arg(long = "document-id")]
     document_id: String,
@@ -490,8 +490,8 @@ struct IngestPreparedArgs {
 
 #[derive(Args)]
 struct IngestDocumentsArgs {
-    #[arg(long = "collection-id")]
-    collection_id: String,
+    #[arg(long = "corpus-id")]
+    corpus_id: String,
 
     /// Single document ID (for single-document ingest)
     #[arg(long = "document-id")]
@@ -555,40 +555,40 @@ struct ContentAnalysisArgs {
 }
 
 #[derive(Subcommand)]
-enum CollectionsSubcommand {
-    /// List collections
+enum CorpusSubcommand {
+    /// List corpora
     List,
 
-    /// Create a collection
-    Create(CreateCollectionArgs),
+    /// Create a corpus
+    Create(CreateCorpusArgs),
 
-    /// Update a collection
-    Update(UpdateCollectionArgs),
+    /// Update a corpus
+    Update(UpdateCorpusArgs),
 
-    /// Delete a collection
+    /// Delete a corpus
     ///
     /// Destructive. Requires `--confirm` to proceed; in an interactive TTY
-    /// you'll be prompted to type the collection id to double-check
+    /// you'll be prompted to type the corpus id to double-check
     /// (CLI-TIER-013). In non-TTY / JSON mode, `--confirm-token` will be
     /// required once CLI-TIER-014 lands.
-    Delete(CollectionsDeleteArgs),
+    Delete(CorpusDeleteArgs),
 
-    /// Get collection stats
+    /// Get corpus stats
     Stats {
         #[arg(long)]
         id: String,
     },
 
-    /// List documents in a collection
+    /// List documents in a corpus
     Documents {
         #[arg(long)]
         id: String,
     },
 
-    /// Get stored chunks for a document in a collection
+    /// Get stored chunks for a document in a corpus
     Chunks {
-        #[arg(long = "collection-id")]
-        collection_id: String,
+        #[arg(long = "corpus-id")]
+        corpus_id: String,
 
         #[arg(long = "document-id")]
         document_id: String,
@@ -600,56 +600,56 @@ enum CollectionsSubcommand {
         include_content: bool,
     },
 
-    /// Get enriched detail for a single collection (J-004c)
+    /// Get enriched detail for a single corpus (J-004c)
     Get {
         #[arg(long)]
         id: String,
     },
 
-    /// Discard all uncommitted pending changes for a collection (J-004c)
+    /// Discard all uncommitted pending changes for a corpus (J-004c)
     Revert {
         #[arg(long)]
         id: String,
     },
 
-    /// Show the commit history for a collection (J-004c)
-    Commits(CollectionsCommitsArgs),
+    /// Show the commit history for a corpus (J-004c)
+    Commits(CorpusCommitsArgs),
 
-    /// Get vector-space metrics for a collection (J-020)
-    Metrics(CollectionsMetricsArgs),
+    /// Get vector-space metrics for a corpus (J-020)
+    Metrics(CorpusMetricsArgs),
 
     /// Stage document changes for later commit
-    Stage(CollectionsStageArgs),
+    Stage(CorpusStageArgs),
 
-    /// Commit staged changes to the collection
-    Commit(CollectionsCommitArgs),
+    /// Commit staged changes to the corpus
+    Commit(CorpusCommitArgs),
 
     /// List pending staged changes
-    Pending(CollectionsPendingArgs),
+    Pending(CorpusPendingArgs),
 
     /// Delete a specific pending staged change
-    PendingDelete(CollectionsPendingDeleteArgs),
+    PendingDelete(CorpusPendingDeleteArgs),
 
-    /// Materialize a purpose-built collection from a dataset's selected
+    /// Materialize a purpose-built corpus from a dataset's selected
     /// corpus subset (ENS-104). Closes the rapid-voice-iteration gap in
     /// the 5-step E2E evals vision: an 83-doc stratified sample re-embeds
     /// in seconds instead of hours.
-    MaterializeFromDataset(CollectionsMaterializeFromDatasetArgs),
+    MaterializeFromDataset(CorpusMaterializeFromDatasetArgs),
 
-    /// Populate an existing empty collection with a dataset's corpus,
+    /// Populate an existing empty corpus with a dataset's corpus,
     /// chunked by the supplied voice (ENS-133, parent ENS-132). The
     /// canonical Step-4 primitive of the 5-step Enscrive eval workflow
-    /// (voice + empty collection + dataset → populate → eval). The
-    /// collection's existing model + dimensions bind the embedding
+    /// (voice + empty corpus + dataset → populate → eval). The
+    /// corpus's existing model + dimensions bind the embedding
     /// space; the voice's embedding_model is advisory only. Returns 409
-    /// if the collection already has documents.
-    PopulateFromDataset(CollectionsPopulateFromDatasetArgs),
+    /// if the corpus already has documents.
+    PopulateFromDataset(CorpusPopulateFromDatasetArgs),
 }
 
-/// CLI-TIER-013: args for `enscrive collections delete`.
+/// CLI-TIER-013: args for `enscrive corpus delete`.
 #[derive(Args)]
-struct CollectionsDeleteArgs {
-    /// Collection UUID to delete.
+struct CorpusDeleteArgs {
+    /// Corpus UUID to delete.
     #[arg(long)]
     id: String,
 
@@ -664,7 +664,7 @@ struct CollectionsDeleteArgs {
 }
 
 #[derive(Args)]
-struct CollectionsStageArgs {
+struct CorpusStageArgs {
     #[arg(long)]
     id: String,
 
@@ -685,7 +685,7 @@ struct CollectionsStageArgs {
 }
 
 #[derive(Args)]
-struct CollectionsCommitArgs {
+struct CorpusCommitArgs {
     #[arg(long)]
     id: String,
 
@@ -695,13 +695,13 @@ struct CollectionsCommitArgs {
 }
 
 #[derive(Args)]
-struct CollectionsPendingArgs {
+struct CorpusPendingArgs {
     #[arg(long)]
     id: String,
 }
 
 #[derive(Args)]
-struct CollectionsPendingDeleteArgs {
+struct CorpusPendingDeleteArgs {
     #[arg(long)]
     id: String,
 
@@ -709,10 +709,10 @@ struct CollectionsPendingDeleteArgs {
     document_id: String,
 }
 
-/// J-004c: Arguments for `enscrive collections commits`.
+/// J-004c: Arguments for `enscrive corpus commits`.
 #[derive(Args)]
-struct CollectionsCommitsArgs {
-    /// Collection ID.
+struct CorpusCommitsArgs {
+    /// Corpus ID.
     #[arg(long)]
     id: String,
 
@@ -721,20 +721,20 @@ struct CollectionsCommitsArgs {
     limit: i64,
 }
 
-/// ENS-104: Arguments for `enscrive collections materialize-from-dataset`.
+/// ENS-104: Arguments for `enscrive corpus materialize-from-dataset`.
 #[derive(Args)]
-struct CollectionsMaterializeFromDatasetArgs {
+struct CorpusMaterializeFromDatasetArgs {
     /// Dataset UUID whose selected corpus subset drives the ingest.
     #[arg(long = "dataset-id")]
     dataset_id: String,
 
-    /// Name for the new collection.
+    /// Name for the new corpus.
     #[arg(long = "name")]
-    collection_name: String,
+    corpus_name: String,
 
-    /// Optional description for the new collection.
+    /// Optional description for the new corpus.
     #[arg(long = "description")]
-    collection_description: Option<String>,
+    corpus_description: Option<String>,
 
     /// Voice UUID whose chunking + embedding config drives the ingest.
     /// When omitted, a baseline text-embedding-3-small config is used.
@@ -742,29 +742,29 @@ struct CollectionsMaterializeFromDatasetArgs {
     voice_id: Option<String>,
 }
 
-/// ENS-133: Arguments for `enscrive collections populate-from-dataset`.
+/// ENS-133: Arguments for `enscrive corpus populate-from-dataset`.
 #[derive(Args)]
-struct CollectionsPopulateFromDatasetArgs {
-    /// Existing collection UUID to populate. Must currently have
+struct CorpusPopulateFromDatasetArgs {
+    /// Existing corpus UUID to populate. Must currently have
     /// `document_count == 0`; the server returns 409 otherwise.
-    #[arg(long = "collection")]
-    collection_id: String,
+    #[arg(long = "corpus")]
+    corpus_id: String,
 
     /// Dataset UUID whose corpus to ingest.
     #[arg(long = "dataset-id")]
     dataset_id: String,
 
     /// Voice UUID whose chunking strategy + parameters drive the ingest.
-    /// Voice's `embedding_model` is advisory only — the COLLECTION's
+    /// Voice's `embedding_model` is advisory only — the CORPUS's
     /// model binds the embedding space.
     #[arg(long = "voice-id")]
     voice_id: String,
 }
 
-/// J-020: Arguments for `enscrive collections metrics`.
+/// J-020: Arguments for `enscrive corpus metrics`.
 #[derive(Args)]
-struct CollectionsMetricsArgs {
-    /// Collection UUID to compute metrics for.
+struct CorpusMetricsArgs {
+    /// Corpus UUID to compute metrics for.
     #[arg(long)]
     id: String,
 
@@ -779,7 +779,7 @@ struct CollectionsMetricsArgs {
 }
 
 #[derive(Args)]
-struct CreateCollectionArgs {
+struct CreateCorpusArgs {
     #[arg(long)]
     name: String,
 
@@ -794,7 +794,7 @@ struct CreateCollectionArgs {
 }
 
 #[derive(Args)]
-struct UpdateCollectionArgs {
+struct UpdateCorpusArgs {
     #[arg(long)]
     id: String,
 
@@ -821,7 +821,7 @@ enum VoicesSubcommand {
 
     /// Update a voice (full config replace; bumps version and appends to the
     /// voice_versions audit table). Retrieval-only changes apply instantly;
-    /// chunking + embedding changes invalidate the target collection's
+    /// chunking + embedding changes invalidate the target corpus's
     /// corpus — run `voices diff2 diff-cost` first to estimate re-embed.
     Update(UpdateVoiceArgs),
 
@@ -831,7 +831,7 @@ enum VoicesSubcommand {
     /// sessions also prompt for the voice id for double-check.
     Delete(VoicesDeleteArgs),
 
-    /// Compare two voices against the same query and collection
+    /// Compare two voices against the same query and corpus
     Compare(VoiceCompareArgs),
 
     /// Promote a voice to another environment
@@ -852,7 +852,7 @@ enum VoicesSubcommand {
 }
 
 const VOICE_CONFIG_SCHEMA_SUMMARY: &str = "expected VoiceConfigApi keys: chunking_strategy, parameters, optional template_id, score_threshold, default_limit, description, tags";
-const EVAL_QUERY_ITEM_SCHEMA_SUMMARY: &str = "expected each EvalQueryItem to include query_id, query_text, relevant_doc_ids, relevance_scores, and optional collection_id, match_mode";
+const EVAL_QUERY_ITEM_SCHEMA_SUMMARY: &str = "expected each EvalQueryItem to include query_id, query_text, relevant_doc_ids, relevance_scores, and optional corpus_id, match_mode";
 const CREATE_VOICE_AFTER_HELP: &str = r#"Voice config JSON schema:
   {
     "chunking_strategy": "story_beats",
@@ -875,13 +875,13 @@ const EVAL_DATASET_AFTER_HELP: &str = r#"Expected eval dataset query JSON:
       "query_text": "Who blesses the water snakes?",
       "relevant_doc_ids": ["doc-1"],
       "relevance_scores": {"doc-1": 2},
-      "collection_id": "collection-uuid",
+      "corpus_id": "corpus-uuid",
       "match_mode": "document_prefix"
     }
   ]"#;
 const RUN_EVAL_CAMPAIGN_AFTER_HELP: &str = r#"Query JSON uses the same EvalQueryItem schema as eval datasets.
 
-Use --collection-id to set a campaign-level default collection for all queries that do not include collection_id.
+Use --corpus-id to set a campaign-level default corpus for all queries that do not include corpus_id.
 
 Example query item:
   {
@@ -889,7 +889,7 @@ Example query item:
     "query_text": "Who blesses the water snakes?",
     "relevant_doc_ids": ["doc-1"],
     "relevance_scores": {"doc-1": 2},
-    "collection_id": "collection-uuid",
+    "corpus_id": "corpus-uuid",
     "match_mode": "document_prefix"
   }"#;
 
@@ -942,7 +942,7 @@ struct UpdateVoiceArgs {
 
     /// Required acknowledgment when the change is corpus-invalidating
     /// (chunking / embedding touched). Safety interlock for expensive
-    /// re-embeds — run `voices diff2 diff-cost --against <v> --collection <id>`
+    /// re-embeds — run `voices diff2 diff-cost --against <v> --corpus <id>`
     /// first to see the $ and wall-clock estimate. Ignored for query-only
     /// changes.
     #[arg(long = "confirm-re-embed", default_value_t = false)]
@@ -960,8 +960,8 @@ struct VoiceCompareArgs {
     #[arg(long)]
     query: String,
 
-    #[arg(long = "collection-id")]
-    collection_id: String,
+    #[arg(long = "corpus-id")]
+    corpus_id: String,
 
     #[arg(long, default_value_t = false)]
     include_vectors: bool,
@@ -1024,7 +1024,7 @@ struct VoiceSearchArgs {
     voice_id: String,
 
     #[arg(long)]
-    collection: Option<String>,
+    corpus: Option<String>,
 
     #[arg(long, default_value_t = 10)]
     limit: u32,
@@ -1118,11 +1118,11 @@ struct FromUrlArgs {
     #[arg(long = "name")]
     name: Option<String>,
 
-    /// Collection ID to ingest corpus into. Optional: a throwaway uuid is
+    /// Corpus ID to ingest corpus into. Optional: a throwaway uuid is
     /// sent when omitted, which is sufficient for phase-1 materialization
     /// (dataset row + queries + qrels) when embed/ingest is unhealthy.
-    #[arg(long = "collection-id")]
-    collection_id: Option<String>,
+    #[arg(long = "corpus-id")]
+    corpus_id: Option<String>,
 
     /// Optional explicit qrels dataset URL or ID (auto-discovered when omitted)
     #[arg(long = "qrels-url")]
@@ -1393,9 +1393,9 @@ struct RunEvalCampaignArgs {
     #[arg(long = "metric", required = true)]
     metrics: Vec<String>,
 
-    /// Campaign-level default collection ID for queries that do not include collection_id.
-    #[arg(long = "collection-id")]
-    collection_id: Option<String>,
+    /// Campaign-level default corpus ID for queries that do not include corpus_id.
+    #[arg(long = "corpus-id")]
+    corpus_id: Option<String>,
 
     /// JSON string containing an array of EvalQueryItem objects
     #[arg(long, conflicts_with = "queries_file")]
@@ -1429,13 +1429,13 @@ struct ImportEvalsArgs {
     #[arg(long = "qrels-file")]
     qrels_file: String,
 
-    /// Optional: also ingest corpus into a collection
+    /// Optional: also ingest corpus into a corpus
     #[arg(long = "corpus-file")]
     corpus_file: Option<String>,
 
-    /// Collection ID for corpus ingestion (required if --corpus-file is provided)
-    #[arg(long = "collection-id")]
-    collection_id: Option<String>,
+    /// Corpus ID for corpus ingestion (required if --corpus-file is provided)
+    #[arg(long = "corpus-id")]
+    corpus_id: Option<String>,
 
     /// Voice ID for corpus ingestion (optional, determines chunking strategy)
     #[arg(long = "voice-id")]
@@ -1487,7 +1487,7 @@ struct UsageArgs {
     document_id: Option<String>,
 
     #[arg(long)]
-    collection_id: Option<String>,
+    corpus_id: Option<String>,
 
     #[arg(long)]
     operation: Option<String>,
@@ -1516,7 +1516,7 @@ enum JobsSubcommand {
     /// Retry failed sub-batches of a batch-set job (J-024 Unit 3)
     Retry(JobsRetryArgs),
 
-    /// Abandon a failed batch-set job, cleaning up staging collections (J-024 Unit 3)
+    /// Abandon a failed batch-set job, cleaning up staging corpora (J-024 Unit 3)
     Abandon(JobsAbandonArgs),
 }
 
@@ -1561,7 +1561,7 @@ struct JobsAbandonArgs {
 
 #[derive(Subcommand)]
 enum BatchSetsSubcommand {
-    /// List batch-sets for a collection
+    /// List batch-sets for a corpus
     List(BatchSetsListArgs),
 
     /// Get details of a specific batch-set
@@ -1571,9 +1571,9 @@ enum BatchSetsSubcommand {
 /// J-024: Arguments for `enscrive batch-sets list`.
 #[derive(Args)]
 struct BatchSetsListArgs {
-    /// Collection UUID
+    /// Corpus UUID
     #[arg(long)]
-    collection: String,
+    corpus: String,
 
     /// Maximum results (default 50, max 200)
     #[arg(long)]
@@ -1989,7 +1989,7 @@ struct CliEvalQueryItem {
     relevant_doc_ids: Vec<String>,
     relevance_scores: HashMap<String, i32>,
     #[serde(default)]
-    collection_id: Option<String>,
+    corpus_id: Option<String>,
     #[serde(default)]
     match_mode: Option<String>,
 }
@@ -2234,7 +2234,7 @@ fn build_eval_campaign_body(args: &RunEvalCampaignArgs) -> Result<Value, String>
         "voice_id": args.voice_id,
         "dataset_id": args.dataset_id,
         "metrics": args.metrics,
-        "collection_id": args.collection_id,
+        "corpus_id": args.corpus_id,
         "queries": queries,
         "match_mode": match_mode,
     }))
@@ -2295,20 +2295,20 @@ async fn run_evals_from_url(client: &client::EnscriveClient, args: &FromUrlArgs,
         format!("{}-{}", slugify_dataset_id(&dataset_id), stamp)
     });
 
-    // collection_id is required by the developer handler (BadRequest when
+    // corpus_id is required by the developer handler (BadRequest when
     // empty). When the caller omits it we send a throwaway v4 uuid so
     // phase-1 materialization (dataset + queries + qrels rows) still succeeds
     // even when embed/ingest is unhealthy; the job will fail at the ingest
     // phase in that case but the dataset_id is already populated on the job
     // row before any embed RPC (W-001 confirmed this at job_runner.rs:603-624).
-    let collection_id = args.collection_id.clone().unwrap_or_else(|| {
+    let corpus_id = args.corpus_id.clone().unwrap_or_else(|| {
         uuid_v4_simple()
     });
 
     let mut launch_body = json!({
         "dataset_url": dataset_id,
         "dataset_name": dataset_name,
-        "collection_id": collection_id,
+        "corpus_id": corpus_id,
     });
     if let Some(ref q) = args.qrels_url {
         launch_body["qrels_url"] = Value::String(q.clone());
@@ -2570,7 +2570,7 @@ fn build_search_body(args: &SearchArgs) -> Result<Value, String> {
 
     Ok(json!({
         "query": args.query,
-        "collection_id": args.collection,
+        "corpus_id": args.corpus,
         "filters": filters,
         "limit": args.limit,
         "include_vectors": args.include_vectors,
@@ -2606,7 +2606,7 @@ fn build_voice_search_body(args: &VoiceSearchArgs) -> Result<Value, String> {
     Ok(json!({
         "query": args.query,
         "voice_id": args.voice_id,
-        "collection_id": args.collection,
+        "corpus_id": args.corpus,
         "limit": args.limit,
         "include_vectors": args.include_vectors,
         "filters": filters,
@@ -2629,8 +2629,8 @@ fn build_usage_query(args: &UsageArgs) -> Vec<(&'static str, String)> {
     if let Some(value) = &args.document_id {
         query.push(("document_id", value.clone()));
     }
-    if let Some(value) = &args.collection_id {
-        query.push(("collection_id", value.clone()));
+    if let Some(value) = &args.corpus_id {
+        query.push(("corpus_id", value.clone()));
     }
     if let Some(value) = &args.operation {
         query.push(("operation", value.clone()));
@@ -2993,25 +2993,25 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
             ModelsSubcommand::List => "models list",
             ModelsSubcommand::Show(_) => return None, // skip list
         },
-        Commands::Collections { sub } => match sub {
-            CollectionsSubcommand::List => "collections list",
-            CollectionsSubcommand::Create(_) => "collections create",
-            CollectionsSubcommand::Update(_) => "collections update",
-            CollectionsSubcommand::Delete(_) => "collections delete",
-            CollectionsSubcommand::Stats { .. } => "collections stats",
-            CollectionsSubcommand::Documents { .. } => "collections documents",
-            CollectionsSubcommand::Chunks { .. } => "collections chunks",
-            CollectionsSubcommand::Stage(_) => "collections stage",
-            CollectionsSubcommand::Commit(_) => "collections commit",
-            CollectionsSubcommand::Pending(_) => "collections pending",
-            CollectionsSubcommand::PendingDelete(_) => "collections pending-delete",
+        Commands::Corpus { sub } => match sub {
+            CorpusSubcommand::List => "corpus list",
+            CorpusSubcommand::Create(_) => "corpus create",
+            CorpusSubcommand::Update(_) => "corpus update",
+            CorpusSubcommand::Delete(_) => "corpus delete",
+            CorpusSubcommand::Stats { .. } => "corpus stats",
+            CorpusSubcommand::Documents { .. } => "corpus documents",
+            CorpusSubcommand::Chunks { .. } => "corpus chunks",
+            CorpusSubcommand::Stage(_) => "corpus stage",
+            CorpusSubcommand::Commit(_) => "corpus commit",
+            CorpusSubcommand::Pending(_) => "corpus pending",
+            CorpusSubcommand::PendingDelete(_) => "corpus pending-delete",
             // Local-only / skip-list commands:
-            CollectionsSubcommand::Get { .. }
-            | CollectionsSubcommand::Revert { .. }
-            | CollectionsSubcommand::Commits(_)
-            | CollectionsSubcommand::Metrics(_)
-            | CollectionsSubcommand::MaterializeFromDataset(_)
-            | CollectionsSubcommand::PopulateFromDataset(_) => return None,
+            CorpusSubcommand::Get { .. }
+            | CorpusSubcommand::Revert { .. }
+            | CorpusSubcommand::Commits(_)
+            | CorpusSubcommand::Metrics(_)
+            | CorpusSubcommand::MaterializeFromDataset(_)
+            | CorpusSubcommand::PopulateFromDataset(_) => return None,
         },
         Commands::Voices { sub } => match sub {
             VoicesSubcommand::List => "voices list",
@@ -3459,7 +3459,7 @@ async fn main() {
                     let body = json!({
                         "texts": args.texts,
                         "voice_id": args.voice_id,
-                        "collection_id": args.collection,
+                        "corpus_id": args.corpus,
                     });
                     match client.post_json("/v1/query-embeddings", body).await {
                         Ok(data) => CliResponse::success("embeddings query", data).emit(fmt),
@@ -3475,7 +3475,7 @@ async fn main() {
                 IngestSubcommand::Prepared(args) => match parse_segments_source(args) {
                     Ok(segments) => {
                         let body = json!({
-                            "collection_id": args.collection_id,
+                            "corpus_id": args.corpus_id,
                             "document_id": args.document_id,
                             "segments": segments,
                             "voice_id": args.voice_id,
@@ -3528,7 +3528,7 @@ async fn main() {
                         .emit(fmt)
                     };
                     let body = json!({
-                        "collection_id": args.collection_id,
+                        "corpus_id": args.corpus_id,
                         "documents": documents,
                         "voice_id": args.voice_id,
                         "dry_run": args.dry_run,
@@ -3645,49 +3645,49 @@ async fn main() {
                 }
             }
         }
-        Commands::Collections { sub } => {
+        Commands::Corpus { sub } => {
             let ctx = api_context.clone().unwrap();
             let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
-                CollectionsSubcommand::List => match client.get_json("/v1/collections").await {
-                    Ok(data) => CliResponse::success("collections list", data).emit(fmt),
-                    Err(e) => request_failure("collections list", e).emit(fmt),
+                CorpusSubcommand::List => match client.get_json("/v1/corpora").await {
+                    Ok(data) => CliResponse::success("corpus list", data).emit(fmt),
+                    Err(e) => request_failure("corpus list", e).emit(fmt),
                 },
-                CollectionsSubcommand::Create(args) => {
+                CorpusSubcommand::Create(args) => {
                     let body = json!({
                         "name": args.name,
                         "embedding_model": args.embedding_model,
                         "description": args.description,
                         "dimensions": args.dimensions,
                     });
-                    match client.post_json("/v1/collections", body).await {
-                        Ok(data) => CliResponse::success("collections create", data).emit(fmt),
-                        Err(e) => request_failure("collections create", e).emit(fmt),
+                    match client.post_json("/v1/corpora", body).await {
+                        Ok(data) => CliResponse::success("corpus create", data).emit(fmt),
+                        Err(e) => request_failure("corpus create", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::Update(args) => {
+                CorpusSubcommand::Update(args) => {
                     let body = json!({
                         "name": args.name,
                         "description": args.description,
                     });
-                    let path = format!("/v1/collections/{}", args.id);
+                    let path = format!("/v1/corpora/{}", args.id);
                     match client.patch_json(&path, body).await {
-                        Ok(data) => CliResponse::success("collections update", data).emit(fmt),
-                        Err(e) => request_failure("collections update", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus update", data).emit(fmt),
+                        Err(e) => request_failure("corpus update", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::Delete(args) => {
+                CorpusSubcommand::Delete(args) => {
                     let deployment_mode = api_context
                         .as_ref()
                         .and_then(|ctx| ctx.profile_mode.as_deref())
                         .unwrap_or("local");
 
                     // Check managed-mode confirmation token first
-                    match require_managed_confirmation(deployment_mode, args.confirm_token.as_deref(), "collections delete") {
+                    match require_managed_confirmation(deployment_mode, args.confirm_token.as_deref(), "corpus delete") {
                         Err(FailureClass::ConfirmationRequired) => {
                             CliResponse::fail(
-                                "collections delete",
-                                "'collections delete' requires a confirmation token in managed mode.\nObtain one at https://enscrive.io/portal/confirmations\n(or run locally with --mode self-managed and use --confirm)".to_string(),
+                                "corpus delete",
+                                "'corpus delete' requires a confirmation token in managed mode.\nObtain one at https://enscrive.io/portal/confirmations\n(or run locally with --mode self-managed and use --confirm)".to_string(),
                                 FailureClass::ConfirmationRequired,
                                 output::EXIT_CONFIRMATION_REQUIRED,
                             ).emit(fmt);
@@ -3697,83 +3697,83 @@ async fn main() {
                             // Local mode: proceed with require_local_confirmation
                             require_local_confirmation(
                                 &args.id,
-                                "collections delete",
+                                "corpus delete",
                                 fmt,
                                 args.confirm,
                             );
-                            let path = format!("/v1/collections/{}", args.id);
+                            let path = format!("/v1/corpora/{}", args.id);
                             // TODO(server-side, blocked on enscrive-developer): server endpoint for issuing tokens not yet built
                             let mut body = json!({});
                             if let Some(token) = &args.confirm_token {
                                 body["confirm_token"] = json!(token);
                             }
                             match client.delete_json(&path).await {
-                                Ok(data) => CliResponse::success("collections delete", data).emit(fmt),
-                                Err(e) => request_failure("collections delete", e).emit(fmt),
+                                Ok(data) => CliResponse::success("corpus delete", data).emit(fmt),
+                                Err(e) => request_failure("corpus delete", e).emit(fmt),
                             }
                         }
                     }
                 }
-                CollectionsSubcommand::Stats { id } => {
-                    let path = format!("/v1/collections/{}/stats", id);
+                CorpusSubcommand::Stats { id } => {
+                    let path = format!("/v1/corpora/{}/stats", id);
                     match client.get_json(&path).await {
-                        Ok(data) => CliResponse::success("collections stats", data).emit(fmt),
-                        Err(e) => request_failure("collections stats", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus stats", data).emit(fmt),
+                        Err(e) => request_failure("corpus stats", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::Documents { id } => {
-                    let path = format!("/v1/collections/{}/documents", id);
+                CorpusSubcommand::Documents { id } => {
+                    let path = format!("/v1/corpora/{}/documents", id);
                     match client.get_json(&path).await {
-                        Ok(data) => CliResponse::success("collections documents", data).emit(fmt),
-                        Err(e) => request_failure("collections documents", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus documents", data).emit(fmt),
+                        Err(e) => request_failure("corpus documents", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::Chunks {
-                    collection_id,
+                CorpusSubcommand::Chunks {
+                    corpus_id,
                     document_id,
                     include_vectors,
                     include_content,
                 } => {
                     let path = format!(
-                        "/v1/collections/{}/documents/{}/chunks?include_vectors={}&include_content={}",
-                        collection_id, document_id, include_vectors, include_content
+                        "/v1/corpora/{}/documents/{}/chunks?include_vectors={}&include_content={}",
+                        corpus_id, document_id, include_vectors, include_content
                     );
                     match client.get_json(&path).await {
-                        Ok(data) => CliResponse::success("collections chunks", data).emit(fmt),
-                        Err(e) => request_failure("collections chunks", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus chunks", data).emit(fmt),
+                        Err(e) => request_failure("corpus chunks", e).emit(fmt),
                     }
                 }
                 // J-004c: detail route is now live.
-                CollectionsSubcommand::Get { id } => {
-                    let path = format!("/v1/collections/{}", id);
+                CorpusSubcommand::Get { id } => {
+                    let path = format!("/v1/corpora/{}", id);
                     match client.get_json(&path).await {
-                        Ok(data) => CliResponse::success("collections get", data).emit(fmt),
-                        Err(e) => request_failure("collections get", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus get", data).emit(fmt),
+                        Err(e) => request_failure("corpus get", e).emit(fmt),
                     }
                 }
                 // J-004c: revert uncommitted pending changes.
-                CollectionsSubcommand::Revert { id } => {
-                    let path = format!("/v1/collections/{}/revert", id);
+                CorpusSubcommand::Revert { id } => {
+                    let path = format!("/v1/corpora/{}/revert", id);
                     match client.post_json(&path, serde_json::json!({})).await {
-                        Ok(data) => CliResponse::success("collections revert", data).emit(fmt),
-                        Err(e) => request_failure("collections revert", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus revert", data).emit(fmt),
+                        Err(e) => request_failure("corpus revert", e).emit(fmt),
                     }
                 }
                 // J-004c: commit history.
-                CollectionsSubcommand::Commits(args) => {
+                CorpusSubcommand::Commits(args) => {
                     let limit = args.limit.clamp(1, 200);
-                    let path = format!("/v1/collections/{}/commits?limit={}", args.id, limit);
+                    let path = format!("/v1/corpora/{}/commits?limit={}", args.id, limit);
                     match client.get_json(&path).await {
-                        Ok(data) => CliResponse::success("collections commits", data).emit(fmt),
-                        Err(e) => request_failure("collections commits", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus commits", data).emit(fmt),
+                        Err(e) => request_failure("corpus commits", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::Stage(args) => {
+                CorpusSubcommand::Stage(args) => {
                     let documents = if args.documents_json.is_some() || args.documents_file.is_some() {
                         match parse_json_source(&args.documents_json, &args.documents_file, "documents") {
                             Ok(docs) => docs,
                             Err(e) => {
-                                CliResponse::fail("collections stage", e, FailureClass::Bug, EXIT_CONFIG)
+                                CliResponse::fail("corpus stage", e, FailureClass::Bug, EXIT_CONFIG)
                                     .emit(fmt)
                             }
                         }
@@ -3785,97 +3785,97 @@ async fn main() {
                         "deletes": args.deletes,
                         "voice_id": args.voice_id,
                     });
-                    let path = format!("/v1/collections/{}/stage", args.id);
+                    let path = format!("/v1/corpora/{}/stage", args.id);
                     match client.post_json(&path, body).await {
-                        Ok(data) => CliResponse::success("collections stage", data).emit(fmt),
-                        Err(e) => request_failure("collections stage", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus stage", data).emit(fmt),
+                        Err(e) => request_failure("corpus stage", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::Commit(args) => {
+                CorpusSubcommand::Commit(args) => {
                     let body = if args.force_sync {
                         json!({ "force_sync": true })
                     } else {
                         json!({})
                     };
-                    let path = format!("/v1/collections/{}/commit", args.id);
+                    let path = format!("/v1/corpora/{}/commit", args.id);
                     match client.post_json(&path, body).await {
-                        Ok(data) => CliResponse::success("collections commit", data).emit(fmt),
-                        Err(e) => request_failure("collections commit", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus commit", data).emit(fmt),
+                        Err(e) => request_failure("corpus commit", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::Pending(args) => {
-                    let path = format!("/v1/collections/{}/pending", args.id);
+                CorpusSubcommand::Pending(args) => {
+                    let path = format!("/v1/corpora/{}/pending", args.id);
                     match client.get_json(&path).await {
-                        Ok(data) => CliResponse::success("collections pending", data).emit(fmt),
-                        Err(e) => request_failure("collections pending", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus pending", data).emit(fmt),
+                        Err(e) => request_failure("corpus pending", e).emit(fmt),
                     }
                 }
-                CollectionsSubcommand::PendingDelete(args) => {
-                    let path = format!("/v1/collections/{}/pending/{}", args.id, args.document_id);
+                CorpusSubcommand::PendingDelete(args) => {
+                    let path = format!("/v1/corpora/{}/pending/{}", args.id, args.document_id);
                     match client.delete_json(&path).await {
-                        Ok(data) => CliResponse::success("collections pending delete", data).emit(fmt),
-                        Err(e) => request_failure("collections pending delete", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus pending delete", data).emit(fmt),
+                        Err(e) => request_failure("corpus pending delete", e).emit(fmt),
                     }
                 }
-                // ENS-104: materialize a purpose-built collection from a dataset.
-                CollectionsSubcommand::MaterializeFromDataset(args) => {
+                // ENS-104: materialize a purpose-built corpus from a dataset.
+                CorpusSubcommand::MaterializeFromDataset(args) => {
                     let mut body = serde_json::Map::new();
                     body.insert("dataset_id".into(), json!(args.dataset_id));
-                    body.insert("collection_name".into(), json!(args.collection_name));
-                    if let Some(desc) = &args.collection_description {
-                        body.insert("collection_description".into(), json!(desc));
+                    body.insert("corpus_name".into(), json!(args.corpus_name));
+                    if let Some(desc) = &args.corpus_description {
+                        body.insert("corpus_description".into(), json!(desc));
                     }
                     if let Some(vid) = &args.voice_id {
                         body.insert("voice_id".into(), json!(vid));
                     }
                     match client
-                        .post_json("/v1/collections/materialize-from-dataset", json!(body))
+                        .post_json("/v1/corpora/materialize-from-dataset", json!(body))
                         .await
                     {
                         Ok(data) => {
-                            CliResponse::success("collections materialize-from-dataset", data)
+                            CliResponse::success("corpus materialize-from-dataset", data)
                                 .emit(fmt)
                         }
-                        Err(e) => request_failure("collections materialize-from-dataset", e)
+                        Err(e) => request_failure("corpus materialize-from-dataset", e)
                             .emit(fmt),
                     }
                 }
                 // ENS-133 (parent ENS-132): the canonical Step-4 primitive
                 // of the 5-step Enscrive eval workflow. Populates an
-                // existing empty collection with a dataset's corpus,
+                // existing empty corpus with a dataset's corpus,
                 // chunked by the supplied voice. Returns 409 if the
-                // collection already has documents.
-                CollectionsSubcommand::PopulateFromDataset(args) => {
+                // corpus already has documents.
+                CorpusSubcommand::PopulateFromDataset(args) => {
                     let body = serde_json::json!({
                         "dataset_id": args.dataset_id,
                         "voice_id":   args.voice_id,
                     });
                     let path = format!(
-                        "/v1/collections/{}/populate-from-dataset",
-                        args.collection_id,
+                        "/v1/corpora/{}/populate-from-dataset",
+                        args.corpus_id,
                     );
                     match client.post_json(&path, body).await {
                         Ok(data) => CliResponse::success(
-                            "collections populate-from-dataset",
+                            "corpus populate-from-dataset",
                             data,
                         )
                         .emit(fmt),
                         Err(e) => request_failure(
-                            "collections populate-from-dataset",
+                            "corpus populate-from-dataset",
                             e,
                         )
                         .emit(fmt),
                     }
                 }
                 // J-020: vector-space metrics endpoint.
-                CollectionsSubcommand::Metrics(args) => {
+                CorpusSubcommand::Metrics(args) => {
                     let path = format!(
-                        "/v1/collections/{}/metrics?sample_size={}&force_refresh={}",
+                        "/v1/corpora/{}/metrics?sample_size={}&force_refresh={}",
                         args.id, args.sample_size, args.force_refresh,
                     );
                     match client.get_json(&path).await {
-                        Ok(data) => CliResponse::success("collections metrics", data).emit(fmt),
-                        Err(e) => request_failure("collections metrics", e).emit(fmt),
+                        Ok(data) => CliResponse::success("corpus metrics", data).emit(fmt),
+                        Err(e) => request_failure("corpus metrics", e).emit(fmt),
                     }
                 }
             }
@@ -3952,7 +3952,7 @@ async fn main() {
                                 "refusing corpus-invalidating update without --confirm-re-embed \
                                  ({changed} field(s) affected). {reasoning}. \
                                  Run `enscrive voices diff2 diff-cost --id {} --against <v> \
-                                 --collection <uuid>` to estimate the re-embed cost first.",
+                                 --corpus <uuid>` to estimate the re-embed cost first.",
                                 args.id
                             ),
                             FailureClass::Bug,
@@ -4017,7 +4017,7 @@ async fn main() {
                         "voice_a_id": args.voice_a_id,
                         "voice_b_id": args.voice_b_id,
                         "query": args.query,
-                        "collection_id": args.collection_id,
+                        "corpus_id": args.corpus_id,
                         "include_vectors": args.include_vectors,
                     });
                     match client.post_json("/v1/voices/compare", body).await {
@@ -4282,12 +4282,12 @@ async fn main() {
 
                 // Optionally ingest corpus
                 if let Some(corpus_path) = &args.corpus_file {
-                    let collection_id = match &args.collection_id {
+                    let corpus_id = match &args.corpus_id {
                         Some(id) => id.clone(),
                         None => {
                             CliResponse::fail(
                                 "evals import",
-                                "--collection-id is required when --corpus-file is provided".to_string(),
+                                "--corpus-id is required when --corpus-file is provided".to_string(),
                                 FailureClass::Bug,
                                 EXIT_CONFIG,
                             )
@@ -4350,7 +4350,7 @@ async fn main() {
                     for (batch_idx, batch) in documents.chunks(batch_size).enumerate() {
                         eprintln!("Ingesting batch {}/{}...", batch_idx + 1, total_batches);
                         let body = json!({
-                            "collection_id": collection_id,
+                            "corpus_id": corpus_id,
                             "voice_id": args.voice_id,
                             "documents": batch,
                             "dry_run": false,
@@ -4739,7 +4739,7 @@ async fn main() {
                     if let Some(offset) = args.offset {
                         query.push(("offset", offset.to_string()));
                     }
-                    let path = format!("/v1/collections/{}/batch-sets", args.collection);
+                    let path = format!("/v1/corpora/{}/batch-sets", args.corpus);
                     match client.get_json_with_query(&path, &query).await {
                         Ok(data) => CliResponse::success("batch-sets list", data).emit(fmt),
                         Err(e) => request_failure("batch-sets list", e).emit(fmt),
@@ -5076,7 +5076,7 @@ mod tests {
             "search",
             "--query",
             "hello",
-            "--collection",
+            "--corpus",
             "col-1",
             "--limit",
             "5",
@@ -5084,12 +5084,12 @@ mod tests {
         match args.command {
             Commands::Search(SearchArgs {
                 query,
-                collection,
+                corpus,
                 limit,
                 ..
             }) => {
                 assert_eq!(query, "hello");
-                assert_eq!(collection.as_deref(), Some("col-1"));
+                assert_eq!(corpus.as_deref(), Some("col-1"));
                 assert_eq!(limit, 5);
             }
             _ => panic!("expected Search"),
@@ -5249,7 +5249,7 @@ mod tests {
             "test-key",
             "ingest",
             "prepared",
-            "--collection-id",
+            "--corpus-id",
             "col-1",
             "--document-id",
             "doc-1",
@@ -5261,13 +5261,13 @@ mod tests {
             Commands::Ingest {
                 sub:
                     IngestSubcommand::Prepared(IngestPreparedArgs {
-                        collection_id,
+                        corpus_id,
                         document_id,
                         segments_file,
                         ..
                     }),
             } => {
-                assert_eq!(collection_id, "col-1");
+                assert_eq!(corpus_id, "col-1");
                 assert_eq!(document_id, "doc-1");
                 assert_eq!(segments_file.as_deref(), Some("segments.json"));
             }
@@ -5350,7 +5350,7 @@ mod tests {
             "BeIR/scifact",
             "--name",
             "scifact-w003",
-            "--collection-id",
+            "--corpus-id",
             "bea30a4b-4733-4e02-befa-c48f6e28280e",
             "--timeout",
             "600",
@@ -5363,7 +5363,7 @@ mod tests {
                 assert_eq!(from_url.dataset, "BeIR/scifact");
                 assert_eq!(from_url.name.as_deref(), Some("scifact-w003"));
                 assert_eq!(
-                    from_url.collection_id.as_deref(),
+                    from_url.corpus_id.as_deref(),
                     Some("bea30a4b-4733-4e02-befa-c48f6e28280e")
                 );
                 assert_eq!(from_url.timeout_secs, 600);
@@ -5464,7 +5464,7 @@ mod tests {
             "2026-03-14T00:00:00Z",
             "--end-time",
             "2026-03-15T00:00:00Z",
-            "--collection-id",
+            "--corpus-id",
             "col-1",
             "--limit",
             "25",
@@ -5473,13 +5473,13 @@ mod tests {
             Commands::Usage(UsageArgs {
                 start_time,
                 end_time,
-                collection_id,
+                corpus_id,
                 limit,
                 ..
             }) => {
                 assert_eq!(start_time, "2026-03-14T00:00:00Z");
                 assert_eq!(end_time, "2026-03-15T00:00:00Z");
-                assert_eq!(collection_id.as_deref(), Some("col-1"));
+                assert_eq!(corpus_id.as_deref(), Some("col-1"));
                 assert_eq!(limit, Some(25));
             }
             _ => panic!("expected Usage"),
@@ -5492,7 +5492,7 @@ mod tests {
             start_time: "2026-03-14T00:00:00Z".to_string(),
             end_time: "2026-03-15T00:00:00Z".to_string(),
             document_id: Some("doc-1".to_string()),
-            collection_id: Some("col-1".to_string()),
+            corpus_id: Some("col-1".to_string()),
             operation: Some("search".to_string()),
             embedding_model: Some("bge-small-en-v1.5".to_string()),
             limit: Some(50),
@@ -5505,7 +5505,7 @@ mod tests {
                 ("start_time", "2026-03-14T00:00:00Z".to_string()),
                 ("end_time", "2026-03-15T00:00:00Z".to_string()),
                 ("document_id", "doc-1".to_string()),
-                ("collection_id", "col-1".to_string()),
+                ("corpus_id", "col-1".to_string()),
                 ("operation", "search".to_string()),
                 ("embedding_model", "bge-small-en-v1.5".to_string()),
                 ("limit", "50".to_string()),
@@ -5517,7 +5517,7 @@ mod tests {
     #[test]
     fn reject_non_array_segments_json() {
         let args = IngestPreparedArgs {
-            collection_id: "col-1".to_string(),
+            corpus_id: "col-1".to_string(),
             document_id: "doc-1".to_string(),
             voice_id: None,
             segments_json: Some("{\"content\":\"nope\"}".to_string()),
@@ -5559,21 +5559,21 @@ mod tests {
         let error = parse_eval_queries_source(&Some("{\"query\":\"nope\"}".to_string()), &None)
             .unwrap_err();
         assert!(error.contains("queries JSON must be an array"));
-        assert!(error.contains("optional collection_id"));
+        assert!(error.contains("optional corpus_id"));
     }
 
     #[test]
-    fn parse_eval_queries_source_accepts_collection_id() {
+    fn parse_eval_queries_source_accepts_corpus_id() {
         let value = parse_eval_queries_source(
             &Some(
-                r#"[{"query_id":"q1","query_text":"hello","relevant_doc_ids":["doc-1"],"relevance_scores":{"doc-1":1},"collection_id":"col-1","match_mode":"document_prefix"}]"#
+                r#"[{"query_id":"q1","query_text":"hello","relevant_doc_ids":["doc-1"],"relevance_scores":{"doc-1":1},"corpus_id":"col-1","match_mode":"document_prefix"}]"#
                     .to_string(),
             ),
             &None,
         )
         .unwrap();
 
-        assert_eq!(value[0]["collection_id"], "col-1");
+        assert_eq!(value[0]["corpus_id"], "col-1");
         assert_eq!(value[0]["match_mode"], "document_prefix");
     }
 
@@ -5595,7 +5595,7 @@ mod tests {
     fn build_search_body_includes_filters() {
         let body = build_search_body(&SearchArgs {
             query: "hello".to_string(),
-            collection: Some("col-1".to_string()),
+            corpus: Some("col-1".to_string()),
             limit: 5,
             include_vectors: false,
             score_threshold: None,
@@ -5635,7 +5635,7 @@ mod tests {
             "world",
             "--voice-id",
             "voice-1",
-            "--collection",
+            "--corpus",
             "col-1",
         ]);
         match args.command {
@@ -5644,24 +5644,24 @@ mod tests {
                     EmbeddingsSubcommand::Query(EmbeddingsQueryArgs {
                         texts,
                         voice_id,
-                        collection,
+                        corpus,
                     }),
             } => {
                 assert_eq!(texts, vec!["hello", "world"]);
                 assert_eq!(voice_id.as_deref(), Some("voice-1"));
-                assert_eq!(collection.as_deref(), Some("col-1"));
+                assert_eq!(corpus.as_deref(), Some("col-1"));
             }
             _ => panic!("expected embeddings query"),
         }
     }
 
     #[test]
-    fn parse_collections_create() {
+    fn parse_corpus_create() {
         let args = Cli::parse_from([
             "enscrive",
             "--api-key",
             "k",
-            "collections",
+            "corpus",
             "create",
             "--name",
             "test",
@@ -5671,9 +5671,9 @@ mod tests {
             "384",
         ]);
         match args.command {
-            Commands::Collections {
+            Commands::Corpus {
                 sub:
-                    CollectionsSubcommand::Create(CreateCollectionArgs {
+                    CorpusSubcommand::Create(CreateCorpusArgs {
                         name,
                         embedding_model,
                         dimensions,
@@ -5684,7 +5684,7 @@ mod tests {
                 assert_eq!(embedding_model, "bge-small-en-v1.5");
                 assert_eq!(dimensions, Some(384));
             }
-            _ => panic!("expected collections create"),
+            _ => panic!("expected corpus create"),
         }
     }
 
@@ -5748,7 +5748,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     #[test]
     fn parse_segments_source_accepts_segment_command_envelope() {
         let args = IngestPreparedArgs {
-            collection_id: "col-1".to_string(),
+            corpus_id: "col-1".to_string(),
             document_id: "doc-1".to_string(),
             voice_id: None,
             segments_json: Some(
@@ -5781,7 +5781,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     #[test]
     fn parse_segments_source_converts_segment_info_arrays() {
         let args = IngestPreparedArgs {
-            collection_id: "col-1".to_string(),
+            corpus_id: "col-1".to_string(),
             document_id: "doc-1".to_string(),
             voice_id: None,
             segments_json: Some(
@@ -5822,7 +5822,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             "voice-b",
             "--query",
             "compare me",
-            "--collection-id",
+            "--corpus-id",
             "col-1",
             "--include-vectors",
         ]);
@@ -5833,14 +5833,14 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                         voice_a_id,
                         voice_b_id,
                         query,
-                        collection_id,
+                        corpus_id,
                         include_vectors,
                     }),
             } => {
                 assert_eq!(voice_a_id, "voice-a");
                 assert_eq!(voice_b_id, "voice-b");
                 assert_eq!(query, "compare me");
-                assert_eq!(collection_id, "col-1");
+                assert_eq!(corpus_id, "col-1");
                 assert!(include_vectors);
             }
             _ => panic!("expected voices compare"),
@@ -5988,10 +5988,10 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
 
 
     #[test]
-    fn collections_get_unsupported_response() {
+    fn corpus_get_unsupported_response() {
         let response = CliResponse::unsupported(
-            "collections get",
-            "GET /v1/collections/{id} is not yet available on public /v1",
+            "corpus get",
+            "GET /v1/corpora/{id} is not yet available on public /v1",
         );
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["failure_class"], "FAIL_UNSUPPORTED");
@@ -6020,7 +6020,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 assert_eq!(import.queries_file, "queries.jsonl");
                 assert_eq!(import.qrels_file, "qrels/test.tsv");
                 assert!(import.corpus_file.is_none());
-                assert!(import.collection_id.is_none());
+                assert!(import.corpus_id.is_none());
                 assert!(import.voice_id.is_none());
             }
             _ => panic!("expected evals import"),
@@ -6041,7 +6041,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             "qrels/test.tsv",
             "--corpus-file",
             "corpus.jsonl",
-            "--collection-id",
+            "--corpus-id",
             "col-1",
             "--voice-id",
             "voice-1",
@@ -6052,7 +6052,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             } => {
                 assert_eq!(import.dataset_name, "beir-scifact");
                 assert_eq!(import.corpus_file.as_deref(), Some("corpus.jsonl"));
-                assert_eq!(import.collection_id.as_deref(), Some("col-1"));
+                assert_eq!(import.corpus_id.as_deref(), Some("col-1"));
                 assert_eq!(import.voice_id.as_deref(), Some("voice-1"));
             }
             _ => panic!("expected evals import"),
@@ -6091,7 +6091,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             "recall@10",
             "--queries-file",
             "queries.json",
-            "--collection-id",
+            "--corpus-id",
             "collection-1",
         ]);
         match args.command {
@@ -6104,7 +6104,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 assert_eq!(run.metrics, vec!["ndcg@10", "recall@10"]);
                 assert_eq!(run.queries_file.as_deref(), Some("queries.json"));
                 assert!(run.queries_json.is_none());
-                assert_eq!(run.collection_id.as_deref(), Some("collection-1"));
+                assert_eq!(run.corpus_id.as_deref(), Some("collection-1"));
                 assert!(run.match_mode.is_none());
             }
             _ => panic!("expected evals run-campaign"),
@@ -6147,7 +6147,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             voice_id: "voice-1".to_string(),
             dataset_id: "dataset-1".to_string(),
             metrics: vec!["ndcg@10".to_string()],
-            collection_id: Some("collection-1".to_string()),
+            corpus_id: Some("collection-1".to_string()),
             queries_json: Some(
                 r#"[{"query_id":"q1","query_text":"hello","relevant_doc_ids":["doc-1"],"relevance_scores":{"doc-1":1}}]"#
                     .to_string(),
@@ -6158,7 +6158,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
 
         let body = build_eval_campaign_body(&args).unwrap();
         assert_eq!(body["match_mode"], "document_prefix");
-        assert_eq!(body["collection_id"], "collection-1");
+        assert_eq!(body["corpus_id"], "collection-1");
     }
 
     #[test]
@@ -6168,7 +6168,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             voice_id: "voice-1".to_string(),
             dataset_id: "dataset-1".to_string(),
             metrics: vec!["ndcg@10".to_string()],
-            collection_id: None,
+            corpus_id: None,
             queries_json: Some(
                 r#"[{"query_id":"q1","query_text":"hello","relevant_doc_ids":["doc-1"],"relevance_scores":{"doc-1":1}}]"#
                     .to_string(),
@@ -6188,7 +6188,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             voice_id: "voice-1".to_string(),
             dataset_id: "dataset-1".to_string(),
             metrics: vec!["ndcg@10".to_string()],
-            collection_id: Some("collection-1".to_string()),
+            corpus_id: Some("collection-1".to_string()),
             queries_json: None,
             queries_file: None,
             match_mode: Some("document_prefix".to_string()),
@@ -6197,7 +6197,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         let body = build_eval_campaign_body(&args).unwrap();
         assert_eq!(body["queries"], Value::Array(Vec::new()));
         assert_eq!(body["match_mode"], "document_prefix");
-        assert_eq!(body["collection_id"], "collection-1");
+        assert_eq!(body["corpus_id"], "collection-1");
     }
 
 
@@ -6452,23 +6452,23 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     }
 
     #[test]
-    fn parse_collections_documents() {
-        let args = Cli::parse_from(["enscrive", "collections", "documents", "--id", "col-1"]);
+    fn parse_corpus_documents() {
+        let args = Cli::parse_from(["enscrive", "corpus", "documents", "--id", "col-1"]);
         match args.command {
-            Commands::Collections {
-                sub: CollectionsSubcommand::Documents { id },
+            Commands::Corpus {
+                sub: CorpusSubcommand::Documents { id },
             } => assert_eq!(id, "col-1"),
-            _ => panic!("expected collections documents"),
+            _ => panic!("expected corpus documents"),
         }
     }
 
     #[test]
-    fn parse_collections_chunks() {
+    fn parse_corpus_chunks() {
         let args = Cli::parse_from([
             "enscrive",
-            "collections",
+            "corpus",
             "chunks",
-            "--collection-id",
+            "--corpus-id",
             "col-1",
             "--document-id",
             "doc-1",
@@ -6478,21 +6478,21 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             "false",
         ]);
         match args.command {
-            Commands::Collections {
+            Commands::Corpus {
                 sub:
-                    CollectionsSubcommand::Chunks {
-                        collection_id,
+                    CorpusSubcommand::Chunks {
+                        corpus_id,
                         document_id,
                         include_vectors,
                         include_content,
                     },
             } => {
-                assert_eq!(collection_id, "col-1");
+                assert_eq!(corpus_id, "col-1");
                 assert_eq!(document_id, "doc-1");
                 assert!(!include_vectors);
                 assert!(!include_content);
             }
-            _ => panic!("expected collections chunks"),
+            _ => panic!("expected corpus chunks"),
         }
     }
 
@@ -6644,22 +6644,22 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
 
     // ── J-024 Unit 5: batch-sets parse tests ─────────────────────────────────
 
-    /// Test that `enscrive batch-sets list --collection <uuid>` parses correctly.
+    /// Test that `enscrive batch-sets list --corpus <uuid>` parses correctly.
     #[test]
     fn test_batch_sets_list_parses() {
-        let collection_id = "5171d423-b261-4e3d-b9a4-fb1205e34903";
+        let corpus_id = "5171d423-b261-4e3d-b9a4-fb1205e34903";
         let args = Cli::parse_from([
             "enscrive",
             "batch-sets",
             "list",
-            "--collection",
-            collection_id,
+            "--corpus",
+            corpus_id,
         ]);
         match args.command {
             Commands::BatchSets {
-                sub: BatchSetsSubcommand::List(BatchSetsListArgs { collection, limit, offset }),
+                sub: BatchSetsSubcommand::List(BatchSetsListArgs { corpus, limit, offset }),
             } => {
-                assert_eq!(collection, collection_id);
+                assert_eq!(corpus, corpus_id);
                 assert!(limit.is_none(), "limit must default to None");
                 assert!(offset.is_none(), "offset must default to None");
             }
@@ -6670,13 +6670,13 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     /// Test that `enscrive batch-sets list` with --limit and --offset parses correctly.
     #[test]
     fn test_batch_sets_list_parses_with_pagination() {
-        let collection_id = "5171d423-b261-4e3d-b9a4-fb1205e34903";
+        let corpus_id = "5171d423-b261-4e3d-b9a4-fb1205e34903";
         let args = Cli::parse_from([
             "enscrive",
             "batch-sets",
             "list",
-            "--collection",
-            collection_id,
+            "--corpus",
+            corpus_id,
             "--limit",
             "10",
             "--offset",
@@ -6684,9 +6684,9 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         ]);
         match args.command {
             Commands::BatchSets {
-                sub: BatchSetsSubcommand::List(BatchSetsListArgs { collection, limit, offset }),
+                sub: BatchSetsSubcommand::List(BatchSetsListArgs { corpus, limit, offset }),
             } => {
-                assert_eq!(collection, collection_id);
+                assert_eq!(corpus, corpus_id);
                 assert_eq!(limit, Some(10));
                 assert_eq!(offset, Some(20));
             }
@@ -6778,7 +6778,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     #[test]
     fn classifier_maps_phase_pre_launch_to_unsupported() {
         let err = client::ApiError::NotYetAvailable { status: 503 };
-        let response = request_failure("collections list", err);
+        let response = request_failure("corpus list", err);
         assert!(!response.ok);
         assert_eq!(response.failure_class, Some(FailureClass::Unsupported));
         assert_eq!(response.exit_code, EXIT_UNSUPPORTED);
@@ -6791,7 +6791,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             status: 500,
             body: serde_json::json!({"error": "database connection lost"}),
         };
-        let response = request_failure("collections list", err);
+        let response = request_failure("corpus list", err);
         assert_eq!(response.failure_class, Some(FailureClass::Bug));
         assert_eq!(response.exit_code, EXIT_FAILURE);
     }
@@ -6937,14 +6937,14 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         "deploy verify",
         "deploy apply",
         "deploy bootstrap",
-        // J-004c: collection detail / history / revert — contract row pending.
-        "collections get",
-        "collections revert",
-        "collections commits",
+        // J-004c: corpus detail / history / revert — contract row pending.
+        "corpus get",
+        "corpus revert",
+        "corpus commits",
         // J-020: vector-space metrics — contract row pending.
-        "collections metrics",
+        "corpus metrics",
         // ENS-104: materialize from dataset — contract row pending.
-        "collections materialize-from-dataset",
+        "corpus materialize-from-dataset",
         // J-024: batch-set + job retry/abandon — contract rows pending.
         "jobs retry",
         "jobs abandon",
@@ -7054,33 +7054,33 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     // -------------------------------------------------------------------------
 
     #[test]
-    fn parse_collections_delete_without_confirm_defaults_false() {
-        let args = Cli::parse_from(["enscrive", "collections", "delete", "--id", "col-1"]);
+    fn parse_corpus_delete_without_confirm_defaults_false() {
+        let args = Cli::parse_from(["enscrive", "corpus", "delete", "--id", "col-1"]);
         match args.command {
-            Commands::Collections {
-                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs { id, confirm, confirm_token }),
+            Commands::Corpus {
+                sub: CorpusSubcommand::Delete(CorpusDeleteArgs { id, confirm, confirm_token }),
             } => {
                 assert_eq!(id, "col-1");
                 assert!(!confirm, "confirm must default to false");
                 assert_eq!(confirm_token, None);
             }
-            _ => panic!("expected collections delete"),
+            _ => panic!("expected corpus delete"),
         }
     }
 
     #[test]
-    fn parse_collections_delete_with_confirm() {
+    fn parse_corpus_delete_with_confirm() {
         let args =
-            Cli::parse_from(["enscrive", "collections", "delete", "--id", "col-1", "--confirm"]);
+            Cli::parse_from(["enscrive", "corpus", "delete", "--id", "col-1", "--confirm"]);
         match args.command {
-            Commands::Collections {
-                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs { id, confirm, confirm_token }),
+            Commands::Corpus {
+                sub: CorpusSubcommand::Delete(CorpusDeleteArgs { id, confirm, confirm_token }),
             } => {
                 assert_eq!(id, "col-1");
                 assert!(confirm, "--confirm must flip confirm to true");
                 assert_eq!(confirm_token, None);
             }
-            _ => panic!("expected collections delete"),
+            _ => panic!("expected corpus delete"),
         }
     }
 
@@ -7254,10 +7254,10 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     }
 
     #[test]
-    fn parse_collections_delete_with_confirm_token() {
+    fn parse_corpus_delete_with_confirm_token() {
         let args = Cli::parse_from([
             "enscrive",
-            "collections",
+            "corpus",
             "delete",
             "--id",
             "col123",
@@ -7265,8 +7265,8 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             "ecf_test_xyz",
         ]);
         match args.command {
-            Commands::Collections {
-                sub: CollectionsSubcommand::Delete(CollectionsDeleteArgs {
+            Commands::Corpus {
+                sub: CorpusSubcommand::Delete(CorpusDeleteArgs {
                     id,
                     confirm,
                     confirm_token,
@@ -7276,7 +7276,7 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 assert!(!confirm);
                 assert_eq!(confirm_token, Some("ecf_test_xyz".to_string()));
             }
-            _ => panic!("expected collections delete with confirm_token"),
+            _ => panic!("expected corpus delete with confirm_token"),
         }
     }
 
