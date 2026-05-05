@@ -13,7 +13,7 @@ One binary. Same commands either way.
 - **Search + embed**: semantic search over your documents with hybrid ranking and adaptive resolution. Choose from OpenAI, Voyage, Nebius, or local BGE embedding models.
 - **Structured ingestion**: chunk, segment, and index long-form content with SHA256 deduplication and change detection.
 - **Voice authoring**: define and compare chunking strategies (Baseline / Story Beats / Tone Segments). Optimize voices with eval campaigns against your own datasets or HuggingFace corpora *(Professional plan)*.
-- **Operational primitives**: collections CRUD, staging/commit, background jobs, usage metering.
+- **Operational primitives**: corpora CRUD, staging/commit, background jobs, usage metering.
 - **Data portability**: backup, restore, and full tenant export *(Professional plan)*.
 
 ---
@@ -73,7 +73,7 @@ enscrive init --mode managed \
   --set-default
 
 enscrive health
-enscrive collections list
+enscrive corpus list
 ```
 
 API keys will be available at [enscrive.io/pricing](https://enscrive.io/pricing) once the managed plane is live.
@@ -122,13 +122,13 @@ Bring-your-own-key for embeddings works on every plan.
 ## Commands
 
 ```
-enscrive search          Search a collection
+enscrive search          Search a corpus
 enscrive embeddings      Embedding primitives
-enscrive ingest          Add documents to a collection
+enscrive ingest          Add documents to a corpus
 enscrive segment         Chunk a document
 enscrive analyze         Inspect content
 enscrive models          List available models
-enscrive collections     Manage collections
+enscrive corpus          Manage corpora
 enscrive voices          Author and compare voices
 enscrive evals           Run eval campaigns                    [Pro]
 enscrive datasets        Manage datasets                       [Pro]
@@ -153,7 +153,7 @@ Set once and forget:
 
 ```bash
 # Global override on any invocation
-enscrive --profile my-tenant collections list
+enscrive --profile my-tenant corpus list
 
 # Switch default
 enscrive init --profile local --set-default --mode self-managed ...
@@ -180,7 +180,7 @@ When you run a Pro-gated command on a free profile, the CLI tells you so clearly
 ## Capability tiers
 
 **Free self-hosted** commands:
-- `enscrive search`, `enscrive collections list`, `enscrive ingest`
+- `enscrive search`, `enscrive corpus list`, `enscrive ingest`
 
 **Professional** commands add:
 - `enscrive evals run`, `enscrive voices promote`, `enscrive backup`
