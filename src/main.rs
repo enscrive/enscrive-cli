@@ -759,6 +759,20 @@ struct CorpusPopulateFromDatasetArgs {
     /// model binds the embedding space.
     #[arg(long = "voice-id")]
     voice_id: String,
+
+    /// ENS-394 Phase 1: return immediately with the launched job_id
+    /// instead of polling to terminal status. The job continues
+    /// server-side; use `enscrive jobs get --id <job_id>` to check
+    /// progress.
+    #[arg(long = "async", default_value_t = false)]
+    r#async: bool,
+
+    /// Poll timeout for the wait path. Ignored when `--async` is set.
+    /// Default 1800 seconds (30 minutes); large populates (50K+ docs)
+    /// via batch APIs may take longer and should set this explicitly
+    /// or use `--async` and poll manually.
+    #[arg(long = "timeout-secs", default_value_t = 1800)]
+    timeout_secs: u64,
 }
 
 /// J-020: Arguments for `enscrive corpus metrics`.
@@ -1522,9 +1536,40 @@ enum JobsSubcommand {
 
 #[derive(Args)]
 struct JobsListArgs {
-    /// Filter by job status
+    /// Filter by job status (pending | in_progress | complete | failed | cancelled).
     #[arg(long)]
     status: Option<String>,
+    /// ENS-394 §A7: filter by job_kind (corpus_ingest, embedding_batch_*,
+    /// search, corpus_delete, eval_run, legacy).
+    #[arg(long)]
+    kind: Option<String>,
+    /// ENS-394 §A7: filter by parent job UUID. Pass the literal string
+    /// `null` to list only top-level (no parent) jobs.
+    #[arg(long = "parent-id")]
+    parent_id: Option<String>,
+    /// ENS-394 §A7: RFC-3339 lower bound on created_at.
+    #[arg(long = "created-after")]
+    created_after: Option<String>,
+    /// ENS-394 §A7: RFC-3339 upper bound on created_at.
+    #[arg(long = "created-before")]
+    created_before: Option<String>,
+    /// ENS-394 §A7: filter by async classification. true → write-side
+    /// kinds (corpus_ingest, embedding_batch_*, corpus_delete,
+    /// eval_run); false → search.
+    #[arg(long = "async")]
+    r#async: Option<bool>,
+    /// Page size (1-200, default 50).
+    #[arg(long)]
+    limit: Option<u32>,
+    /// Opaque page cursor returned by the prior page.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Sort column: created_at (default) or completed_at.
+    #[arg(long)]
+    sort: Option<String>,
+    /// Order: asc or desc (default).
+    #[arg(long)]
+    order: Option<String>,
 }
 
 #[derive(Args)]
@@ -2407,6 +2452,159 @@ async fn run_evals_from_url(client: &client::EnscriveClient, args: &FromUrlArgs,
             Err(e) => {
                 // Transient poll failure: if we still have budget, keep trying
                 // rather than exiting. On deadline, surface the error.
+                if std::time::Instant::now() >= deadline {
+                    let mut resp = CliResponse::fail(
+                        command,
+                        format!("poll failed after timeout: {e}"),
+                        FailureClass::Bug,
+                        EXIT_FAILURE,
+                    );
+                    resp.data = Some(json!({
+                        "launch": launch,
+                        "last_job": last_job,
+                    }));
+                    resp.emit(fmt);
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(max_delay);
+            }
+        }
+    }
+}
+
+/// ENS-394 Phase 1 / ENS-393: launch + (optionally) poll the async
+/// `populate-from-dataset` job to terminal status. Default behavior
+/// blocks until the job completes or the timeout elapses; `--async`
+/// returns immediately with the launch response.
+async fn run_corpus_populate_from_dataset(
+    client: &client::EnscriveClient,
+    args: &CorpusPopulateFromDatasetArgs,
+    fmt: OutputFormat,
+) {
+    let command = "corpus populate-from-dataset";
+
+    let body = serde_json::json!({
+        "dataset_id": args.dataset_id,
+        "voice_id":   args.voice_id,
+    });
+    let path = format!(
+        "/v1/corpora/{}/populate-from-dataset",
+        args.corpus_id,
+    );
+
+    let launch = match client.post_json(&path, body).await {
+        Ok(v) => v,
+        Err(e) => request_failure(command, e).emit(fmt),
+    };
+
+    let job_id = match launch.get("job_id").and_then(Value::as_str) {
+        Some(id) => id.to_string(),
+        None => CliResponse::fail(
+            command,
+            format!("launch response missing job_id: {launch}"),
+            FailureClass::FalseClaim,
+            EXIT_FAILURE,
+        )
+        .emit(fmt),
+    };
+
+    if args.r#async {
+        // Return immediately with the launch response — the caller will
+        // poll `enscrive jobs get --id <job_id>` themselves.
+        CliResponse::success(command, launch).emit(fmt);
+    }
+
+    await_corpus_populate_job(client, command, &launch, &job_id, args.timeout_secs, fmt).await;
+}
+
+/// Poll `/v1/jobs/{job_id}` with exponential backoff (2 → 15 s) until
+/// terminal status or deadline, printing progress to stderr. Mirrors the
+/// behavior of `run_evals_from_url` but emits the bare job row on
+/// success (no specialized success-data shape) since the populate
+/// primitive's caller cares about the final corpus state, which they
+/// can fetch separately via `enscrive corpus get`.
+async fn await_corpus_populate_job(
+    client: &client::EnscriveClient,
+    command: &str,
+    launch: &Value,
+    job_id: &str,
+    timeout_secs: u64,
+    fmt: OutputFormat,
+) -> ! {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut delay = std::time::Duration::from_secs(2);
+    let max_delay = std::time::Duration::from_secs(15);
+    let job_path = format!("/v1/jobs/{}", job_id);
+    let mut last_job = Value::Null;
+    let mut poll_count: u64 = 0;
+
+    loop {
+        match client.get_json(&job_path).await {
+            Ok(job) => {
+                last_job = job.clone();
+                poll_count += 1;
+                let status = job
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                match status.as_str() {
+                    "completed" | "succeeded" | "complete" => {
+                        print_poll_progress(poll_count, &job);
+                        let data = serde_json::json!({
+                            "launch": launch,
+                            "job": job,
+                        });
+                        CliResponse::success(command, data).emit(fmt);
+                    }
+                    "failed" | "cancelled" => {
+                        print_poll_progress(poll_count, &job);
+                        let error_message = job
+                            .get("error_message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("job terminated without error_message")
+                            .to_string();
+                        let data = serde_json::json!({
+                            "launch": launch,
+                            "job": job,
+                            "terminal_status": status,
+                        });
+                        let mut resp = CliResponse::fail(
+                            command,
+                            format!("job {} {}: {}", job_id, status, error_message),
+                            FailureClass::Bug,
+                            EXIT_FAILURE,
+                        );
+                        resp.data = Some(data);
+                        resp.emit(fmt);
+                    }
+                    _ => {
+                        print_poll_progress(poll_count, &job);
+
+                        if std::time::Instant::now() >= deadline {
+                            let data = serde_json::json!({
+                                "launch": launch,
+                                "job": job,
+                                "terminal_status": status,
+                            });
+                            let mut resp = CliResponse::fail(
+                                command,
+                                format!(
+                                    "timed out after {}s polling job {} (last status: {})",
+                                    timeout_secs, job_id, status
+                                ),
+                                FailureClass::Bug,
+                                EXIT_FAILURE,
+                            );
+                            resp.data = Some(data);
+                            resp.emit(fmt);
+                        }
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(max_delay);
+                    }
+                }
+            }
+            Err(e) => {
                 if std::time::Instant::now() >= deadline {
                     let mut resp = CliResponse::fail(
                         command,
@@ -3840,32 +4038,17 @@ async fn main() {
                             .emit(fmt),
                     }
                 }
-                // ENS-133 (parent ENS-132): the canonical Step-4 primitive
+                // ENS-133 / ENS-394 Phase 1: the canonical Step-4 primitive
                 // of the 5-step Enscrive eval workflow. Populates an
                 // existing empty corpus with a dataset's corpus,
                 // chunked by the supplied voice. Returns 409 if the
                 // corpus already has documents.
+                //
+                // ENS-394 Phase 1: the server returns 202 + JobLaunchResponse;
+                // by default we poll /v1/jobs/{job_id} until terminal status.
+                // Use --async to return immediately with just the job_id.
                 CorpusSubcommand::PopulateFromDataset(args) => {
-                    let body = serde_json::json!({
-                        "dataset_id": args.dataset_id,
-                        "voice_id":   args.voice_id,
-                    });
-                    let path = format!(
-                        "/v1/corpora/{}/populate-from-dataset",
-                        args.corpus_id,
-                    );
-                    match client.post_json(&path, body).await {
-                        Ok(data) => CliResponse::success(
-                            "corpus populate-from-dataset",
-                            data,
-                        )
-                        .emit(fmt),
-                        Err(e) => request_failure(
-                            "corpus populate-from-dataset",
-                            e,
-                        )
-                        .emit(fmt),
-                    }
+                    run_corpus_populate_from_dataset(&client, args, fmt).await;
                 }
                 // J-020: vector-space metrics endpoint.
                 CorpusSubcommand::Metrics(args) => {
@@ -4687,9 +4870,36 @@ async fn main() {
             let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
                 JobsSubcommand::List(args) => {
-                    let mut query = vec![];
+                    let mut query: Vec<(&str, String)> = vec![];
                     if let Some(ref s) = args.status {
                         query.push(("status", s.clone()));
+                    }
+                    if let Some(ref k) = args.kind {
+                        query.push(("kind", k.clone()));
+                    }
+                    if let Some(ref p) = args.parent_id {
+                        query.push(("parent_id", p.clone()));
+                    }
+                    if let Some(ref t) = args.created_after {
+                        query.push(("created_after", t.clone()));
+                    }
+                    if let Some(ref t) = args.created_before {
+                        query.push(("created_before", t.clone()));
+                    }
+                    if let Some(a) = args.r#async {
+                        query.push(("async", a.to_string()));
+                    }
+                    if let Some(l) = args.limit {
+                        query.push(("limit", l.to_string()));
+                    }
+                    if let Some(ref c) = args.cursor {
+                        query.push(("cursor", c.clone()));
+                    }
+                    if let Some(ref s) = args.sort {
+                        query.push(("sort", s.clone()));
+                    }
+                    if let Some(ref o) = args.order {
+                        query.push(("order", o.clone()));
                     }
                     match client.get_json_with_query("/v1/jobs", &query).await {
                         Ok(data) => CliResponse::success("jobs list", data).emit(fmt),
