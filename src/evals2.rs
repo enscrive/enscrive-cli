@@ -79,6 +79,19 @@ pub struct DatasetsCreateArgs {
     pub selected_doc_ids: Option<String>,
     #[arg(long)]
     pub rationale: Option<String>,
+    /// ENS-397 Phase 1.5: for HuggingFace sources the server returns
+    /// `202 Accepted + JobLaunchResponse`; this flag returns the
+    /// launch response immediately instead of polling to terminal
+    /// status. Ignored for non-async source types (croissant) which
+    /// still return synchronously.
+    #[arg(long = "async", default_value_t = false)]
+    pub r#async: bool,
+    /// Poll timeout for the async-wait path (HuggingFace). Ignored
+    /// when `--async` is set or when the server returns synchronously.
+    /// Default 1800s (30 min); large archives (MSMARCO-class) may
+    /// take longer.
+    #[arg(long = "timeout-secs", default_value_t = 1800)]
+    pub timeout_secs: u64,
 }
 
 #[derive(Args, Clone)]
@@ -331,22 +344,23 @@ async fn handle_datasets_create(
     fmt: OutputFormat,
     args: DatasetsCreateArgs,
 ) -> i32 {
+    let command = "datasets create";
     let mut body = json!({
         "name": args.name,
         "source_type": args.source_type,
         "source_url": args.from_url,
     });
-    if let Some(d) = args.description {
-        body["description"] = Value::String(d);
+    if let Some(ref d) = args.description {
+        body["description"] = Value::String(d.clone());
     }
     if args.sample_strategy != "full" {
         let mut sample = json!({ "strategy": args.sample_strategy });
-        if let Some(p) = args.sample_params {
-            match serde_json::from_str::<Value>(&p) {
+        if let Some(ref p) = args.sample_params {
+            match serde_json::from_str::<Value>(p) {
                 Ok(v) => sample["params"] = v,
                 Err(e) => {
                     return CliResponse::fail(
-                        "datasets create",
+                        command,
                         format!("--sample-params is not valid JSON: {e}"),
                         FailureClass::Bug,
                         EXIT_CONFIG,
@@ -358,22 +372,160 @@ async fn handle_datasets_create(
         if let Some(seed) = args.sample_seed {
             sample["seed"] = json!(seed);
         }
-        if let Some(ids) = args.selected_query_ids {
+        if let Some(ref ids) = args.selected_query_ids {
             let list: Vec<String> = ids.split(',').map(|s| s.trim().to_string()).collect();
             sample["selected_query_ids"] = json!(list);
         }
-        if let Some(ids) = args.selected_doc_ids {
+        if let Some(ref ids) = args.selected_doc_ids {
             let list: Vec<String> = ids.split(',').map(|s| s.trim().to_string()).collect();
             sample["selected_doc_ids"] = json!(list);
         }
-        if let Some(r) = args.rationale {
-            sample["rationale"] = Value::String(r);
+        if let Some(ref r) = args.rationale {
+            sample["rationale"] = Value::String(r.clone());
         }
         body["sample"] = sample;
     }
-    match client.post_json("/v1/datasets", body).await {
-        Ok(data) => CliResponse::success("datasets create", data).emit(fmt),
-        Err(e) => request_failure("datasets create", e).emit(fmt),
+
+    let response = match client.post_json("/v1/datasets", body).await {
+        Ok(v) => v,
+        Err(e) => return request_failure(command, e).emit(fmt),
+    };
+
+    // ENS-397 Phase 1.5: HuggingFace source returns
+    // `202 Accepted + JobLaunchResponse { job_id, status, poll_url }`.
+    // Croissant retains the synchronous `201 Created + Dataset` shape.
+    // Branch on the response shape itself — `job_id` present means
+    // async path, regardless of declared source_type.
+    let job_id_opt = response
+        .get("job_id")
+        .and_then(Value::as_str)
+        .map(String::from);
+
+    if let Some(job_id) = job_id_opt {
+        if args.r#async {
+            // Return the launch response and let the caller poll
+            // `enscrive jobs get --id <job_id>` themselves.
+            return CliResponse::success(command, response).emit(fmt);
+        }
+        await_datasets_create_job(client, command, &response, &job_id, args.timeout_secs, fmt)
+            .await
+    } else {
+        // Synchronous response (e.g. Croissant) — emit immediately.
+        CliResponse::success(command, response).emit(fmt)
+    }
+}
+
+/// ENS-397: poll `/v1/jobs/{parent_id}` with exponential backoff
+/// (2 → 15 s) until terminal status, printing per-tick progress to
+/// stderr. On `complete`, surface the newly-created dataset's UUID at
+/// both `.data.id` (for harness/scripts using the populate-from-dataset
+/// extraction pattern) and `.data.dataset_id` (explicit) so the
+/// downstream caller doesn't have to know about the job-row indirection.
+async fn await_datasets_create_job(
+    client: &EnscriveClient,
+    command: &str,
+    launch: &Value,
+    job_id: &str,
+    timeout_secs: u64,
+    fmt: OutputFormat,
+) -> i32 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let mut delay = std::time::Duration::from_secs(2);
+    let max_delay = std::time::Duration::from_secs(15);
+    let job_path = format!("/v1/jobs/{}", job_id);
+    let mut last_job: Value = Value::Null;
+    let mut poll_count: u64 = 0;
+
+    loop {
+        match client.get_json(&job_path).await {
+            Ok(job) => {
+                last_job = job.clone();
+                poll_count += 1;
+                let status = job
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                eprintln!(
+                    "[poll {}] datasets create job {} — status={}",
+                    poll_count, job_id, status
+                );
+                match status.as_str() {
+                    "complete" | "completed" | "succeeded" => {
+                        let dataset_id = job
+                            .get("dataset_id")
+                            .and_then(Value::as_str)
+                            .map(String::from);
+                        let mut data = json!({
+                            "launch": launch,
+                            "job": job,
+                        });
+                        if let Some(ref id) = dataset_id {
+                            data["id"] = Value::String(id.clone());
+                            data["dataset_id"] = Value::String(id.clone());
+                        }
+                        return CliResponse::success(command, data).emit(fmt);
+                    }
+                    "failed" | "cancelled" => {
+                        let error_message = job
+                            .get("error_message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("job terminated without error_message")
+                            .to_string();
+                        let mut resp = CliResponse::fail(
+                            command,
+                            format!("job {} {}: {}", job_id, status, error_message),
+                            FailureClass::Bug,
+                            EXIT_FAILURE,
+                        );
+                        resp.data = Some(json!({
+                            "launch": launch,
+                            "job": job,
+                            "terminal_status": status,
+                        }));
+                        return resp.emit(fmt);
+                    }
+                    _ => {
+                        if std::time::Instant::now() >= deadline {
+                            let mut resp = CliResponse::fail(
+                                command,
+                                format!(
+                                    "timed out after {}s polling job {} (last status: {})",
+                                    timeout_secs, job_id, status
+                                ),
+                                FailureClass::Bug,
+                                EXIT_FAILURE,
+                            );
+                            resp.data = Some(json!({
+                                "launch": launch,
+                                "job": job,
+                                "terminal_status": status,
+                            }));
+                            return resp.emit(fmt);
+                        }
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(max_delay);
+                    }
+                }
+            }
+            Err(e) => {
+                if std::time::Instant::now() >= deadline {
+                    let mut resp = CliResponse::fail(
+                        command,
+                        format!("poll failed after timeout: {e}"),
+                        FailureClass::Bug,
+                        EXIT_FAILURE,
+                    );
+                    resp.data = Some(json!({
+                        "launch": launch,
+                        "last_job": last_job,
+                    }));
+                    return resp.emit(fmt);
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(max_delay);
+            }
+        }
     }
 }
 
