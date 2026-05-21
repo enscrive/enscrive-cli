@@ -2379,98 +2379,16 @@ async fn run_evals_from_url(client: &client::EnscriveClient, args: &FromUrlArgs,
         .emit(fmt),
     };
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(args.timeout_secs);
-    let mut delay = std::time::Duration::from_secs(2);
-    let max_delay = std::time::Duration::from_secs(15);
-    let job_path = format!("/v1/jobs/{}", job_id);
-    let mut last_job = Value::Null;
-    let mut poll_count: u64 = 0;
-
-    loop {
-        match client.get_json(&job_path).await {
-            Ok(job) => {
-                last_job = job.clone();
-                poll_count += 1;
-                let status = job
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                match status.as_str() {
-                    "completed" | "succeeded" | "complete" => {
-                        // Print final sub-batch summary if available
-                        print_poll_progress(poll_count, &job);
-                        let data = build_from_url_success_data(&launch, &job);
-                        CliResponse::success(command, data).emit(fmt);
-                    }
-                    "failed" | "cancelled" => {
-                        print_poll_progress(poll_count, &job);
-                        let error_message = job
-                            .get("error_message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("job terminated without error_message")
-                            .to_string();
-                        let mut data = build_from_url_success_data(&launch, &job);
-                        data["terminal_status"] = Value::String(status.clone());
-                        let err = format!("job {} {}: {}", job_id, status, error_message);
-                        let mut resp = CliResponse::fail(
-                            command,
-                            err,
-                            FailureClass::Bug,
-                            EXIT_FAILURE,
-                        );
-                        resp.data = Some(data);
-                        resp.emit(fmt);
-                    }
-                    _ => {
-                        // Print poll progress with sub-batch breakdown
-                        print_poll_progress(poll_count, &job);
-
-                        if std::time::Instant::now() >= deadline {
-                            let mut data = build_from_url_success_data(&launch, &job);
-                            data["terminal_status"] = Value::String(status.clone());
-                            // Timeout is a runtime condition (the server-side job
-                            // may still be running). FailureClass::Bug is the
-                            // generic transient-failure signal; scripts should
-                            // not auto-retry because the job is still in flight.
-                            let mut resp = CliResponse::fail(
-                                command,
-                                format!(
-                                    "timed out after {}s polling job {} (last status: {})",
-                                    args.timeout_secs, job_id, status
-                                ),
-                                FailureClass::Bug,
-                                EXIT_FAILURE,
-                            );
-                            resp.data = Some(data);
-                            resp.emit(fmt);
-                        }
-                        tokio::time::sleep(delay).await;
-                        delay = (delay * 2).min(max_delay);
-                    }
-                }
-            }
-            Err(e) => {
-                // Transient poll failure: if we still have budget, keep trying
-                // rather than exiting. On deadline, surface the error.
-                if std::time::Instant::now() >= deadline {
-                    let mut resp = CliResponse::fail(
-                        command,
-                        format!("poll failed after timeout: {e}"),
-                        FailureClass::Bug,
-                        EXIT_FAILURE,
-                    );
-                    resp.data = Some(json!({
-                        "launch": launch,
-                        "last_job": last_job,
-                    }));
-                    resp.emit(fmt);
-                }
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(max_delay);
-            }
-        }
-    }
+    jobs_polling::await_and_emit(
+        client,
+        command,
+        launch,
+        &job_id,
+        args.timeout_secs,
+        fmt,
+        build_from_url_success_data,
+    )
+    .await
 }
 
 /// ENS-394 Phase 1 / ENS-393: launch + (optionally) poll the async
@@ -2515,174 +2433,15 @@ async fn run_corpus_populate_from_dataset(
         CliResponse::success(command, launch).emit(fmt);
     }
 
-    await_corpus_populate_job(client, command, &launch, &job_id, args.timeout_secs, fmt).await;
-}
-
-/// Poll `/v1/jobs/{job_id}` with exponential backoff (2 → 15 s) until
-/// terminal status or deadline, printing progress to stderr. Mirrors the
-/// behavior of `run_evals_from_url` but emits the bare job row on
-/// success (no specialized success-data shape) since the populate
-/// primitive's caller cares about the final corpus state, which they
-/// can fetch separately via `enscrive corpus get`.
-async fn await_corpus_populate_job(
-    client: &client::EnscriveClient,
-    command: &str,
-    launch: &Value,
-    job_id: &str,
-    timeout_secs: u64,
-    fmt: OutputFormat,
-) -> ! {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    let mut delay = std::time::Duration::from_secs(2);
-    let max_delay = std::time::Duration::from_secs(15);
-    let job_path = format!("/v1/jobs/{}", job_id);
-    let mut last_job = Value::Null;
-    let mut poll_count: u64 = 0;
-
-    loop {
-        match client.get_json(&job_path).await {
-            Ok(job) => {
-                last_job = job.clone();
-                poll_count += 1;
-                let status = job
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                match status.as_str() {
-                    "completed" | "succeeded" | "complete" => {
-                        print_poll_progress(poll_count, &job);
-                        let data = serde_json::json!({
-                            "launch": launch,
-                            "job": job,
-                        });
-                        CliResponse::success(command, data).emit(fmt);
-                    }
-                    "failed" | "cancelled" => {
-                        print_poll_progress(poll_count, &job);
-                        let error_message = job
-                            .get("error_message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("job terminated without error_message")
-                            .to_string();
-                        let data = serde_json::json!({
-                            "launch": launch,
-                            "job": job,
-                            "terminal_status": status,
-                        });
-                        let mut resp = CliResponse::fail(
-                            command,
-                            format!("job {} {}: {}", job_id, status, error_message),
-                            FailureClass::Bug,
-                            EXIT_FAILURE,
-                        );
-                        resp.data = Some(data);
-                        resp.emit(fmt);
-                    }
-                    _ => {
-                        print_poll_progress(poll_count, &job);
-
-                        if std::time::Instant::now() >= deadline {
-                            let data = serde_json::json!({
-                                "launch": launch,
-                                "job": job,
-                                "terminal_status": status,
-                            });
-                            let mut resp = CliResponse::fail(
-                                command,
-                                format!(
-                                    "timed out after {}s polling job {} (last status: {})",
-                                    timeout_secs, job_id, status
-                                ),
-                                FailureClass::Bug,
-                                EXIT_FAILURE,
-                            );
-                            resp.data = Some(data);
-                            resp.emit(fmt);
-                        }
-                        tokio::time::sleep(delay).await;
-                        delay = (delay * 2).min(max_delay);
-                    }
-                }
-            }
-            Err(e) => {
-                if std::time::Instant::now() >= deadline {
-                    let mut resp = CliResponse::fail(
-                        command,
-                        format!("poll failed after timeout: {e}"),
-                        FailureClass::Bug,
-                        EXIT_FAILURE,
-                    );
-                    resp.data = Some(json!({
-                        "launch": launch,
-                        "last_job": last_job,
-                    }));
-                    resp.emit(fmt);
-                }
-                tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(max_delay);
-            }
-        }
-    }
-}
-
-/// Print a poll-tick progress line to stderr with optional sub-batch breakdown.
-fn print_poll_progress(poll_count: u64, job: &Value) {
-    let status = job.get("status").and_then(Value::as_str).unwrap_or("unknown");
-    let pct = job.get("progress_percent").and_then(Value::as_f64).unwrap_or(0.0);
-    let ingested = job.get("documents_ingested").and_then(Value::as_i64).unwrap_or(0);
-    let total = job.get("total_documents").and_then(Value::as_i64).unwrap_or(0);
-
-    eprintln!(
-        "[poll {}] Job {} \u{2014} {:.1}% ({}/{})",
-        poll_count, status, pct, format_num(ingested), format_num(total)
-    );
-
-    // Render per-sub-batch breakdown if present
-    if let Some(subs) = job.get("sub_batches").and_then(Value::as_array) {
-        let total_subs = subs.len();
-        for sb in subs {
-            let idx = sb.get("index").and_then(Value::as_u64).unwrap_or(0);
-            let size = sb.get("size").and_then(Value::as_u64).unwrap_or(0);
-            let sb_status = sb.get("status").and_then(Value::as_str).unwrap_or("unknown");
-            let completed = sb.get("completed").and_then(Value::as_u64).unwrap_or(0);
-            let icon = match sb_status {
-                "completed" => "\u{2713}",
-                "in_progress" | "storing" => "\u{25CF}",
-                "failed" => "\u{2717}",
-                _ => "\u{25CB}",
-            };
-            if sb_status == "pending" {
-                eprintln!("  {} batch {}/{}  pending", icon, idx, total_subs);
-            } else {
-                eprintln!(
-                    "  {} batch {}/{}  {}/{}",
-                    icon, idx, total_subs,
-                    format_num(completed as i64), format_num(size as i64)
-                );
-            }
-        }
-    }
-}
-
-/// Format a number with thousands separators for CLI display.
-fn format_num(n: i64) -> String {
-    if n < 0 {
-        return format!("-{}", format_num(-n));
-    }
-    let s = n.to_string();
-    let len = s.len();
-    if len <= 3 {
-        return s;
-    }
-    let mut result = String::with_capacity(len + len / 3);
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result
+    jobs_polling::await_and_emit_launch_job(
+        client,
+        command,
+        launch,
+        &job_id,
+        args.timeout_secs,
+        fmt,
+    )
+    .await
 }
 
 fn build_from_url_success_data(launch: &Value, job: &Value) -> Value {
