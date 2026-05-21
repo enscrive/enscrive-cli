@@ -131,6 +131,15 @@ pub struct DatasetsUploadArgs {
     /// For `explicit`: free-form rationale (stored for audit).
     #[arg(long)]
     pub rationale: Option<String>,
+    /// ENS-475 Wave A: return immediately with the launched job
+    /// instead of polling to terminal status. Ignored when the server
+    /// returns synchronously (small uploads inline the response).
+    #[arg(long = "async", default_value_t = false)]
+    pub r#async: bool,
+    /// Poll timeout for the wait path. Ignored when `--async` is set
+    /// or when the server returns synchronously. Default 1800s.
+    #[arg(long = "timeout-secs", default_value_t = 1800)]
+    pub timeout_secs: u64,
 }
 
 #[derive(Subcommand, Clone)]
@@ -559,7 +568,7 @@ async fn handle_datasets_upload(
         meta["sample"] = sample;
     }
 
-    match client
+    let launch = match client
         .post_dataset_upload(
             "/v1/datasets/upload",
             meta,
@@ -569,9 +578,19 @@ async fn handle_datasets_upload(
         )
         .await
     {
-        Ok(data) => CliResponse::success("datasets upload", data).emit(fmt),
-        Err(e) => request_failure("datasets upload", e).emit(fmt),
-    }
+        Ok(data) => data,
+        Err(e) => return request_failure("datasets upload", e).emit(fmt),
+    };
+
+    jobs_polling::maybe_await_async_launch(
+        client,
+        "datasets upload",
+        launch,
+        args.r#async,
+        args.timeout_secs,
+        fmt,
+    )
+    .await
 }
 
 // ──────────────────────────────────────────────────────────────────────────

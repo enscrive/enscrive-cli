@@ -315,6 +315,38 @@ pub async fn await_and_emit_launch_job<P: JobPoller>(
     .await
 }
 
+/// Branch on the launch response shape:
+///
+///   * If `launch.job_id` is absent, the server responded synchronously
+///     (e.g. `--sync`, `--dry-run`, or an endpoint that hasn't been
+///     converted to 202+`JobLaunchResponse` for this particular input).
+///     Emit `launch` as the response body and exit.
+///   * If `launch.job_id` is present and `r#async` is true, emit
+///     `launch` (the caller is opting into the async fire-and-forget
+///     contract).
+///   * Otherwise (`launch.job_id` present, `r#async` false), poll the
+///     job to terminal via [`await_and_emit_launch_job`].
+///
+/// This is the canonical dispatch for every Class-A/C async CLI
+/// command sitting on top of an endpoint that *may* return either
+/// shape depending on input flags.
+pub async fn maybe_await_async_launch<P: JobPoller>(
+    poller: &P,
+    command: &'static str,
+    launch: Value,
+    r#async: bool,
+    timeout_secs: u64,
+    fmt: OutputFormat,
+) -> ! {
+    let job_id = launch.get("job_id").and_then(Value::as_str).map(String::from);
+    match job_id {
+        Some(job_id) if !r#async => {
+            await_and_emit_launch_job(poller, command, launch, &job_id, timeout_secs, fmt).await
+        }
+        _ => CliResponse::success(command, launch).emit(fmt),
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Progress rendering
 // ──────────────────────────────────────────────────────────────────────────

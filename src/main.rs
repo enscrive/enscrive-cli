@@ -487,6 +487,17 @@ struct IngestPreparedArgs {
     /// Path to a JSON file containing an array of PreparedSegment objects
     #[arg(long, conflicts_with = "segments_json")]
     segments_file: Option<String>,
+
+    /// ENS-475 Wave A: return immediately with the launched job
+    /// instead of polling to terminal status. Ignored when the server
+    /// returns synchronously (no `job_id` in the response).
+    #[arg(long = "async", default_value_t = false)]
+    r#async: bool,
+
+    /// Poll timeout for the wait path. Ignored when `--async` is set
+    /// or when the server returns synchronously. Default 1800s.
+    #[arg(long = "timeout-secs", default_value_t = 1800)]
+    timeout_secs: u64,
 }
 
 #[derive(Args)]
@@ -528,6 +539,19 @@ struct IngestDocumentsArgs {
     /// Preview without actually ingesting
     #[arg(long = "dry-run")]
     dry_run: bool,
+
+    /// ENS-475 Wave A: return immediately with the launched job
+    /// instead of polling to terminal status. Mutually exclusive with
+    /// `--sync` (the latter requests a synchronous server-side path).
+    /// Ignored when the server returns synchronously regardless
+    /// (`--sync`, `--dry-run`, or batched path off).
+    #[arg(long = "async", default_value_t = false, conflicts_with = "sync")]
+    r#async: bool,
+
+    /// Poll timeout for the wait path. Ignored when `--async` is set
+    /// or when the server returns synchronously. Default 1800s.
+    #[arg(long = "timeout-secs", default_value_t = 1800)]
+    timeout_secs: u64,
 }
 
 #[derive(Args)]
@@ -1147,9 +1171,18 @@ struct FromUrlArgs {
     #[arg(long = "voice-id")]
     voice_id: Option<String>,
 
-    /// Poll timeout in seconds (default 300)
-    #[arg(long = "timeout", default_value_t = 300u64)]
+    /// Poll timeout in seconds (default 300). `--timeout` retained as
+    /// alias for backwards compatibility; new scripts should use
+    /// `--timeout-secs` to match the rest of the CLI.
+    #[arg(long = "timeout-secs", alias = "timeout", default_value_t = 300u64)]
     timeout_secs: u64,
+
+    /// ENS-475 Wave A: return immediately with the launched job
+    /// instead of polling to terminal status. The job continues
+    /// server-side; use `enscrive jobs get --id <job_id>` to check
+    /// progress.
+    #[arg(long = "async", default_value_t = false)]
+    r#async: bool,
 }
 
 #[derive(Subcommand)]
@@ -2379,6 +2412,12 @@ async fn run_evals_from_url(client: &client::EnscriveClient, args: &FromUrlArgs,
         .emit(fmt),
     };
 
+    if args.r#async {
+        // Short-circuit: emit the launch response, caller polls
+        // `enscrive jobs get --id <job_id>` themselves.
+        CliResponse::success(command, launch).emit(fmt);
+    }
+
     jobs_polling::await_and_emit(
         client,
         command,
@@ -3438,10 +3477,19 @@ async fn main() {
                             "segments": segments,
                             "voice_id": args.voice_id,
                         });
-                        match client.post_json("/v1/ingest-prepared", body).await {
-                            Ok(data) => CliResponse::success("ingest prepared", data).emit(fmt),
+                        let launch = match client.post_json("/v1/ingest-prepared", body).await {
+                            Ok(v) => v,
                             Err(e) => request_failure("ingest prepared", e).emit(fmt),
-                        }
+                        };
+                        jobs_polling::maybe_await_async_launch(
+                            &client,
+                            "ingest prepared",
+                            launch,
+                            args.r#async,
+                            args.timeout_secs,
+                            fmt,
+                        )
+                        .await
                     }
                     Err(e) => {
                         CliResponse::fail("ingest prepared", e, FailureClass::Bug, EXIT_CONFIG)
@@ -3493,10 +3541,19 @@ async fn main() {
                         "sync": if args.sync { Some(true) } else { None::<bool> },
                         "no_batch": if args.no_batch { Some(true) } else { None::<bool> },
                     });
-                    match client.post_json("/v1/ingest", body).await {
-                        Ok(data) => CliResponse::success("ingest documents", data).emit(fmt),
+                    let launch = match client.post_json("/v1/ingest", body).await {
+                        Ok(v) => v,
                         Err(e) => request_failure("ingest documents", e).emit(fmt),
-                    }
+                    };
+                    jobs_polling::maybe_await_async_launch(
+                        &client,
+                        "ingest documents",
+                        launch,
+                        args.r#async,
+                        args.timeout_secs,
+                        fmt,
+                    )
+                    .await
                 }
             }
         }
@@ -5490,6 +5547,8 @@ mod tests {
             corpus_id: "col-1".to_string(),
             document_id: "doc-1".to_string(),
             voice_id: None,
+            r#async: false,
+            timeout_secs: 1800,
             segments_json: Some("{\"content\":\"nope\"}".to_string()),
             segments_file: None,
         };
@@ -5721,6 +5780,8 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             corpus_id: "col-1".to_string(),
             document_id: "doc-1".to_string(),
             voice_id: None,
+            r#async: false,
+            timeout_secs: 1800,
             segments_json: Some(
                 r#"{
                     "ok": true,
@@ -5754,6 +5815,8 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             corpus_id: "col-1".to_string(),
             document_id: "doc-1".to_string(),
             voice_id: None,
+            r#async: false,
+            timeout_secs: 1800,
             segments_json: Some(
                 r#"[{
                     "index": 0,
