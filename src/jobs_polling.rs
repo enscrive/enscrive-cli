@@ -190,9 +190,19 @@ pub async fn await_job_terminal<P: JobPoller>(
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Take a [`PollOutcome`] and emit the canonical CLI response, exiting
-/// the process via [`CliResponse::emit`]. `build_success_data` shapes the
-/// success-branch payload; failure / timeout / poll-failure branches use
-/// fixed shapes that mirror the pre-extraction behavior.
+/// the process via [`CliResponse::emit`].
+///
+/// `build_success_data` is applied to ALL three terminal/timeout
+/// branches that have a job blob to work with — Succeeded, Failed, and
+/// TimedOut — so callers that lift custom fields onto `.data` (e.g.
+/// `evals from-url`'s `build_from_url_success_data` which surfaces
+/// `dataset_id` / `corpus_count` / etc.) keep that shape symmetric
+/// between success and failure. Failure + timeout branches overlay an
+/// extra `.terminal_status` field on top of the builder's output.
+///
+/// `PollFailed` is a special case: there is no job blob, so the
+/// builder is not invoked and a fixed `{launch, last_job}` shape is
+/// emitted.
 pub fn emit_outcome<F>(
     command: &'static str,
     launch: &Value,
@@ -225,11 +235,8 @@ where
                 .and_then(Value::as_str)
                 .unwrap_or("job terminated without error_message")
                 .to_string();
-            let data = json!({
-                "launch": launch,
-                "job": job,
-                "terminal_status": raw_status,
-            });
+            let mut data = build_success_data(launch, &job);
+            overlay_terminal_status(&mut data, &raw_status);
             let mut resp = CliResponse::fail(
                 command,
                 format!("job {} {}: {}", job_id, raw_status, error_message),
@@ -244,11 +251,8 @@ where
             last_job,
             ..
         } => {
-            let data = json!({
-                "launch": launch,
-                "job": last_job,
-                "terminal_status": last_status,
-            });
+            let mut data = build_success_data(launch, &last_job);
+            overlay_terminal_status(&mut data, &last_status);
             let mut resp = CliResponse::fail(
                 command,
                 format!(
@@ -276,6 +280,24 @@ where
             }));
             resp.emit(fmt);
         }
+    }
+}
+
+/// Set `data["terminal_status"] = status`. If `data` is not a JSON
+/// object (a builder is free to return any Value), wrap it as
+/// `{"data": <original>, "terminal_status": status}` so the field is
+/// always reachable at the top level.
+fn overlay_terminal_status(data: &mut Value, status: &str) {
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert(
+            "terminal_status".to_string(),
+            Value::String(status.to_string()),
+        );
+    } else {
+        *data = json!({
+            "data": data.clone(),
+            "terminal_status": status,
+        });
     }
 }
 
@@ -615,10 +637,33 @@ mod tests {
                 ..
             } => {
                 assert_eq!(last_status, "running");
-                assert!(poll_count >= 1, "should have polled at least once");
+                // 5ms deadline with 1ms initial+max delay should produce
+                // 3+ polls (the first three are scripted; ScriptedPoller
+                // then repeats the last entry until deadline).
+                assert!(
+                    poll_count >= 3,
+                    "should have consumed all three scripted polls; got {poll_count}",
+                );
             }
             other => panic!("expected TimedOut, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn overlay_terminal_status_on_object() {
+        let mut data = json!({ "dataset_id": "abc", "job_id": "xyz" });
+        overlay_terminal_status(&mut data, "failed");
+        assert_eq!(data["dataset_id"], "abc");
+        assert_eq!(data["job_id"], "xyz");
+        assert_eq!(data["terminal_status"], "failed");
+    }
+
+    #[test]
+    fn overlay_terminal_status_wraps_non_object() {
+        let mut data = json!([1, 2, 3]);
+        overlay_terminal_status(&mut data, "cancelled");
+        assert_eq!(data["data"], json!([1, 2, 3]));
+        assert_eq!(data["terminal_status"], "cancelled");
     }
 
     #[tokio::test]
