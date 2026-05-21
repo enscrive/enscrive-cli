@@ -1,6 +1,7 @@
 mod client;
 mod evals2;
 mod fetch_verify;
+mod jobs_polling;
 mod license;
 mod local;
 mod output;
