@@ -1,0 +1,31 @@
+# CODEOWNERS — Cloud-Native Dev Topology PRD §6.7
+#
+# Founder review (@chrisroge) is REQUIRED, in addition to automated/agent
+# review, for the high-risk paths below. GitHub applies the LAST matching
+# pattern.
+#
+# Enforcement note: to make this a hard gate, the repo's branch protection
+# must also enable "Require review from Code Owners".
+
+# v1 surface contract — the canonical mapping of /v1 endpoints to CLI commands.
+# Drift here breaks the customer contract.
+/v1-surface-contract.toml @chrisroge
+
+# Installer + install pipeline — supply-chain critical (cosign verify, S3 fetch).
+/installer/** @chrisroge
+
+# Release channel resolution — picks which artifact a customer install pulls.
+/src/release_channel.rs @chrisroge
+
+# License gating — entitlement enforcement.
+/src/license.rs @chrisroge
+
+# Pre-flight checks — guardrails before commands hit the platform.
+/src/preflight.rs @chrisroge
+
+# Dependency manifests — version bumps carry dependency-rot risk.
+/Cargo.toml @chrisroge
+/Cargo.lock @chrisroge
+
+# Release / CI workflows — supply chain.
+/.github/workflows/** @chrisroge
