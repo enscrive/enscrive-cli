@@ -46,6 +46,20 @@ jobs:
         with:
           ref: ${{ inputs.version }}
 
+      # ---------------------------------------------------------------------------
+      # ENS-507: enscrive-deploy is the source of truth for channel topology
+      # (PRD §0.3 / §5.8). Roster.toml + channels/<channel>.toml replace the
+      # four bash associative arrays (SOURCE_VERSIONS, BINARIES, ARTIFACT_KIND,
+      # PLATFORMS) that were duplicated across the three downstream steps.
+      # Pinned at main for now — promotion-ceremony PRs are the gating mechanism.
+      # ---------------------------------------------------------------------------
+      - name: Checkout enscrive-deploy (channel source of truth)
+        uses: actions/checkout@v4
+        with:
+          repository: enscrive/enscrive-deploy
+          ref: main
+          path: _deploy
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -88,6 +102,214 @@ jobs:
           echo "docs_version=${DOCS_VERSION}" >> "${GITHUB_OUTPUT}"
 
       # ---------------------------------------------------------------------------
+      # ENS-507: derive the four bash associative arrays from
+      # _deploy/channels/roster.toml + _deploy/channels/${CHANNEL}.toml.
+      #
+      # Pattern A components ride the channel's `platform_version`.
+      # Pattern B components use their `[overrides]` entry; the operator's
+      # workflow-input override (already resolved in `resolve_docs`) wins over
+      # the channel toml when present, preserving the prior precedence:
+      #   operator input > channel-toml [overrides] > latest-tag fallback.
+      # (For enscrive-docs specifically the latest-tag fallback is applied by
+      # the resolve_docs step above, so by the time we reach here we already
+      # have the final value to use when the channel toml is silent.)
+      #
+      # Output: /tmp/manifest-work/channel-config.sh — sourced by the three
+      # downstream steps in place of their previously inline declarations.
+      # ---------------------------------------------------------------------------
+      - name: Build channel-config.sh from roster + channel toml
+        id: build_channel_config
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          ENSCRIVE_DOCS_VERSION: ${{ steps.resolve_docs.outputs.docs_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/manifest-work
+
+          # Write the generator to a file so it can be diffed in the runner log
+          # and tested locally with `python3 _deploy/<...>` outside the workflow.
+          # YAML's "run: |" block scalar dedents to the common indent prefix
+          # before bash sees it, so the heredoc contents below arrive at
+          # column 0 — no extra dedent needed.
+          GEN=/tmp/manifest-work/gen_channel_config.py
+          cat > "${GEN}" <<'PYEOF'
+          import os
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          channel = os.environ["CHANNEL"]
+          docs_version_override = os.environ.get("ENSCRIVE_DOCS_VERSION", "").strip()
+
+          deploy_dir = Path("_deploy/channels")
+          roster_path = deploy_dir / "roster.toml"
+          channel_path = deploy_dir / f"{channel}.toml"
+
+          for p in (roster_path, channel_path):
+              if not p.exists():
+                  sys.stderr.write(f"ERROR: missing required file {p}\n")
+                  sys.exit(1)
+
+          with roster_path.open("rb") as f:
+              roster = tomllib.load(f)
+          with channel_path.open("rb") as f:
+              channel_pins = tomllib.load(f)
+
+          channel_platform_version = channel_pins.get("platform_version", "")
+          overrides = channel_pins.get("overrides", {})
+
+          components = roster.get("components", {})
+          if not components:
+              sys.stderr.write("ERROR: roster.toml has no [components.*] tables\n")
+              sys.exit(1)
+
+          # Per-component source-version resolution.
+          # Pattern A: channel's platform_version (the "herd" tag for the channel).
+          # Pattern B: operator workflow input wins; else channel toml [overrides];
+          #            else error (we have no fallback at this layer — resolve_docs
+          #            handles the latest-tag fallback before we run).
+          source_versions = {}
+          for key, comp in components.items():
+              pattern = comp.get("pattern")
+              if pattern == "A":
+                  source_versions[key] = channel_platform_version
+              elif pattern == "B":
+                  # enscrive-docs special case: operator override + latest-tag
+                  # fallback are resolved in the `resolve_docs` step above.
+                  # That value supersedes the channel toml [overrides] entry,
+                  # matching the prior workflow precedence.
+                  if key == "enscrive-docs" and docs_version_override:
+                      source_versions[key] = docs_version_override
+                  elif key in overrides:
+                      source_versions[key] = overrides[key]
+                  else:
+                      sys.stderr.write(
+                          f"ERROR: pattern-B component '{key}' has no override "
+                          f"in channels/{channel}.toml and no workflow-input value\n"
+                      )
+                      sys.exit(1)
+              else:
+                  sys.stderr.write(
+                      f"ERROR: component '{key}' has unknown pattern '{pattern}' "
+                      f"(must be 'A' or 'B')\n"
+                  )
+                  sys.exit(1)
+
+          # Emit channel-config.sh: four bash associative arrays whose contents
+          # are byte-equivalent (modulo iteration order, which the downstream
+          # consumers do not depend on) to the previously inline declarations.
+          out_path = Path("/tmp/manifest-work/channel-config.sh")
+          lines = [
+              "# Auto-generated by .github/workflows/manifest.yml — DO NOT EDIT.",
+              "# Source: enscrive-deploy/channels/roster.toml + channels/${CHANNEL}.toml.",
+              "# ENS-507: replaces the four bash associative arrays previously",
+              "# duplicated across three steps of this workflow.",
+              "",
+              "declare -A SOURCE_VERSIONS",
+              "declare -A BINARIES",
+              "declare -A ARTIFACT_KIND",
+              "declare -A PLATFORMS",
+              "",
+          ]
+          # Deterministic order matches roster.toml table order.
+          for key, comp in components.items():
+              binary = comp["binary"]
+              kind = comp["kind"]
+              platforms = " ".join(comp["platforms"])
+              src_ver = source_versions[key]
+              lines.append(f'SOURCE_VERSIONS["{key}"]="{src_ver}"')
+              lines.append(f'BINARIES["{key}"]="{binary}"')
+              lines.append(f'ARTIFACT_KIND["{key}"]="{kind}"')
+              lines.append(f'PLATFORMS["{key}"]="{platforms}"')
+              lines.append("")
+          out_path.write_text("\n".join(lines))
+          print(f"Wrote {out_path}:")
+          print(out_path.read_text())
+          PYEOF
+
+          python3 "${GEN}"
+
+      # ---------------------------------------------------------------------------
+      # ENS-507 verification: assert the generated channel-config.sh produces
+      # the expected bash-array values. Fails fast on drift so a roster/channel
+      # toml schema change can never silently corrupt a published manifest.
+      #
+      # Note: SOURCE_VERSIONS values reflect the current channels/<channel>.toml
+      # `platform_version` pin — they are NOT the workflow `version` input.
+      # That divergence is the entire point of ENS-507: the channel toml is the
+      # source of truth. If dev.toml says v00000000-0000, that is the value
+      # that flows into the manifest. Operator-facing version control happens
+      # via promotion-ceremony PRs against channels/<channel>.toml.
+      # ---------------------------------------------------------------------------
+      - name: Verify channel-config.sh shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /tmp/manifest-work/channel-config.sh
+
+          ALL_TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin"
+          DEVELOPER_TARGETS="x86_64-unknown-linux-gnu"
+
+          fail=0
+          assert() {
+            local label="$1" actual="$2" expected="$3"
+            if [[ "${actual}" != "${expected}" ]]; then
+              echo "FAIL ${label}: expected '${expected}' got '${actual}'"
+              fail=$((fail+1))
+            else
+              echo "OK   ${label}: ${actual}"
+            fi
+          }
+
+          # BINARIES
+          assert 'BINARIES[enscrive-cli]'                "${BINARIES[enscrive-cli]:-}"                "enscrive"
+          assert 'BINARIES[enscrive-developer]'          "${BINARIES[enscrive-developer]:-}"          "enscrive-developer"
+          assert 'BINARIES[enscrive-observe]'            "${BINARIES[enscrive-observe]:-}"            "enscrive-observe"
+          assert 'BINARIES[enscrive-embed]'              "${BINARIES[enscrive-embed]:-}"              "enscrive-embed"
+          assert 'BINARIES[esm]'                         "${BINARIES[esm]:-}"                         "esm"
+          assert 'BINARIES[enscrive-metering-sentinel]'  "${BINARIES[enscrive-metering-sentinel]:-}"  "enscrive-metering-sentinel"
+          assert 'BINARIES[enscrive-docs]'               "${BINARIES[enscrive-docs]:-}"               "enscrive-docs"
+
+          # ARTIFACT_KIND
+          assert 'ARTIFACT_KIND[enscrive-cli]'                "${ARTIFACT_KIND[enscrive-cli]:-}"                "binary"
+          assert 'ARTIFACT_KIND[enscrive-developer]'          "${ARTIFACT_KIND[enscrive-developer]:-}"          "archive"
+          assert 'ARTIFACT_KIND[enscrive-observe]'            "${ARTIFACT_KIND[enscrive-observe]:-}"            "binary"
+          assert 'ARTIFACT_KIND[enscrive-embed]'              "${ARTIFACT_KIND[enscrive-embed]:-}"              "binary"
+          assert 'ARTIFACT_KIND[esm]'                         "${ARTIFACT_KIND[esm]:-}"                         "binary"
+          assert 'ARTIFACT_KIND[enscrive-metering-sentinel]'  "${ARTIFACT_KIND[enscrive-metering-sentinel]:-}"  "binary"
+          assert 'ARTIFACT_KIND[enscrive-docs]'               "${ARTIFACT_KIND[enscrive-docs]:-}"               "binary"
+
+          # PLATFORMS
+          assert 'PLATFORMS[enscrive-cli]'                "${PLATFORMS[enscrive-cli]:-}"                "${ALL_TARGETS}"
+          assert 'PLATFORMS[enscrive-developer]'          "${PLATFORMS[enscrive-developer]:-}"          "${DEVELOPER_TARGETS}"
+          assert 'PLATFORMS[enscrive-observe]'            "${PLATFORMS[enscrive-observe]:-}"            "${ALL_TARGETS}"
+          assert 'PLATFORMS[enscrive-embed]'              "${PLATFORMS[enscrive-embed]:-}"              "${ALL_TARGETS}"
+          assert 'PLATFORMS[esm]'                         "${PLATFORMS[esm]:-}"                         "${ALL_TARGETS}"
+          assert 'PLATFORMS[enscrive-metering-sentinel]'  "${PLATFORMS[enscrive-metering-sentinel]:-}"  "${ALL_TARGETS}"
+          assert 'PLATFORMS[enscrive-docs]'               "${PLATFORMS[enscrive-docs]:-}"               "${ALL_TARGETS}"
+
+          # SOURCE_VERSIONS — Pattern A entries reflect the channel toml's
+          # platform_version pin (NOT the workflow input). Pattern B uses
+          # the resolved docs version (operator input > channel override).
+          # Both are non-empty for any valid roster/channel toml pair.
+          for key in enscrive-cli enscrive-developer enscrive-observe enscrive-embed esm enscrive-metering-sentinel enscrive-docs; do
+            val="${SOURCE_VERSIONS[$key]:-}"
+            if [[ -z "${val}" ]]; then
+              echo "FAIL SOURCE_VERSIONS[${key}] is empty"
+              fail=$((fail+1))
+            else
+              echo "OK   SOURCE_VERSIONS[${key}]: ${val}"
+            fi
+          done
+
+          if [[ ${fail} -gt 0 ]]; then
+            echo "ERROR: ${fail} channel-config.sh assertion(s) failed."
+            exit 1
+          fi
+          echo "channel-config.sh verification passed."
+
+      # ---------------------------------------------------------------------------
       # Gate: verify all expected artifacts exist in S3 before generating a manifest.
       # Fail fast if any binary is missing — partial manifests must not be published.
       #
@@ -103,54 +325,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Per-binary source version (S3 path segment).
-          # Pattern A — ride the herd: use the unified platform version.
-          # Pattern B — pinned:        use the binary's own resolved version.
-          declare -A SOURCE_VERSIONS
-          SOURCE_VERSIONS["enscrive-cli"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-developer"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-observe"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-embed"]="${VERSION}"
-          SOURCE_VERSIONS["esm"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-metering-sentinel"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-docs"]="${ENSCRIVE_DOCS_VERSION}"
-
-          declare -A BINARIES
-          BINARIES["enscrive-cli"]="enscrive"
-          BINARIES["enscrive-developer"]="enscrive-developer"
-          BINARIES["enscrive-observe"]="enscrive-observe"
-          BINARIES["enscrive-embed"]="enscrive-embed"
-          BINARIES["esm"]="esm"
-          BINARIES["enscrive-metering-sentinel"]="enscrive-metering-sentinel"
-          BINARIES["enscrive-docs"]="enscrive-docs"
-
-          # ENS-140: enscrive-developer ships as a tar.gz (server binary +
-          # site/ directory). Other binaries are plain executables.
-          # The S3 key suffix differs accordingly.
-          declare -A ARTIFACT_KIND
-          ARTIFACT_KIND["enscrive-cli"]="binary"
-          ARTIFACT_KIND["enscrive-developer"]="archive"
-          ARTIFACT_KIND["enscrive-observe"]="binary"
-          ARTIFACT_KIND["enscrive-embed"]="binary"
-          ARTIFACT_KIND["esm"]="binary"
-          ARTIFACT_KIND["enscrive-metering-sentinel"]="binary"
-          ARTIFACT_KIND["enscrive-docs"]="binary"
-
-          # Per-binary platform availability. enscrive-developer is a
-          # server-only binary, deployed exclusively to x86_64 Linux EC2 —
-          # it does not (and will not) ship for macOS, ARM Linux, or musl.
-          # The other binaries are end-user / general-purpose and ship for
-          # every platform we support.
-          ALL_TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin"
-          DEVELOPER_TARGETS="x86_64-unknown-linux-gnu"
-          declare -A PLATFORMS
-          PLATFORMS["enscrive-cli"]="${ALL_TARGETS}"
-          PLATFORMS["enscrive-developer"]="${DEVELOPER_TARGETS}"
-          PLATFORMS["enscrive-observe"]="${ALL_TARGETS}"
-          PLATFORMS["enscrive-embed"]="${ALL_TARGETS}"
-          PLATFORMS["esm"]="${ALL_TARGETS}"
-          PLATFORMS["enscrive-metering-sentinel"]="${ALL_TARGETS}"
-          PLATFORMS["enscrive-docs"]="${ALL_TARGETS}"
+          # ENS-507: source-of-truth declarations generated from
+          # enscrive-deploy/channels/roster.toml + channels/${CHANNEL}.toml.
+          # See the "Build channel-config.sh ..." step above.
+          source /tmp/manifest-work/channel-config.sh
 
           MISSING=0
           for REPO in "${!BINARIES[@]}"; do
@@ -197,46 +375,9 @@ jobs:
 
           mkdir -p /tmp/manifest-work
 
-          # Per-binary source version (S3 path segment).
-          declare -A SOURCE_VERSIONS
-          SOURCE_VERSIONS["enscrive-cli"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-developer"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-observe"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-embed"]="${VERSION}"
-          SOURCE_VERSIONS["esm"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-metering-sentinel"]="${VERSION}"
-          SOURCE_VERSIONS["enscrive-docs"]="${ENSCRIVE_DOCS_VERSION}"
-
-          declare -A BINARIES
-          BINARIES["enscrive-cli"]="enscrive"
-          BINARIES["enscrive-developer"]="enscrive-developer"
-          BINARIES["enscrive-observe"]="enscrive-observe"
-          BINARIES["enscrive-embed"]="enscrive-embed"
-          BINARIES["esm"]="esm"
-          BINARIES["enscrive-metering-sentinel"]="enscrive-metering-sentinel"
-          BINARIES["enscrive-docs"]="enscrive-docs"
-
-          # ENS-140: archive vs plain-binary kind per repo.
-          declare -A ARTIFACT_KIND
-          ARTIFACT_KIND["enscrive-cli"]="binary"
-          ARTIFACT_KIND["enscrive-developer"]="archive"
-          ARTIFACT_KIND["enscrive-observe"]="binary"
-          ARTIFACT_KIND["enscrive-embed"]="binary"
-          ARTIFACT_KIND["esm"]="binary"
-          ARTIFACT_KIND["enscrive-metering-sentinel"]="binary"
-          ARTIFACT_KIND["enscrive-docs"]="binary"
-
-          # Per-binary platform availability.
-          ALL_TARGETS="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-apple-darwin"
-          DEVELOPER_TARGETS="x86_64-unknown-linux-gnu"
-          declare -A PLATFORMS
-          PLATFORMS["enscrive-cli"]="${ALL_TARGETS}"
-          PLATFORMS["enscrive-developer"]="${DEVELOPER_TARGETS}"
-          PLATFORMS["enscrive-observe"]="${ALL_TARGETS}"
-          PLATFORMS["enscrive-embed"]="${ALL_TARGETS}"
-          PLATFORMS["esm"]="${ALL_TARGETS}"
-          PLATFORMS["enscrive-metering-sentinel"]="${ALL_TARGETS}"
-          PLATFORMS["enscrive-docs"]="${ALL_TARGETS}"
+          # ENS-507: source-of-truth declarations generated from
+          # enscrive-deploy/channels/roster.toml + channels/${CHANNEL}.toml.
+          source /tmp/manifest-work/channel-config.sh
 
           # Emit one line per artifact:
           #   REPO TARGET BINARY KIND S3_KEY_SUFFIX SHA256 SIZE_BYTES SOURCE_VERSION
@@ -311,25 +452,12 @@ jobs:
             CHANNEL_LABEL="stable"
           fi
 
-          # Declare repo-to-binary mapping in jq-friendly form.
-          # We build a JSON structure per binary, then merge at the end.
-          declare -A BINARIES
-          BINARIES["enscrive-cli"]="enscrive"
-          BINARIES["enscrive-developer"]="enscrive-developer"
-          BINARIES["enscrive-observe"]="enscrive-observe"
-          BINARIES["enscrive-embed"]="enscrive-embed"
-          BINARIES["esm"]="esm"
-          BINARIES["enscrive-metering-sentinel"]="enscrive-metering-sentinel"
-          BINARIES["enscrive-docs"]="enscrive-docs"
-
-          declare -A ARTIFACT_KIND
-          ARTIFACT_KIND["enscrive-cli"]="binary"
-          ARTIFACT_KIND["enscrive-developer"]="archive"
-          ARTIFACT_KIND["enscrive-observe"]="binary"
-          ARTIFACT_KIND["enscrive-embed"]="binary"
-          ARTIFACT_KIND["esm"]="binary"
-          ARTIFACT_KIND["enscrive-metering-sentinel"]="binary"
-          ARTIFACT_KIND["enscrive-docs"]="binary"
+          # ENS-507: source-of-truth declarations generated from
+          # enscrive-deploy/channels/roster.toml + channels/${CHANNEL}.toml.
+          # Only BINARIES + ARTIFACT_KIND are read here; PLATFORMS and
+          # SOURCE_VERSIONS are unused at this step (already encoded into the
+          # metadata.tsv emitted by the previous step).
+          source /tmp/manifest-work/channel-config.sh
 
           # Build per-binary platform objects via jq.
           # Start with an empty binaries object and accumulate.
