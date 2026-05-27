@@ -168,17 +168,23 @@ jobs:
           VERSION: ${{ steps.input.outputs.version }}
         run: |
           set -euo pipefail
-          # Race protection: rebase under concurrency group in case two events
-          # arrived nearly simultaneously and one already advanced main.
-          git fetch origin main
-          git rebase origin/main || { echo "::error::rebase failed"; git rebase --abort; exit 1; }
-
           git config user.name "enscrive-orchestrator[bot]"
           git config user.email "orchestrator@enscrive.io"
+          # Stage the dev.toml change FIRST so subsequent fetch/rebase don't
+          # trip on an unstaged worktree change.
           git add channels/dev.toml
           COMMIT_MSG="Auto-bump dev channel: ${REPO} -> ${VERSION}"$'\n\n'"Triggered by release-published event from ${REPO} at tag ${VERSION}."$'\n\n'"Orchestrator: enscrive-cli/.github/workflows/release-orchestrator.yml"$'\n'"Linear: ENS-538"
           git commit -m "${COMMIT_MSG}"
-          git push origin main
+          # The concurrency: group: dev-toml-write at the workflow level
+          # serializes all writes, so racing this push is unlikely. If it
+          # does race (another actor pushed concurrently), pull --rebase
+          # the staged commit on top and retry once.
+          git fetch origin main
+          if ! git push origin main 2>&1; then
+            echo "::warning::push rejected; rebasing onto origin/main and retrying"
+            git pull --rebase origin main
+            git push origin main
+          fi
 
       - name: Dispatch manifest.yml
         if: steps.bump.outputs.no_change == 'false'
