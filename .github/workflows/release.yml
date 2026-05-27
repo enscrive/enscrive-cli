@@ -305,3 +305,50 @@ jobs:
             --cache-control "public, max-age=31536000, immutable"
 
           echo "All artifacts signed and bundles uploaded."
+
+  # ---------------------------------------------------------------------------
+  # ENS-538 — notify the release orchestrator that this tag has finished
+  # publishing. The orchestrator (release-orchestrator.yml) auto-bumps the
+  # enscrive-deploy channels/dev.toml [overrides] entry for this repo and
+  # dispatches manifest.yml to publish a fresh latest.json.
+  # ---------------------------------------------------------------------------
+  notify-orchestrator:
+    name: notify release orchestrator (ENS-538)
+    needs: [build, aggregate, sign]
+    runs-on: ubuntu-latest
+    if: success()
+    # Auxiliary — the binary is already in S3 by the time this runs. A failure
+    # here means notify-only failed (orchestrator not wired yet, PAT missing,
+    # rate-limited, etc.). Don't fail the release for it.
+    continue-on-error: true
+    steps:
+      - name: Dispatch release-published to orchestrator
+        env:
+          ORCHESTRATOR_PAT: ${{ secrets.ENSCRIVE_ORCHESTRATOR_PAT }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ORCHESTRATOR_PAT}" ]; then
+            echo "::warning::ENSCRIVE_ORCHESTRATOR_PAT not configured — orchestrator notification skipped."
+            echo "Set the secret per ENS-538 to enable auto-publish."
+            exit 0
+          fi
+          # Resolve the published tag from the trigger event.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REF_NAME="${{ github.event.inputs.ref_name }}"
+          else
+            REF_NAME="${GITHUB_REF_NAME}"
+          fi
+          REPO="${GITHUB_REPOSITORY##*/}"
+          echo "Notifying orchestrator: repo=${REPO} version=${REF_NAME}"
+          GH_TOKEN="${ORCHESTRATOR_PAT}" gh api -X POST \
+            repos/enscrive/enscrive-cli/dispatches \
+            --input - <<EOF
+          {
+            "event_type": "release-published",
+            "client_payload": {
+              "repo": "${REPO}",
+              "version": "${REF_NAME}"
+            }
+          }
+          EOF
+          echo "Notification dispatched."

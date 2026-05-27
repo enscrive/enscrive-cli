@@ -59,6 +59,11 @@ jobs:
           repository: enscrive/enscrive-deploy
           ref: main
           path: _deploy
+          # ENS-538: PAT with `Contents: read` on enscrive-deploy. Default GITHUB_TOKEN
+          # cannot read this private cross-repo. Workflow falls back to GITHUB_TOKEN
+          # if secret is absent (which will 403, matching today's behavior — surfaces
+          # the missing-secret state loudly rather than silently).
+          token: ${{ secrets.ENSCRIVE_ORCHESTRATOR_PAT || secrets.GITHUB_TOKEN }}
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -165,7 +170,10 @@ jobs:
               sys.exit(1)
 
           # Per-component source-version resolution.
-          # Pattern A: channel's platform_version (the "herd" tag for the channel).
+          # Pattern A (ENS-538): if the channel toml [overrides] table contains an
+          #   entry for this component, use it. Otherwise fall back to the channel's
+          #   platform_version (the herd baseline). This enables per-component
+          #   pinning while preserving platform_version as the default.
           # Pattern B: operator workflow input wins; else channel toml [overrides];
           #            else error (we have no fallback at this layer — resolve_docs
           #            handles the latest-tag fallback before we run).
@@ -173,7 +181,7 @@ jobs:
           for key, comp in components.items():
               pattern = comp.get("pattern")
               if pattern == "A":
-                  source_versions[key] = channel_platform_version
+                  source_versions[key] = overrides.get(key, channel_platform_version)
               elif pattern == "B":
                   # enscrive-docs special case: operator override + latest-tag
                   # fallback are resolved in the `resolve_docs` step above.
