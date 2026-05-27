@@ -41,10 +41,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout enscrive-cli at version tag
+      - name: Checkout enscrive-cli at main (per ENS-538)
+        # ENS-538: under per-component pinning, `inputs.version` may be a tag
+        # that only exists in one of the 7 release-tracked repos (not in
+        # enscrive-cli itself). The workflow body just needs the generator
+        # script (which lives on main); the per-component source versions
+        # come from enscrive-deploy/channels/dev.toml, not from this checkout.
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.version }}
+          ref: main
 
       # ---------------------------------------------------------------------------
       # ENS-507: enscrive-deploy is the source of truth for channel topology
