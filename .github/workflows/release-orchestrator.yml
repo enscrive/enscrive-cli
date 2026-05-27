@@ -1,0 +1,200 @@
+name: release-orchestrator
+
+# Listens for release-published events from each manifest-tracked repo. On
+# successful release.yml completion for repo R at tag T, the orchestrator:
+#   1. Checks out enscrive-deploy/main (using the cross-repo PAT)
+#   2. Bumps the corresponding `[overrides]` entry in channels/dev.toml
+#   3. Commits + pushes to enscrive-deploy main
+#   4. Dispatches manifest.yml to regenerate latest.json on CloudFront
+#
+# Idempotent: re-running with the same (repo, version) is a no-op.
+# Race-safe: concurrency group serializes all writes to dev.toml.
+#
+# ADR: enscrive-governance/plans/PER-COMPONENT-VERSION-PINNING-2026-05-27/ADR.md
+# Linear: ENS-538
+
+on:
+  repository_dispatch:
+    types: [release-published]
+  # Operator backfill / manual trigger
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Repo name that just published (e.g. enscrive-developer)"
+        required: true
+        type: string
+      version:
+        description: "Tag (e.g. v20260601-1700)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write   # to dispatch manifest.yml
+
+concurrency:
+  # Serialize all dev.toml writes across all incoming notifications
+  group: dev-toml-write
+  cancel-in-progress: false
+
+jobs:
+  bump-dev-toml:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve inputs
+        id: input
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            REPO="${{ github.event.client_payload.repo }}"
+            VERSION="${{ github.event.client_payload.version }}"
+          else
+            REPO="${{ github.event.inputs.repo }}"
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          [ -n "$REPO" ] || { echo "::error::missing repo"; exit 1; }
+          [ -n "$VERSION" ] || { echo "::error::missing version"; exit 1; }
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Triggered by: repo=$REPO version=$VERSION"
+
+      - name: Checkout enscrive-deploy main (PAT for cross-repo write)
+        uses: actions/checkout@v4
+        with:
+          repository: enscrive/enscrive-deploy
+          ref: main
+          path: _deploy
+          token: ${{ secrets.ENSCRIVE_ORCHESTRATOR_PAT }}
+          persist-credentials: true
+
+      - name: Update channels/dev.toml override
+        id: bump
+        shell: bash
+        env:
+          REPO: ${{ steps.input.outputs.repo }}
+          VERSION: ${{ steps.input.outputs.version }}
+        working-directory: _deploy
+        run: |
+          set -euo pipefail
+
+          # Map repo name → roster component key. Most are identity; esm is special.
+          case "$REPO" in
+            enscrive-secrets-manager) ROSTER_KEY="esm" ;;
+            enscrive-cli|enscrive-developer|enscrive-observe|enscrive-embed|enscrive-metering-sentinel|enscrive-docs)
+              ROSTER_KEY="$REPO" ;;
+            *)
+              echo "::error::repo '$REPO' is not in the dev roster"
+              exit 1 ;;
+          esac
+
+          echo "Bumping [overrides] entry for roster key '$ROSTER_KEY' -> '$VERSION'"
+          export ROSTER_KEY VERSION
+
+          # Write the Python patcher to a temp file so we can use <<'PYEOF'
+          # (no shell-variable interpolation inside) while still passing the
+          # values via os.environ — same pattern as manifest.yml generator.
+          GEN=/tmp/bump-dev-toml.py
+          cat > "${GEN}" <<'PYEOF'
+          import os
+          import re
+          import sys
+
+          path = "channels/dev.toml"
+          roster_key = os.environ["ROSTER_KEY"]
+          version = os.environ["VERSION"]
+
+          with open(path, "r") as f:
+              content = f.read()
+
+          # Idempotency: if the exact pin already exists, no-op
+          already = re.search(
+              rf'^[ \t]*{re.escape(roster_key)}[ \t]*=[ \t]*"{re.escape(version)}"[ \t]*$',
+              content, re.MULTILINE,
+          )
+          if already:
+              print(f"NO_OP: {roster_key} already pinned to {version}")
+              sys.exit(0)
+
+          # Update existing override line, or insert into [overrides] table
+          existing = re.search(
+              rf'^([ \t]*){re.escape(roster_key)}[ \t]*=[ \t]*"[^"]*"[ \t]*$',
+              content, re.MULTILINE,
+          )
+          if existing:
+              new_content = re.sub(
+                  rf'^([ \t]*){re.escape(roster_key)}[ \t]*=[ \t]*"[^"]*"[ \t]*$',
+                  rf'\g<1>{roster_key} = "{version}"',
+                  content, count=1, flags=re.MULTILINE,
+              )
+          else:
+              overrides_header = re.search(r'(^\[overrides\][ \t]*$)', content, re.MULTILINE)
+              if not overrides_header:
+                  sys.stderr.write("ERROR: [overrides] section not found in channels/dev.toml\n")
+                  sys.exit(1)
+              # Insert immediately after the [overrides] header line
+              new_content = (
+                  content[:overrides_header.end()] +
+                  f'\n{roster_key} = "{version}"' +
+                  content[overrides_header.end():]
+              )
+
+          if new_content == content:
+              sys.stderr.write("ERROR: planned an edit but content unchanged\n")
+              sys.exit(1)
+
+          with open(path, "w") as f:
+              f.write(new_content)
+          print(f'WROTE: {roster_key} = "{version}"')
+          PYEOF
+
+          python3 "${GEN}"
+
+          if git diff --quiet channels/dev.toml; then
+            echo "no_change=true" >> "$GITHUB_OUTPUT"
+            echo "channels/dev.toml unchanged (idempotent)"
+          else
+            echo "no_change=false" >> "$GITHUB_OUTPUT"
+            echo "--- diff ---"
+            git --no-pager diff channels/dev.toml
+          fi
+
+      - name: Commit + push to enscrive-deploy main
+        if: steps.bump.outputs.no_change == 'false'
+        working-directory: _deploy
+        shell: bash
+        env:
+          REPO: ${{ steps.input.outputs.repo }}
+          VERSION: ${{ steps.input.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Race protection: rebase under concurrency group in case two events
+          # arrived nearly simultaneously and one already advanced main.
+          git fetch origin main
+          git rebase origin/main || { echo "::error::rebase failed"; git rebase --abort; exit 1; }
+
+          git config user.name "enscrive-orchestrator[bot]"
+          git config user.email "orchestrator@enscrive.io"
+          git add channels/dev.toml
+          COMMIT_MSG="Auto-bump dev channel: ${REPO} -> ${VERSION}"$'\n\n'"Triggered by release-published event from ${REPO} at tag ${VERSION}."$'\n\n'"Orchestrator: enscrive-cli/.github/workflows/release-orchestrator.yml"$'\n'"Linear: ENS-538"
+          git commit -m "${COMMIT_MSG}"
+          git push origin main
+
+      - name: Dispatch manifest.yml
+        if: steps.bump.outputs.no_change == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.ENSCRIVE_ORCHESTRATOR_PAT }}
+          VERSION: ${{ steps.input.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Brief settling delay so manifest.yml's checkout of enscrive-deploy
+          # sees the freshly-pushed commit.
+          sleep 5
+          # `version` is the just-published tag (becomes manifest.json's
+          # `version` + `compatibility.min_cli_version`). Per-component source
+          # versions come from channels/dev.toml (now bumped above).
+          gh workflow run manifest.yml \
+            --repo enscrive/enscrive-cli \
+            --ref main \
+            -f version="${VERSION}"
+          echo "Dispatched manifest.yml with version=${VERSION}"
