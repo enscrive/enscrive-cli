@@ -29,3 +29,26 @@
 
 # Release / CI workflows — supply chain.
 /.github/workflows/** @chrisroge
+
+# === ADR-0003 §6.7 additions (2026-05-28) ===
+#
+# Reviewer B may NOT merge any PR that touches a path below; only the
+# founder authorizes the merge. The gate itself (CODEOWNERS, the §6.7
+# ADR document) is gated to prevent any PR from routing a gated path
+# around the gate.
+
+# (c) — the gate itself. Universally @chrisroge.
+**/CODEOWNERS @chrisroge
+
+# (a) — admin destructive bulk-mutation tooling (defensive globs; no-op
+# if absent today, gated if added later).
+/scripts/clean-* @chrisroge
+/scripts/purge-* @chrisroge
+/scripts/bulk-delete-* @chrisroge
+/scripts/wipe-* @chrisroge
+
+# enscrive-cli has no auth middleware, no migrations, no billing/ledger,
+# and no ESM by design (CLI is a customer-facing thin client per its
+# CLAUDE.md). Categories (a) for migrations/billing/ESM and (b) for
+# trust-boundary do not apply to this repo and are intentionally not
+# defended here.
