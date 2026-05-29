@@ -9,6 +9,7 @@ mod preflight;
 mod release_channel;
 #[cfg(test)]
 mod test_support;
+mod version;
 
 use std::collections::HashMap;
 use std::fs;
@@ -33,7 +34,10 @@ include!(concat!(env!("OUT_DIR"), "/command_tiers.rs"));
 #[derive(Parser)]
 #[command(
     name = "enscrive",
-    version,
+    // Enscrive `--version` standard (ENS-553 / ENS-544): the full
+    // `<semver>+<git-sha> (<build-date>)` line, NOT clap's bare-semver default.
+    // Clap prefixes the command name, yielding `enscrive 0.1.0+<sha> (<date>)`.
+    version = version::VERSION_LINE,
     about = "Enscrive CLI - Perfect short term memory and limitless long term memory for humans and AI agents - Developer portal on localhost:3000 and enscrive.io"
 )]
 struct Cli {
