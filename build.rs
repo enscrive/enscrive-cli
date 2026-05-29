@@ -48,6 +48,12 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rustc-env=CLI_TARGET={}", std::env::var("TARGET").unwrap());
 
+    // --- Enscrive `--version` standard (ENS-553 / ENS-544) -------------------
+    // Inject the git short SHA and UTC build date at COMPILE time so the binary
+    // reports the commit it was built from without ever shelling out to git at
+    // runtime (the running host may have no .git). See ENS-544 for the contract.
+    emit_version_stamps();
+
     let toml_src = fs::read_to_string(CONTRACT_PATH)
         .unwrap_or_else(|e| panic!("build.rs: read {}: {}", CONTRACT_PATH, e));
 
@@ -90,4 +96,109 @@ fn main() {
     let out_path = PathBuf::from(out_dir).join("command_tiers.rs");
     fs::write(&out_path, out)
         .unwrap_or_else(|e| panic!("build.rs: write {}: {}", out_path.display(), e));
+}
+
+/// Emit `ENSCRIVE_GIT_SHA` and `ENSCRIVE_BUILD_DATE` as `rustc-env` vars,
+/// consumed by `src/version.rs` to assemble the `--version` line.
+///
+/// Per the ENS-544 contract this MUST NOT fail the build: each resolver falls
+/// back to a sentinel rather than panicking.
+fn emit_version_stamps() {
+    // Recompute when HEAD moves or the relevant build-time env vars change.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+
+    println!("cargo:rustc-env=ENSCRIVE_GIT_SHA={}", resolve_git_sha());
+    println!(
+        "cargo:rustc-env=ENSCRIVE_BUILD_DATE={}",
+        resolve_build_date()
+    );
+}
+
+/// Resolve the 7-char git short SHA the binary is being built from.
+///
+/// Resolution order (ENS-544): `git rev-parse --short=7 HEAD` (with a `-dirty`
+/// suffix when the tree is dirty) → CI-provided `GITHUB_SHA` when there is no
+/// usable git checkout → `unknown` as the last resort. Never panics.
+fn resolve_git_sha() -> String {
+    if let Some(sha) = git_short_sha() {
+        let suffix = if git_tree_dirty() { "-dirty" } else { "" };
+        return format!("{sha}{suffix}");
+    }
+    // No usable `.git` (e.g. a CI build from a tarball). Fall back to the SHA
+    // the CI runner exports, truncated to the same 7-char short form.
+    if let Ok(github_sha) = env::var("GITHUB_SHA") {
+        let short: String = github_sha.trim().chars().take(7).collect();
+        if !short.is_empty() {
+            return short;
+        }
+    }
+    "unknown".to_string()
+}
+
+/// `git rev-parse --short=7 HEAD`, or `None` if git is unavailable / fails.
+fn git_short_sha() -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--short=7", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if sha.is_empty() { None } else { Some(sha) }
+}
+
+/// True if `git status --porcelain` reports any changes. Conservative: any
+/// failure to determine cleanliness reports "not dirty" so we never spuriously
+/// stamp `-dirty` onto an otherwise clean build.
+fn git_tree_dirty() -> bool {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// UTC build date as `YYYY-MM-DD`. Honors `SOURCE_DATE_EPOCH` for reproducible
+/// builds; otherwise uses wall-clock time. Pure-Rust epoch→civil conversion —
+/// no extra build-dependency, no external `date`.
+fn resolve_build_date() -> String {
+    let epoch_secs = match env::var("SOURCE_DATE_EPOCH") {
+        Ok(v) => v.trim().parse::<i64>().unwrap_or_else(|_| now_unix_secs()),
+        Err(_) => now_unix_secs(),
+    };
+    let (y, m, d) = civil_from_unix_secs(epoch_secs);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Seconds since the Unix epoch (UTC), or `0` if the system clock is somehow
+/// before the epoch — `0` maps to `1970-01-01`, a harmless sentinel.
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Convert Unix seconds (UTC) to a `(year, month, day)` calendar date using
+/// Howard Hinnant's `civil_from_days` algorithm (public domain). Valid across
+/// the full proleptic Gregorian range; correct for all dates we care about.
+fn civil_from_unix_secs(secs: i64) -> (i64, u32, u32) {
+    // Floor-divide to days so dates before the epoch still convert correctly.
+    let days = secs.div_euclid(86_400);
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m, d)
 }
