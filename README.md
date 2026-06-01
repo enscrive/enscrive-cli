@@ -237,3 +237,5 @@ Issues and PRs welcome at [github.com/enscrive/enscrive-cli](https://github.com/
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+<!-- ENS-569 fleet loop smoke 20260601T1919 -->
