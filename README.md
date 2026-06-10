@@ -136,7 +136,9 @@ enscrive eval-defs       Define and run eval suites            [Pro]
 enscrive jobs            Inspect background jobs
 enscrive batch-sets      Inspect batch staging
 enscrive logs            Stream and search logs
-enscrive backup          Backup and restore                    [Pro]
+enscrive revisions       List point-in-time restore points
+enscrive restore         Restore tenant data to a revision
+enscrive backup          Operator backup surface (admin)       [Pro]
 enscrive export          Data portability                      [Pro]
 enscrive usage           Usage + metering
 ```

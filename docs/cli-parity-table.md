@@ -160,6 +160,10 @@ Contract totals: **101 endpoints — 89 `implemented`, 12 `deferred`, 0 `missing
 | `backup get` | GET `/v1/admin/backups/{backup_id}` | implemented | `main.rs:4517` | ✅ |
 | `backup restore` | POST `/v1/admin/restore` | implemented | `main.rs:4559` (confirm-gated) | ✅ |
 | `backup dry-run` | POST `/v1/admin/restore/dry-run` | implemented | `main.rs:4570` | ✅ |
+| `revisions list` | GET `/v1/backups` | implemented | `revisions.rs` (`handle_revisions`) | ✅ (ENS-651) |
+| `revisions show` | GET `/v1/backups/{backup_id}` | implemented | `revisions.rs` (`handle_revisions`) | ✅ (ENS-651) |
+| `restore` | POST `/v1/restore` | implemented | `revisions.rs` (`handle_restore`, confirm-gated, verified-honest) | ✅ (ENS-651) |
+| `restore --dry-run` | POST `/v1/restore/dry-run` | implemented | `revisions.rs` (`handle_restore`) | ✅ (ENS-651) |
 | `export tenant` | GET `/v1/admin/export` | implemented | `main.rs:4583` (`get_bytes_with_query`) | ✅ |
 | `export embeddings` | GET `/v1/admin/export/embeddings` | implemented | `main.rs:4617` | ✅ |
 | `export token-usage` | GET `/v1/admin/export/token-usage` | implemented | `main.rs:4629` | ✅ |

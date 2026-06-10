@@ -904,6 +904,41 @@ status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
+# ── Revisions: tenant backup evidence + restore (ENS-651 / ENS-649) ──
+
+[[endpoint]]
+method = "GET"
+path = "/v1/backups"
+cli_command = "revisions list"
+status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/backups/{backup_id}"
+cli_command = "revisions show"
+status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/restore"
+cli_command = "restore"
+status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/restore/dry-run"
+cli_command = "restore"
+status = "implemented"
+note = "Reached via `enscrive restore --revision <id> --dry-run`"
+deployment_tier = "any-mode"
+required_plan = "free"
+
 # ── Admin: Rate Limits ─────────────────────────────────
 
 [[endpoint]]
