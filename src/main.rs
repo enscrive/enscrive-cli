@@ -7,6 +7,7 @@ mod local;
 mod output;
 mod preflight;
 mod release_channel;
+mod revisions;
 #[cfg(test)]
 mod test_support;
 mod version;
@@ -143,11 +144,22 @@ enum Commands {
         sub: LogsSubcommand,
     },
 
-    /// Backup and restore commands
+    /// Operator backup and restore commands (admin `/v1/admin/*` surface;
+    /// for the tenant surface see `enscrive revisions` + `enscrive restore`)
     Backup {
         #[command(subcommand)]
         sub: BackupSubcommand,
     },
+
+    /// Revisions of your tenant data — point-in-time restore points (ENS-651)
+    Revisions {
+        #[command(subcommand)]
+        sub: revisions::RevisionsSubcommand,
+    },
+
+    /// Restore tenant data to a revision (tenant-wide, point-in-time;
+    /// destructive — confirmation required)
+    Restore(revisions::RestoreArgs),
 
     /// Data export commands
     Export {
@@ -532,7 +544,8 @@ struct IngestDocumentsArgs {
     #[arg(long = "voice-id")]
     voice_id: Option<String>,
 
-    /// Run synchronously instead of as background job
+    /// DEPRECATED (ENS-638): the server always processes ingest
+    /// asynchronously and ignores this flag; accepted for compatibility
     #[arg(long)]
     sync: bool,
 
@@ -718,7 +731,8 @@ struct CorpusCommitArgs {
     #[arg(long)]
     id: String,
 
-    /// Force synchronous execution
+    /// DEPRECATED (ENS-638): the server always processes commits
+    /// asynchronously and ignores this flag; accepted for compatibility
     #[arg(long = "force-sync")]
     force_sync: bool,
 }
@@ -1791,6 +1805,8 @@ fn map_failure_class(raw: &str) -> FailureClass {
         "FAIL_LICENSE_INVALID" => FailureClass::LicenseInvalid,
         "FAIL_UNIMPLEMENTED" => FailureClass::Unimplemented,
         "FAIL_FALSE_CLAIM" => FailureClass::FalseClaim,
+        "FAIL_API_ERROR" => FailureClass::ApiError,
+        "FAIL_TIMEOUT" => FailureClass::Timeout,
         _ => FailureClass::Bug,
     }
 }
@@ -1803,7 +1819,11 @@ fn exit_code_for(class: FailureClass) -> i32 {
         FailureClass::ConfirmationRequired => output::EXIT_CONFIRMATION_REQUIRED,
         FailureClass::QuotaExceeded => output::EXIT_QUOTA_EXCEEDED,
         FailureClass::LicenseInvalid => output::EXIT_LICENSE_INVALID,
-        FailureClass::Bug | FailureClass::Unimplemented | FailureClass::FalseClaim => EXIT_FAILURE,
+        FailureClass::Bug
+        | FailureClass::Unimplemented
+        | FailureClass::FalseClaim
+        | FailureClass::ApiError
+        | FailureClass::Timeout => EXIT_FAILURE,
     }
 }
 
@@ -1826,6 +1846,57 @@ fn exit_code_for(class: FailureClass) -> i32 {
 ///   - Interactive TTY + human output: prompt on stderr for the target
 ///     name; stdin input must exactly match `target_name` to proceed.
 ///
+/// Pure pre-prompt decision core for the CLI-TIER-013 gate. Returns
+/// `Some(refusal message)` when the gate must refuse BEFORE any
+/// interactive prompt (missing `--confirm`, JSON/agent mode, non-TTY
+/// stdin); `None` means an interactive TTY prompt is the next step.
+///
+/// Extracted (ENS-651) so destructive handlers can run the refusal
+/// checks before any network call and so the decision is unit-testable
+/// without a process exit.
+fn confirmation_preprompt_refusal(
+    target_name: &str,
+    fmt: OutputFormat,
+    confirm: bool,
+    stdin_is_tty: bool,
+) -> Option<String> {
+    if !confirm {
+        return Some(format!(
+            "add --confirm to proceed with destructive operation on {target_name:?} \
+             (in an interactive TTY you'll then be prompted to type {target_name:?} to confirm)"
+        ));
+    }
+    // JSON / agent mode must never prompt. The token path arrives in
+    // CLI-TIER-014; until then, JSON callers get an explicit error.
+    if matches!(fmt, OutputFormat::Json) {
+        return Some(
+            "non-interactive destructive operation requires --confirm-token (CLI-TIER-014); \
+             JSON / agent mode cannot prompt for TTY confirmation"
+                .to_string(),
+        );
+    }
+    if !stdin_is_tty {
+        return Some(
+            "non-TTY destructive operation requires --confirm-token (CLI-TIER-014); \
+             detected non-interactive stdin"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// Pure prompt-response decision core for the CLI-TIER-013 gate: the
+/// typed line must exactly match `target_name` (after trim) to proceed.
+fn confirmation_mismatch_refusal(target_name: &str, typed: &str) -> Option<String> {
+    if typed.trim() != target_name {
+        Some(format!(
+            "confirmation did not match {target_name:?}; aborting destructive operation"
+        ))
+    } else {
+        None
+    }
+}
+
 /// The helper never returns when it fails — it exits the process via
 /// `CliResponse::emit`. On success it simply returns.
 fn require_local_confirmation(
@@ -1834,59 +1905,42 @@ fn require_local_confirmation(
     fmt: OutputFormat,
     confirm: bool,
 ) {
-    if !confirm {
-        CliResponse::fail(
-            command,
-            format!(
-                "add --confirm to proceed with destructive operation on {target_name:?} \
-                 (in an interactive TTY you'll then be prompted to type {target_name:?} to confirm)"
-            ),
-            FailureClass::ConfirmationRequired,
-            output::EXIT_CONFIRMATION_REQUIRED,
-        )
-        .emit(fmt);
-    }
-
-    // JSON / agent mode must never prompt. The token path arrives in
-    // CLI-TIER-014; until then, JSON callers get an explicit error.
-    if matches!(fmt, OutputFormat::Json) {
-        CliResponse::fail(
-            command,
-            "non-interactive destructive operation requires --confirm-token (CLI-TIER-014); \
-             JSON / agent mode cannot prompt for TTY confirmation"
-                .to_string(),
-            FailureClass::ConfirmationRequired,
-            output::EXIT_CONFIRMATION_REQUIRED,
-        )
-        .emit(fmt);
-    }
-
     use std::io::IsTerminal;
-    if !std::io::stdin().is_terminal() {
+    if let Some(msg) = confirmation_preprompt_refusal(
+        target_name,
+        fmt,
+        confirm,
+        std::io::stdin().is_terminal(),
+    ) {
         CliResponse::fail(
             command,
-            "non-TTY destructive operation requires --confirm-token (CLI-TIER-014); \
-             detected non-interactive stdin"
-                .to_string(),
+            msg,
             FailureClass::ConfirmationRequired,
             output::EXIT_CONFIRMATION_REQUIRED,
         )
         .emit(fmt);
     }
 
-    // Interactive TTY prompt.
+    prompt_typed_confirmation(target_name, command, fmt);
+}
+
+/// Interactive half of the CLI-TIER-013 gate: prompt on stderr and require
+/// an exact re-type of `target_name`. The caller MUST have already passed
+/// [`confirmation_preprompt_refusal`] (this function assumes an interactive
+/// TTY in human mode) — split out (ENS-651 review) so handlers that run the
+/// pre-prompt checks early, before any network call, do not evaluate the
+/// gate twice. Exits the process on mismatch or read error.
+fn prompt_typed_confirmation(target_name: &str, command: &str, fmt: OutputFormat) {
     eprint!("Type {target_name:?} to confirm: ");
     let _ = std::io::Write::flush(&mut std::io::stderr());
 
     let mut typed = String::new();
     match std::io::stdin().read_line(&mut typed) {
         Ok(_) => {
-            if typed.trim() != target_name {
+            if let Some(msg) = confirmation_mismatch_refusal(target_name, &typed) {
                 CliResponse::fail(
                     command,
-                    format!(
-                        "confirmation did not match {target_name:?}; aborting destructive operation"
-                    ),
+                    msg,
                     FailureClass::ConfirmationRequired,
                     output::EXIT_CONFIRMATION_REQUIRED,
                 )
@@ -3065,6 +3119,11 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
             BackupSubcommand::Restore(_) => "backup restore",
             BackupSubcommand::DryRun(_) => "backup dry-run",
         },
+        Commands::Revisions { sub } => match sub {
+            revisions::RevisionsSubcommand::List(_) => "revisions list",
+            revisions::RevisionsSubcommand::Show(_) => "revisions show",
+        },
+        Commands::Restore(_) => "restore",
         Commands::Export { sub } => match sub {
             ExportSubcommand::Tenant(_) => "export tenant",
             ExportSubcommand::Embeddings(_) => "export embeddings",
@@ -3537,6 +3596,16 @@ async fn main() {
                         )
                         .emit(fmt)
                     };
+                    // ENS-638: ingest is always-async server-side; `sync`
+                    // is accepted-and-ignored (deprecation since
+                    // enscrive-developer PR #63). Warn, but keep sending it
+                    // so older self-managed servers behave unchanged.
+                    if args.sync {
+                        eprintln!(
+                            "warning: --sync is deprecated (ENS-638); the server now always \
+                             processes ingest asynchronously and ignores this flag"
+                        );
+                    }
                     let body = json!({
                         "corpus_id": args.corpus_id,
                         "documents": documents,
@@ -3811,6 +3880,16 @@ async fn main() {
                     }
                 }
                 CorpusSubcommand::Commit(args) => {
+                    // ENS-638: staging commit is always-async server-side;
+                    // `force_sync` is accepted-and-ignored (since
+                    // enscrive-developer PR #67). Warn, but keep sending it
+                    // so older self-managed servers behave unchanged.
+                    if args.force_sync {
+                        eprintln!(
+                            "warning: --force-sync is deprecated (ENS-638); the server now \
+                             always processes commits asynchronously and ignores this flag"
+                        );
+                    }
                     let body = if args.force_sync {
                         json!({ "force_sync": true })
                     } else {
@@ -4573,6 +4652,23 @@ async fn main() {
                     }
                 }
             }
+        }
+        // ENS-651: tenant-scoped Revisions capability (`/v1/backups`,
+        // `/v1/restore`) — see src/revisions.rs.
+        Commands::Revisions { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            revisions::handle_revisions(&client, sub, fmt).await
+        }
+        Commands::Restore(args) => {
+            let deployment_mode = api_context
+                .as_ref()
+                .and_then(|ctx| ctx.profile_mode.as_deref())
+                .unwrap_or("local")
+                .to_string();
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            revisions::handle_restore(&client, args, &deployment_mode, fmt).await
         }
         Commands::Export { sub } => match sub {
             ExportSubcommand::Tenant(args) => {
@@ -7180,6 +7276,130 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
             }
             _ => panic!("expected backup restore"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // ENS-651: `enscrive revisions …` + `enscrive restore --revision <id>`
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn parse_revisions_list_with_pagination() {
+        let args = Cli::parse_from([
+            "enscrive", "revisions", "list", "--limit", "5", "--cursor", "abc",
+        ]);
+        match args.command {
+            Commands::Revisions {
+                sub: revisions::RevisionsSubcommand::List(list),
+            } => {
+                assert_eq!(list.limit, Some(5));
+                assert_eq!(list.cursor, Some("abc".to_string()));
+            }
+            _ => panic!("expected revisions list"),
+        }
+    }
+
+    #[test]
+    fn parse_revisions_show_positional_id() {
+        let args = Cli::parse_from(["enscrive", "revisions", "show", "rev-123"]);
+        match args.command {
+            Commands::Revisions {
+                sub: revisions::RevisionsSubcommand::Show(show),
+            } => assert_eq!(show.revision_id, "rev-123"),
+            _ => panic!("expected revisions show"),
+        }
+    }
+
+    #[test]
+    fn parse_restore_requires_revision_flag() {
+        assert!(
+            Cli::try_parse_from(["enscrive", "restore"]).is_err(),
+            "restore must require --revision"
+        );
+    }
+
+    #[test]
+    fn parse_restore_defaults() {
+        let args = Cli::parse_from(["enscrive", "restore", "--revision", "rev-123"]);
+        match args.command {
+            Commands::Restore(restore) => {
+                assert_eq!(restore.revision_id, "rev-123");
+                assert!(!restore.confirm, "confirm must default to false");
+                assert!(!restore.dry_run);
+                assert!(!restore.r#async);
+                assert_eq!(restore.confirm_token, None);
+                assert_eq!(restore.timeout_secs, 1800);
+            }
+            _ => panic!("expected restore"),
+        }
+    }
+
+    #[test]
+    fn parse_restore_dry_run_and_confirm() {
+        let args = Cli::parse_from([
+            "enscrive", "restore", "--revision", "rev-123", "--dry-run", "--confirm",
+        ]);
+        match args.command {
+            Commands::Restore(restore) => {
+                assert!(restore.dry_run);
+                assert!(restore.confirm);
+            }
+            _ => panic!("expected restore"),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // ENS-651: destructive-confirmation decision core (CLI-TIER-013/014).
+    // These are the gates `enscrive restore` runs BEFORE any API call —
+    // a refusal here means the server is never contacted.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn restore_confirmation_refused_without_confirm_flag() {
+        let refusal =
+            confirmation_preprompt_refusal("rev-123", OutputFormat::Human, false, true);
+        let msg = refusal.expect("must refuse without --confirm");
+        assert!(msg.contains("--confirm"));
+    }
+
+    #[test]
+    fn restore_confirmation_refused_on_non_tty_stdin() {
+        // Non-TTY (piped/script) stdin must be refused even with --confirm.
+        let refusal =
+            confirmation_preprompt_refusal("rev-123", OutputFormat::Human, true, false);
+        let msg = refusal.expect("must refuse non-TTY stdin");
+        assert!(msg.contains("non-TTY"));
+    }
+
+    #[test]
+    fn restore_confirmation_refused_in_json_mode() {
+        let refusal = confirmation_preprompt_refusal("rev-123", OutputFormat::Json, true, true);
+        assert!(refusal.is_some(), "JSON/agent mode must never prompt");
+    }
+
+    #[test]
+    fn restore_confirmation_proceeds_to_prompt_on_tty() {
+        assert!(
+            confirmation_preprompt_refusal("rev-123", OutputFormat::Human, true, true).is_none()
+        );
+    }
+
+    #[test]
+    fn restore_confirmation_mismatch_aborts() {
+        // Typed id differs from the revision id → abort (the POST is never
+        // reached; require_local_confirmation exits before the launch call).
+        let refusal = confirmation_mismatch_refusal("rev-123", "rev-999\n");
+        let msg = refusal.expect("mismatch must abort");
+        assert!(msg.contains("did not match"));
+        assert!(msg.contains("aborting"));
+    }
+
+    #[test]
+    fn restore_confirmation_exact_retype_proceeds() {
+        assert!(confirmation_mismatch_refusal("rev-123", "rev-123\n").is_none());
+        // Trailing newline/whitespace from read_line is tolerated; any other
+        // difference is not.
+        assert!(confirmation_mismatch_refusal("rev-123", " rev-123 ").is_none());
+        assert!(confirmation_mismatch_refusal("rev-123", "REV-123").is_some());
     }
 
     // -------------------------------------------------------------------------

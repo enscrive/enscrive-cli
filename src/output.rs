@@ -24,6 +24,16 @@ pub enum FailureClass {
     QuotaExceeded,
     #[serde(rename = "FAIL_LICENSE_INVALID")]
     LicenseInvalid,
+    /// Server-side or transport failure surfaced through the API (failed
+    /// jobs, network errors while polling). Not a CLI defect — operators
+    /// should look at the server/job, not this binary. (ENS-651 review.)
+    #[serde(rename = "FAIL_API_ERROR")]
+    ApiError,
+    /// Client-side deadline elapsed while waiting on the server (e.g. job
+    /// polling hit --timeout-secs). The operation may still be running
+    /// server-side. (ENS-651 review.)
+    #[serde(rename = "FAIL_TIMEOUT")]
+    Timeout,
 }
 
 impl fmt::Display for FailureClass {
@@ -38,6 +48,8 @@ impl fmt::Display for FailureClass {
             Self::ConfirmationRequired => write!(f, "FAIL_CONFIRMATION_REQUIRED"),
             Self::QuotaExceeded => write!(f, "FAIL_QUOTA_EXCEEDED"),
             Self::LicenseInvalid => write!(f, "FAIL_LICENSE_INVALID"),
+            Self::ApiError => write!(f, "FAIL_API_ERROR"),
+            Self::Timeout => write!(f, "FAIL_TIMEOUT"),
         }
     }
 }
@@ -193,6 +205,8 @@ mod tests {
             FailureClass::LicenseInvalid.to_string(),
             "FAIL_LICENSE_INVALID"
         );
+        assert_eq!(FailureClass::ApiError.to_string(), "FAIL_API_ERROR");
+        assert_eq!(FailureClass::Timeout.to_string(), "FAIL_TIMEOUT");
     }
 
     #[test]
@@ -209,6 +223,8 @@ mod tests {
             ),
             (FailureClass::QuotaExceeded, "FAIL_QUOTA_EXCEEDED"),
             (FailureClass::LicenseInvalid, "FAIL_LICENSE_INVALID"),
+            (FailureClass::ApiError, "FAIL_API_ERROR"),
+            (FailureClass::Timeout, "FAIL_TIMEOUT"),
         ] {
             let r = CliResponse::fail("cmd", "msg".to_string(), class, 1);
             let json = serde_json::to_value(&r).unwrap();

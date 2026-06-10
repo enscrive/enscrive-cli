@@ -430,7 +430,7 @@ pub fn print_poll_progress(poll_count: u64, job: &Value) {
 }
 
 /// Format a number with thousands separators for CLI display.
-fn format_num(n: i64) -> String {
+pub(crate) fn format_num(n: i64) -> String {
     if n < 0 {
         return format!("-{}", format_num(-n));
     }
