@@ -28,7 +28,8 @@ use serde_json::{Value, json};
 use crate::client::EnscriveClient;
 use crate::jobs_polling::{self, PollConfig, PollOutcome, TerminalKind};
 use crate::output::{
-    CliResponse, EXIT_CONFIRMATION_REQUIRED, EXIT_FAILURE, FailureClass, OutputFormat,
+    CliResponse, EXIT_CONFIG, EXIT_CONFIRMATION_REQUIRED, EXIT_FAILURE, FailureClass,
+    OutputFormat,
 };
 
 // ---------------------------------------------------------------------------
@@ -118,6 +119,12 @@ pub async fn handle_revisions(
             }
         }
         RevisionsSubcommand::Show(args) => {
+            // ENS-651 review: validate before any URL-path construction so a
+            // crafted id (e.g. `../admin`) can never traverse the path.
+            if let Err(msg) = validate_revision_id(&args.revision_id) {
+                CliResponse::fail("revisions show", msg, FailureClass::Bug, EXIT_CONFIG)
+                    .emit(fmt);
+            }
             let path = format!("/v1/backups/{}", args.revision_id);
             match client.get_json(&path).await {
                 Ok(data) => {
@@ -141,6 +148,15 @@ pub async fn handle_restore(
     fmt: OutputFormat,
 ) -> ! {
     let revision_id = args.revision_id.as_str();
+
+    // ── Strict id validation BEFORE any request construction ─────────────
+    // (ENS-651 review, security): revision ids are UUIDs (embed backup
+    // catalog `backup_id UUID`); anything else — `../admin`, slashes,
+    // arbitrary strings — is rejected here so it can never reach a URL path.
+    if let Err(msg) = validate_revision_id(revision_id) {
+        let command = if args.dry_run { "restore dry-run" } else { "restore" };
+        CliResponse::fail(command, msg, FailureClass::Bug, EXIT_CONFIG).emit(fmt);
+    }
 
     // ── --dry-run: read-only validation, no confirmation needed ──────────
     if args.dry_run {
@@ -177,40 +193,34 @@ pub async fn handle_restore(
         }
     }
 
-    // ── Managed mode requires a confirmation token (CLI-TIER-014) ────────
-    match crate::require_managed_confirmation(deployment_mode, args.confirm_token.as_deref(), "restore") {
-        Err(FailureClass::ConfirmationRequired) => {
-            CliResponse::fail(
-                "restore",
-                "'restore' requires a confirmation token in managed mode.\nObtain one at https://enscrive.io/portal/confirmations\n(or run locally with --mode self-managed and use --confirm)".to_string(),
-                FailureClass::ConfirmationRequired,
-                EXIT_CONFIRMATION_REQUIRED,
-            ).emit(fmt);
-        }
-        Err(_) => unreachable!(),
-        Ok(_) => {}
-    }
-
-    // ── Pre-prompt refusals (CLI-TIER-013) BEFORE any API call ───────────
-    // Missing --confirm, JSON/agent mode, and non-TTY stdin are all refused
-    // here, so a refused restore provably never reaches the server.
-    {
+    // ── Confirmation gate, decided exactly ONCE, BEFORE any API call ─────
+    // (CLI-TIER-013/014, ENS-651 review findings 1 + 4.) A validated
+    // managed-mode --confirm-token IS the confirmation — token-carrying
+    // automation proceeds without the interactive gate. Otherwise the
+    // pre-prompt refusals (missing --confirm, JSON/agent mode, non-TTY
+    // stdin) fire here, so a refused restore provably never reaches the
+    // server. The TTY state observed here is the one acted on later —
+    // the gate is never re-evaluated.
+    let gate = {
         use std::io::IsTerminal;
-        if let Some(msg) = crate::confirmation_preprompt_refusal(
+        match restore_gate_decision(
             revision_id,
+            deployment_mode,
+            args.confirm_token.as_deref(),
             fmt,
             args.confirm,
             std::io::stdin().is_terminal(),
         ) {
-            CliResponse::fail(
+            Ok(gate) => gate,
+            Err(msg) => CliResponse::fail(
                 "restore",
                 msg,
                 FailureClass::ConfirmationRequired,
                 EXIT_CONFIRMATION_REQUIRED,
             )
-            .emit(fmt);
+            .emit(fmt),
         }
-    }
+    };
 
     // ── Resolve the revision and say exactly what will happen ────────────
     let detail = match client
@@ -223,9 +233,12 @@ pub async fn handle_restore(
     eprintln!("{}", describe_restore(revision_id, &detail));
 
     // ── Interactive TTY confirmation: re-type the revision id ────────────
-    // (Same CLI-TIER-013 gate as `corpus delete` / `voices delete`; a
-    // mismatch aborts here — the POST below is never reached.)
-    crate::require_local_confirmation(revision_id, "restore", fmt, args.confirm);
+    // (Same CLI-TIER-013 prompt as `corpus delete` / `voices delete`; a
+    // mismatch aborts here — the POST below is never reached. Skipped when
+    // a validated managed-mode token already satisfied the gate.)
+    if matches!(gate, RestoreGate::PromptRequired) {
+        crate::prompt_typed_confirmation(revision_id, "restore", fmt);
+    }
 
     // ── Launch the restore (202 + JobLaunchResponse) ──────────────────────
     let mut body = json!({
@@ -266,6 +279,76 @@ pub async fn handle_restore(
 }
 
 // ---------------------------------------------------------------------------
+// Pure decisions: id validation + confirmation gate (unit-tested below)
+// ---------------------------------------------------------------------------
+
+/// Revision ids are UUIDs (embed backup catalog: `backup_id UUID NOT NULL
+/// DEFAULT gen_random_uuid()`; the server parses them with
+/// `Uuid::parse_str`). Reject anything else before URL construction —
+/// this is the path-traversal guard (ENS-651 review).
+pub(crate) fn validate_revision_id(revision_id: &str) -> Result<(), String> {
+    match uuid::Uuid::parse_str(revision_id) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(format!(
+            "invalid revision id {revision_id:?}: revision ids are UUIDs — \
+             copy one from `enscrive revisions list`"
+        )),
+    }
+}
+
+/// How the destructive-restore confirmation gate resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreGate {
+    /// Managed mode with a validated `--confirm-token`: the token IS the
+    /// confirmation (CLI-TIER-014) — no interactive prompt; non-TTY and
+    /// JSON/agent callers proceed.
+    TokenSatisfied,
+    /// Local-mode pre-prompt checks passed; the interactive TTY re-type
+    /// prompt is still required before the restore launches.
+    PromptRequired,
+}
+
+/// Single-evaluation confirmation gate for `enscrive restore`
+/// (CLI-TIER-013/014). Pure: all environment inputs (mode, token, output
+/// format, `--confirm`, TTY-ness) are parameters, so every branch is
+/// unit-testable and the caller runs it exactly once.
+///
+/// Order matters: the managed-token path is checked FIRST so that
+/// automation correctly supplying a token in managed mode is never
+/// refused by the interactive-gate rules (non-TTY / JSON) — ENS-651
+/// review finding 4.
+pub(crate) fn restore_gate_decision(
+    revision_id: &str,
+    deployment_mode: &str,
+    confirm_token: Option<&str>,
+    fmt: OutputFormat,
+    confirm: bool,
+    stdin_is_tty: bool,
+) -> Result<RestoreGate, String> {
+    match crate::require_managed_confirmation(deployment_mode, confirm_token, "restore") {
+        Err(FailureClass::ConfirmationRequired) => {
+            return Err(
+                "'restore' requires a confirmation token in managed mode.\nObtain one at https://enscrive.io/portal/confirmations\n(or run locally with --mode self-managed and use --confirm)"
+                    .to_string(),
+            );
+        }
+        Err(_) => unreachable!(),
+        // Validated token: confirmation satisfied — short-circuit before
+        // the interactive-gate rules.
+        Ok(Some(_token)) => return Ok(RestoreGate::TokenSatisfied),
+        // Local mode: fall through to the CLI-TIER-013 interactive gate.
+        Ok(None) => {}
+    }
+
+    if let Some(msg) =
+        crate::confirmation_preprompt_refusal(revision_id, fmt, confirm, stdin_is_tty)
+    {
+        return Err(msg);
+    }
+    Ok(RestoreGate::PromptRequired)
+}
+
+// ---------------------------------------------------------------------------
 // Pure decision: terminal restore job → CliResponse (unit-tested below)
 // ---------------------------------------------------------------------------
 
@@ -277,6 +360,11 @@ pub async fn handle_restore(
 ///   match the catalog; never claim a verified restore that wasn't);
 /// * terminal failure → failure carrying the server's shortfall message;
 /// * timeout / poll failure → failure with resume guidance.
+///
+/// Classification (ENS-651 review): a failed restore job and a poll
+/// network error are server/transport conditions (`FAIL_API_ERROR`), and
+/// an elapsed deadline is `FAIL_TIMEOUT` — none of these are CLI defects,
+/// so `FAIL_BUG` would send operators to the wrong layer.
 pub fn restore_outcome_response(
     command: &'static str,
     launch: &Value,
@@ -330,7 +418,8 @@ pub fn restore_outcome_response(
             let mut resp = CliResponse::fail(
                 command,
                 format!("restore job {job_id} {raw_status}: {error_message}"),
-                FailureClass::Bug,
+                // Server-reported job failure — not a CLI defect.
+                FailureClass::ApiError,
                 EXIT_FAILURE,
             );
             resp.data = Some(json!({
@@ -353,7 +442,8 @@ pub fn restore_outcome_response(
                      {last_status}); the restore may still be running server-side — check \
                      `enscrive jobs get --id {job_id}`"
                 ),
-                FailureClass::Bug,
+                // Client-side deadline elapsed — not a CLI defect.
+                FailureClass::Timeout,
                 EXIT_FAILURE,
             );
             resp.data = Some(json!({
@@ -372,7 +462,8 @@ pub fn restore_outcome_response(
                     "poll failed for restore job {job_id}: {error}; check \
                      `enscrive jobs get --id {job_id}`"
                 ),
-                FailureClass::Bug,
+                // Transport/server error while polling — not a CLI defect.
+                FailureClass::ApiError,
                 EXIT_FAILURE,
             );
             resp.data = Some(json!({
@@ -778,6 +869,9 @@ mod tests {
         );
         assert!(!resp.ok);
         assert_eq!(resp.exit_code, EXIT_FAILURE);
+        // ENS-651 review: a failed restore job is a server condition, not a
+        // CLI defect — FAIL_API_ERROR, never FAIL_BUG.
+        assert_eq!(resp.failure_class, Some(FailureClass::ApiError));
         let err = resp.error.as_deref().unwrap();
         assert!(err.contains("substrate=100, catalog=120, corpus=c-1"));
         assert_eq!(resp.data.expect("data")["verified"], json!(false));
@@ -797,6 +891,8 @@ mod tests {
             },
         );
         assert!(!resp.ok);
+        // ENS-651 review: an elapsed poll deadline is FAIL_TIMEOUT.
+        assert_eq!(resp.failure_class, Some(FailureClass::Timeout));
         let err = resp.error.as_deref().unwrap();
         assert!(err.contains("timed out after 30s"));
         assert!(err.contains("enscrive jobs get --id job-1"));
@@ -816,7 +912,108 @@ mod tests {
             },
         );
         assert!(!resp.ok);
+        // ENS-651 review: a transport failure while polling is FAIL_API_ERROR.
+        assert_eq!(resp.failure_class, Some(FailureClass::ApiError));
         assert!(resp.error.as_deref().unwrap().contains("connection refused"));
+    }
+
+    // ── ENS-651 review finding 3: revision-id validation (path traversal) ─
+
+    #[test]
+    fn revision_id_accepts_uuids() {
+        assert!(validate_revision_id("1b4e28ba-2fa1-11d2-883f-0016d3cca427").is_ok());
+        assert!(validate_revision_id("00000000-0000-0000-0000-000000000000").is_ok());
+    }
+
+    #[test]
+    fn revision_id_rejects_traversal_and_garbage() {
+        for bad in [
+            "../admin",
+            "../../v1/admin/restore",
+            "bk-20260610-aaaa",
+            "rev-123",
+            "1b4e28ba-2fa1-11d2-883f-0016d3cca427/extra",
+            "?cursor=x",
+            "",
+            " ",
+        ] {
+            let err = validate_revision_id(bad)
+                .expect_err(&format!("{bad:?} must be rejected"));
+            assert!(err.contains("invalid revision id"), "message: {err}");
+            assert!(err.contains("UUID"), "message must name the format: {err}");
+        }
+    }
+
+    // ── ENS-651 review findings 1 + 4: single-evaluation confirmation gate ─
+
+    #[test]
+    fn gate_token_satisfied_in_managed_mode_even_non_tty_json_no_confirm() {
+        // Finding 4: automation in managed mode that correctly supplies a
+        // validated token must NOT fall into the interactive-gate refusals —
+        // non-TTY stdin, JSON output, and missing --confirm are all fine.
+        let gate = restore_gate_decision(
+            "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+            "managed",
+            Some("ecf_tok"),
+            OutputFormat::Json,
+            false, // no --confirm
+            false, // non-TTY
+        );
+        assert_eq!(gate, Ok(RestoreGate::TokenSatisfied));
+    }
+
+    #[test]
+    fn gate_managed_mode_without_token_refused() {
+        let gate = restore_gate_decision(
+            "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+            "managed",
+            None,
+            OutputFormat::Human,
+            true,
+            true,
+        );
+        let msg = gate.expect_err("managed mode without token must refuse");
+        assert!(msg.contains("confirmation token in managed mode"));
+    }
+
+    #[test]
+    fn gate_local_mode_non_tty_refused() {
+        let gate = restore_gate_decision(
+            "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+            "local",
+            None,
+            OutputFormat::Human,
+            true,
+            false, // non-TTY
+        );
+        let msg = gate.expect_err("local non-TTY must refuse");
+        assert!(msg.contains("non-TTY"));
+    }
+
+    #[test]
+    fn gate_local_mode_missing_confirm_refused() {
+        let gate = restore_gate_decision(
+            "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+            "local",
+            None,
+            OutputFormat::Human,
+            false,
+            true,
+        );
+        assert!(gate.expect_err("missing --confirm must refuse").contains("--confirm"));
+    }
+
+    #[test]
+    fn gate_local_mode_tty_with_confirm_requires_prompt() {
+        let gate = restore_gate_decision(
+            "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+            "local",
+            None,
+            OutputFormat::Human,
+            true,
+            true,
+        );
+        assert_eq!(gate, Ok(RestoreGate::PromptRequired));
     }
 
     #[test]

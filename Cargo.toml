@@ -30,6 +30,9 @@ sha2 = "0.10"
 tar = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 toml = "0.8"
+# ENS-651: revision ids are UUIDs (embed backup catalog: backup_id UUID).
+# Parse-only — used to validate ids before URL-path construction.
+uuid = { version = "1", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

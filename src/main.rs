@@ -1805,6 +1805,8 @@ fn map_failure_class(raw: &str) -> FailureClass {
         "FAIL_LICENSE_INVALID" => FailureClass::LicenseInvalid,
         "FAIL_UNIMPLEMENTED" => FailureClass::Unimplemented,
         "FAIL_FALSE_CLAIM" => FailureClass::FalseClaim,
+        "FAIL_API_ERROR" => FailureClass::ApiError,
+        "FAIL_TIMEOUT" => FailureClass::Timeout,
         _ => FailureClass::Bug,
     }
 }
@@ -1817,7 +1819,11 @@ fn exit_code_for(class: FailureClass) -> i32 {
         FailureClass::ConfirmationRequired => output::EXIT_CONFIRMATION_REQUIRED,
         FailureClass::QuotaExceeded => output::EXIT_QUOTA_EXCEEDED,
         FailureClass::LicenseInvalid => output::EXIT_LICENSE_INVALID,
-        FailureClass::Bug | FailureClass::Unimplemented | FailureClass::FalseClaim => EXIT_FAILURE,
+        FailureClass::Bug
+        | FailureClass::Unimplemented
+        | FailureClass::FalseClaim
+        | FailureClass::ApiError
+        | FailureClass::Timeout => EXIT_FAILURE,
     }
 }
 
@@ -1915,7 +1921,16 @@ fn require_local_confirmation(
         .emit(fmt);
     }
 
-    // Interactive TTY prompt.
+    prompt_typed_confirmation(target_name, command, fmt);
+}
+
+/// Interactive half of the CLI-TIER-013 gate: prompt on stderr and require
+/// an exact re-type of `target_name`. The caller MUST have already passed
+/// [`confirmation_preprompt_refusal`] (this function assumes an interactive
+/// TTY in human mode) — split out (ENS-651 review) so handlers that run the
+/// pre-prompt checks early, before any network call, do not evaluate the
+/// gate twice. Exits the process on mismatch or read error.
+fn prompt_typed_confirmation(target_name: &str, command: &str, fmt: OutputFormat) {
     eprint!("Type {target_name:?} to confirm: ");
     let _ = std::io::Write::flush(&mut std::io::stderr());
 
