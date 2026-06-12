@@ -221,13 +221,15 @@ never constructed (lookups fail via `PlatformMissing`). Minor dead variant.
 `ApiError::Http4xx.code` is extracted but read only by tests.
 
 ### F19 — 🟡 Install URL documented three different ways
-README advertises `https://dev.enscrive.io/install` (`README.md:26`),
+*(Hostnames unified on `install.enscrive.io` in DNS refactor P2.)*
+README advertises `https://install.enscrive.io/install` (`README.md:26`),
 `install.sh` documents `https://install.enscrive.io/install.sh`
 (`install.sh:5`) and defaults the manifest to `install.enscrive.io/…`
 (`install.sh:45`), and `installer/DESIGN-DECISIONS.md` says
-`dev.enscrive.io/install`. `manifest.yml` notes both hosts alias one
-CloudFront distribution — but three documented entry points is a
-foot-gun.
+`install.enscrive.io/install`. `manifest.yml` notes the distro aliases
+(`install.enscrive.io`, `developer.enscrive.io`) front one CloudFront
+distribution — the residual `/install` vs `/install.sh` path split is
+still a minor foot-gun.
 
 ### F20 — 🟡 Release ships one platform; README claims five
 `release.yml` builds a **single** target (`x86_64-unknown-linux-gnu`,

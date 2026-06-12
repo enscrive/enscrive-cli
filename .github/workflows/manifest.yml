@@ -447,10 +447,11 @@ jobs:
           MANIFEST_FILE="/tmp/manifest-work/manifest.json"
           GENERATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           # Public install hostname. Both install.enscrive.io and
-          # dev.enscrive.io alias the same CloudFront distribution today,
-          # but install.* is the documented public surface (curl
+          # developer.enscrive.io alias the same CloudFront distribution
+          # today, but install.* is the documented public surface (curl
           # install.enscrive.io | sh) and what we want hardcoded into
           # manifests so released CLIs hit the public path forever.
+          # developer.* is reserved for manifest-fetch internals.
           BASE_URL="https://install.enscrive.io"
 
           # Derive channel label for the manifest's "channel" field.

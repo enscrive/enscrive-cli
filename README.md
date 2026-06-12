@@ -23,7 +23,7 @@ One binary. Same commands either way.
 ### One-liner (beta channel)
 
 ```sh
-curl -fsSL https://dev.enscrive.io/install | sh
+curl -fsSL https://install.enscrive.io/install | sh
 ```
 
 Installs the `enscrive` CLI binary to `~/.local/bin/enscrive`. No sudo required.
@@ -38,13 +38,13 @@ Supported platforms: `x86_64`/`aarch64` Linux (glibc and musl), `x86_64`/`arm64`
 
 ```sh
 # Override install directory (default: ~/.local/bin)
-curl -fsSL https://dev.enscrive.io/install | sh -s -- --prefix=/usr/local/bin
+curl -fsSL https://install.enscrive.io/install | sh -s -- --prefix=/usr/local/bin
 
 # Cross-machine install (override platform detection)
-curl -fsSL https://dev.enscrive.io/install | sh -s -- --target=aarch64-apple-darwin
+curl -fsSL https://install.enscrive.io/install | sh -s -- --target=aarch64-apple-darwin
 
 # Skip cosign bundle verification (debug only)
-curl -fsSL https://dev.enscrive.io/install | sh -s -- --insecure
+curl -fsSL https://install.enscrive.io/install | sh -s -- --insecure
 ```
 
 If `~/.local/bin` is not on your `PATH`, the installer will remind you how to add it.
