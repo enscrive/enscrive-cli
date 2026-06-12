@@ -65,9 +65,6 @@ pub struct SelfManagedInitOptions {
     pub anthropic_api_key: Option<String>,
     pub voyage_api_key: Option<String>,
     pub nebius_api_key: Option<String>,
-    pub bge_endpoint: Option<String>,
-    pub bge_api_key: Option<String>,
-    pub bge_model_name: Option<String>,
     pub set_default: bool,
     /// Override the release manifest URL. Defaults to the dev channel at
     /// `https://dev.enscrive.io/releases/dev/latest.json` (matching
@@ -191,10 +188,12 @@ struct LocalPorts {
     docs: u16,
 }
 
+/// ENS-448: `local_bge_management` was removed from this struct. Profiles
+/// written by older CLI versions may still contain that key; serde ignores
+/// unknown fields, so those profiles continue to load.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LocalFeatures {
     with_grafana: bool,
-    local_bge_management: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,14 +240,12 @@ struct LocalProviderCredentials {
     voyage_api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nebius_api_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bge_endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bge_api_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bge_model_name: Option<String>,
 }
 
+/// ENS-448: self-hosted BGE support was removed. Older config files may
+/// still carry `bge_endpoint` / `bge_api_key` / `bge_model_name` credentials
+/// and an `embedding.bge` flag; serde ignores unknown fields, so those
+/// configs load cleanly and the stale BGE entries are simply dropped.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct LocalEmbeddingProviders {
     #[serde(default)]
@@ -257,8 +254,6 @@ struct LocalEmbeddingProviders {
     voyage: bool,
     #[serde(default)]
     nebius: bool,
-    #[serde(default)]
-    bge: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -286,12 +281,6 @@ struct LocalProvidersSerde {
     voyage_api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nebius_api_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bge_endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bge_api_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bge_model_name: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for LocalProviders {
@@ -310,7 +299,6 @@ impl From<LocalProvidersSerde> for LocalProviders {
         let legacy_anthropic = raw.anthropic_api_key.is_some();
         let legacy_voyage = raw.voyage_api_key.is_some();
         let legacy_nebius = raw.nebius_api_key.is_some();
-        let legacy_bge = raw.bge_endpoint.is_some();
 
         let mut credentials = raw.credentials.unwrap_or_default();
         credentials.openai_api_key = credentials
@@ -325,15 +313,6 @@ impl From<LocalProvidersSerde> for LocalProviders {
         credentials.nebius_api_key = credentials
             .nebius_api_key
             .or_else(|| normalize_optional(raw.nebius_api_key));
-        credentials.bge_endpoint = credentials
-            .bge_endpoint
-            .or_else(|| normalize_optional(raw.bge_endpoint));
-        credentials.bge_api_key = credentials
-            .bge_api_key
-            .or_else(|| normalize_optional(raw.bge_api_key));
-        credentials.bge_model_name = credentials
-            .bge_model_name
-            .or_else(|| normalize_optional(raw.bge_model_name));
 
         let mut embedding = raw.embedding.unwrap_or_default();
         let mut llm_inference = raw.llm_inference.unwrap_or_default();
@@ -351,9 +330,6 @@ impl From<LocalProvidersSerde> for LocalProviders {
         if credentials.nebius_api_key.is_some() {
             embedding.nebius = embedding.nebius || legacy_nebius;
         }
-        if credentials.bge_endpoint.is_some() {
-            embedding.bge = embedding.bge || legacy_bge;
-        }
 
         Self {
             credentials,
@@ -365,7 +341,7 @@ impl From<LocalProvidersSerde> for LocalProviders {
 
 impl LocalEmbeddingProviders {
     fn any_enabled(&self) -> bool {
-        self.openai || self.voyage || self.nebius || self.bge
+        self.openai || self.voyage || self.nebius
     }
 }
 
@@ -395,30 +371,6 @@ impl LocalProviders {
     fn embedding_nebius_api_key(&self) -> Option<String> {
         if self.embedding.nebius {
             self.credentials.nebius_api_key.clone()
-        } else {
-            None
-        }
-    }
-
-    fn embedding_bge_endpoint(&self) -> Option<String> {
-        if self.embedding.bge {
-            self.credentials.bge_endpoint.clone()
-        } else {
-            None
-        }
-    }
-
-    fn embedding_bge_api_key(&self) -> Option<String> {
-        if self.embedding.bge {
-            self.credentials.bge_api_key.clone()
-        } else {
-            None
-        }
-    }
-
-    fn embedding_bge_model_name(&self) -> Option<String> {
-        if self.embedding.bge {
-            self.credentials.bge_model_name.clone()
         } else {
             None
         }
@@ -671,7 +623,6 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         ports,
         features: LocalFeatures {
             with_grafana: opts.with_grafana,
-            local_bge_management: false,
         },
         keycloak,
         bootstrap: existing_local
@@ -1576,7 +1527,7 @@ fn render_observe_env(local: &LocalProfile, postgres_password: &str, lab_secret:
 
 fn render_embed_env(local: &LocalProfile, qdrant_api_key: &str, lab_secret: &str) -> String {
     format!(
-        "QDRANT_URL=http://127.0.0.1:{qdrant_http}\nQDRANT_GRPC_URL=http://127.0.0.1:{qdrant_grpc}\nQDRANT_GRPC=127.0.0.1:{qdrant_grpc}\nQDRANT_API_KEY={qdrant_api_key}\nCOLLECTION_NAME=embeddings\nSERVER_ADDR=127.0.0.1:{embed_grpc_port}\nREST_ADDR=127.0.0.1:{embed_rest_port}\nMETRICS_PORT={embed_metrics_port}\nOPENAI_API_KEY={openai}\nNEBIUS_API_KEY={nebius}\nVOYAGE_API_KEY={voyage}\nANTHROPIC_API_KEY={anthropic}\nBGE_ENDPOINT={bge_endpoint}\nBGE_API_KEY={bge_api_key}\nBGE_MODEL_NAME={bge_model_name}\nLAB_SERVICE_SECRET={lab_secret}\nBACKUP_SCHEDULER_ENABLED=false\n",
+        "QDRANT_URL=http://127.0.0.1:{qdrant_http}\nQDRANT_GRPC_URL=http://127.0.0.1:{qdrant_grpc}\nQDRANT_GRPC=127.0.0.1:{qdrant_grpc}\nQDRANT_API_KEY={qdrant_api_key}\nCOLLECTION_NAME=embeddings\nSERVER_ADDR=127.0.0.1:{embed_grpc_port}\nREST_ADDR=127.0.0.1:{embed_rest_port}\nMETRICS_PORT={embed_metrics_port}\nOPENAI_API_KEY={openai}\nNEBIUS_API_KEY={nebius}\nVOYAGE_API_KEY={voyage}\nANTHROPIC_API_KEY={anthropic}\nLAB_SERVICE_SECRET={lab_secret}\nBACKUP_SCHEDULER_ENABLED=false\n",
         qdrant_http = local.ports.qdrant_http,
         qdrant_grpc = local.ports.qdrant_grpc,
         qdrant_api_key = qdrant_api_key,
@@ -1596,12 +1547,6 @@ fn render_embed_env(local: &LocalProfile, qdrant_api_key: &str, lab_secret: &str
             .embedding_voyage_api_key()
             .unwrap_or_default(),
         anthropic = String::new(),
-        bge_endpoint = local.providers.embedding_bge_endpoint().unwrap_or_default(),
-        bge_api_key = local.providers.embedding_bge_api_key().unwrap_or_default(),
-        bge_model_name = local
-            .providers
-            .embedding_bge_model_name()
-            .unwrap_or_default(),
         lab_secret = lab_secret,
     )
 }
@@ -1689,9 +1634,6 @@ fn provider_configured_json(providers: &LocalProviders) -> Value {
             "openai": providers.embedding.openai,
             "voyage": providers.embedding.voyage,
             "nebius": providers.embedding.nebius,
-            "bge": providers.embedding.bge,
-            "bge_endpoint": providers.embedding_bge_endpoint(),
-            "bge_model_name": providers.embedding_bge_model_name(),
         },
         "llm_inference": {
             "openai": providers.llm_inference.openai,
@@ -1706,7 +1648,7 @@ fn ensure_local_embedding_provider(local: &LocalProfile) -> Result<(), String> {
     }
 
     Err(
-        "self-managed local mode requires at least one embedding provider. Re-run `enscrive init --mode self-managed` with `--bge-endpoint`, `--openai-api-key`, `--nebius-api-key`, or `--voyage-api-key`.".to_string(),
+        "self-managed local mode requires at least one embedding provider. Re-run `enscrive init --mode self-managed` with `--openai-api-key`, `--nebius-api-key`, or `--voyage-api-key`.".to_string(),
     )
 }
 
@@ -1772,23 +1714,12 @@ fn resolve_local_provider_config(
         providers.credentials.nebius_api_key = Some(nebius_api_key);
         providers.embedding.nebius = true;
     }
-    if let Some(bge_endpoint) = normalize_optional(opts.bge_endpoint.clone()) {
-        providers.credentials.bge_endpoint = Some(bge_endpoint);
-        providers.embedding.bge = true;
-    }
-    if let Some(bge_api_key) = normalize_optional(opts.bge_api_key.clone()) {
-        providers.credentials.bge_api_key = Some(bge_api_key);
-    }
-    if let Some(bge_model_name) = normalize_optional(opts.bge_model_name.clone()) {
-        providers.credentials.bge_model_name = Some(bge_model_name);
-    }
 
     sync_local_provider_capabilities(&mut providers);
 
     let explicit_embedding_provider = opts.openai_api_key.is_some()
         || opts.voyage_api_key.is_some()
-        || opts.nebius_api_key.is_some()
-        || opts.bge_endpoint.is_some();
+        || opts.nebius_api_key.is_some();
     let explicit_llm_provider = opts.openai_api_key.is_some() || opts.anthropic_api_key.is_some();
 
     if interactive_prompts_available() {
@@ -1804,7 +1735,7 @@ fn resolve_local_provider_config(
 
     if !providers.embedding.any_enabled() {
         return Err(
-            "self-managed local mode requires at least one embedding provider. Configure BGE, OpenAI, Voyage, or Nebius before starting the local stack."
+            "self-managed local mode requires at least one embedding provider. Configure OpenAI, Voyage, or Nebius before starting the local stack."
                 .to_string(),
         );
     }
@@ -1826,36 +1757,12 @@ fn sync_local_provider_capabilities(providers: &mut LocalProviders) {
     if providers.credentials.nebius_api_key.is_none() {
         providers.embedding.nebius = false;
     }
-    if providers.credentials.bge_endpoint.is_none() {
-        providers.embedding.bge = false;
-    }
 }
 
 fn prompt_for_embedding_providers(providers: &mut LocalProviders) -> Result<(), String> {
     println!(
         "Configure embedding providers. At least one is required to run self-managed local mode."
     );
-    println!(
-        "For BGE, point Enscrive at a reachable local or LAN-hosted embeddings endpoint. Nebius Token Factory uses a Nebius API key instead of a BGE endpoint."
-    );
-
-    let bge_endpoint = prompt_line(
-        "BGE endpoint for a local or LAN-hosted service (optional)",
-        Some(""),
-    )?;
-    if !bge_endpoint.trim().is_empty() {
-        providers.credentials.bge_endpoint = Some(bge_endpoint);
-        providers.embedding.bge = true;
-
-        let bge_api_key = prompt_secret_line("BGE bearer token for secured endpoints (optional)")?;
-        providers.credentials.bge_api_key = normalize_optional(Some(bge_api_key));
-
-        let bge_model_name = prompt_line(
-            "BGE model name for single-model endpoints (optional)",
-            Some(""),
-        )?;
-        providers.credentials.bge_model_name = normalize_optional(Some(bge_model_name));
-    }
 
     let openai_api_key = prompt_secret_line("OpenAI API key for embeddings (optional)")?;
     if !openai_api_key.is_empty() {
@@ -3355,9 +3262,6 @@ mod tests {
             anthropic_api_key: Some("anth-test".to_string()),
             voyage_api_key: None,
             nebius_api_key: None,
-            bge_endpoint: None,
-            bge_api_key: None,
-            bge_model_name: None,
             set_default: true,
             manifest_url: None,
             force_refetch: false,
@@ -3400,9 +3304,6 @@ mod tests {
             anthropic_api_key: None,
             voyage_api_key: None,
             nebius_api_key: Some("neb-test".to_string()),
-            bge_endpoint: Some("http://192.168.1.10:8080".to_string()),
-            bge_api_key: None,
-            bge_model_name: Some("bge-large-en-v1.5".to_string()),
             set_default: true,
             manifest_url: None,
             force_refetch: false,
@@ -3460,10 +3361,7 @@ mod tests {
             openai_api_key: None,
             anthropic_api_key: None,
             voyage_api_key: None,
-            nebius_api_key: None,
-            bge_endpoint: Some("http://127.0.0.1:8088".to_string()),
-            bge_api_key: None,
-            bge_model_name: Some("bge-large-en-v1.5".to_string()),
+            nebius_api_key: Some("neb-first".to_string()),
             set_default: true,
             manifest_url: None,
             force_refetch: false,
@@ -3505,9 +3403,6 @@ mod tests {
             anthropic_api_key: None,
             voyage_api_key: None,
             nebius_api_key: None,
-            bge_endpoint: None,
-            bge_api_key: None,
-            bge_model_name: None,
             set_default: true,
             manifest_url: None,
             force_refetch: false,
@@ -3545,7 +3440,7 @@ mod tests {
             Some("sk-second")
         );
         assert!(local.providers.embedding.openai);
-        assert!(local.providers.embedding.bge);
+        assert!(local.providers.embedding.nebius);
         assert!(local.providers.llm_inference.openai);
     }
 
@@ -3568,9 +3463,6 @@ mod tests {
             anthropic_api_key: None,
             voyage_api_key: None,
             nebius_api_key: None,
-            bge_endpoint: None,
-            bge_api_key: None,
-            bge_model_name: None,
             set_default: false,
             manifest_url: None,
             force_refetch: false,
@@ -3699,9 +3591,6 @@ mod tests {
             anthropic_api_key: None,
             voyage_api_key: None,
             nebius_api_key: None,
-            bge_endpoint: None,
-            bge_api_key: None,
-            bge_model_name: None,
             set_default: true,
             manifest_url: Some(manifest_url.clone()),
             force_refetch: false,
@@ -3760,9 +3649,6 @@ mod tests {
             anthropic_api_key: None,
             voyage_api_key: None,
             nebius_api_key: None,
-            bge_endpoint: None,
-            bge_api_key: None,
-            bge_model_name: None,
             set_default: true,
             manifest_url: Some(manifest_url.clone()),
             force_refetch: false,
@@ -3792,9 +3678,6 @@ mod tests {
             anthropic_api_key: None,
             voyage_api_key: None,
             nebius_api_key: None,
-            bge_endpoint: None,
-            bge_api_key: None,
-            bge_model_name: None,
             set_default: true,
             manifest_url: Some(manifest_url),
             force_refetch: true,
@@ -3857,9 +3740,6 @@ mod tests {
             anthropic_api_key: None,
             voyage_api_key: None,
             nebius_api_key: None,
-            bge_endpoint: None,
-            bge_api_key: None,
-            bge_model_name: None,
             set_default: true,
             manifest_url: Some(manifest_url),
             force_refetch: false,
@@ -3952,7 +3832,6 @@ mod tests {
             },
             features: LocalFeatures {
                 with_grafana: false,
-                local_bge_management: false,
             },
             keycloak: LocalKeycloak {
                 realm: "enscrive".to_string(),
@@ -4092,7 +3971,6 @@ mod tests {
             },
             features: LocalFeatures {
                 with_grafana: false,
-                local_bge_management: false,
             },
             keycloak: LocalKeycloak {
                 realm: "enscrive-local".to_string(),
@@ -4120,10 +3998,10 @@ mod tests {
         let error = ensure_local_embedding_provider(&local).unwrap_err();
         assert!(error.contains("requires at least one embedding provider"));
 
-        let mut with_bge = local.clone();
-        with_bge.providers.credentials.bge_endpoint = Some("http://127.0.0.1:8088".to_string());
-        with_bge.providers.embedding.bge = true;
-        ensure_local_embedding_provider(&with_bge).unwrap();
+        let mut with_nebius = local.clone();
+        with_nebius.providers.credentials.nebius_api_key = Some("neb-test".to_string());
+        with_nebius.providers.embedding.nebius = true;
+        ensure_local_embedding_provider(&with_nebius).unwrap();
     }
 
     #[test]
@@ -4148,12 +4026,36 @@ mod tests {
         assert!(providers.embedding.openai);
         assert!(providers.embedding.voyage);
         assert!(providers.embedding.nebius);
-        assert!(providers.embedding.bge);
         assert!(providers.llm_inference.openai);
         assert!(providers.llm_inference.anthropic);
+    }
+
+    /// ENS-448: configs written before self-hosted BGE removal may still
+    /// contain BGE fields in both the nested and legacy-flat shapes. They
+    /// must deserialize cleanly with the stale BGE entries ignored — never
+    /// a fatal parse error.
+    #[test]
+    fn local_providers_ignore_removed_bge_fields() {
+        let providers: LocalProviders = serde_json::from_str(
+            r#"{
+                "credentials": {
+                    "nebius_api_key": "neb-test",
+                    "bge_endpoint": "http://127.0.0.1:8088",
+                    "bge_api_key": "bge-secret",
+                    "bge_model_name": "bge-large-en-v1.5"
+                },
+                "embedding": {
+                    "nebius": true,
+                    "bge": true
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(providers.embedding.nebius);
         assert_eq!(
-            providers.credentials.bge_model_name.as_deref(),
-            Some("bge-large-en-v1.5")
+            providers.credentials.nebius_api_key.as_deref(),
+            Some("neb-test")
         );
     }
 
