@@ -165,7 +165,7 @@ impl From<FetchError> for String {
 ///
 /// Accepts `http://`, `https://`, and `file://` URLs. The `file://` path is
 /// intended for offline tests and local-file harnesses — production callers
-/// pass the dev-channel URL `https://dev.enscrive.io/releases/dev/latest.json`
+/// pass the dev-channel URL `https://developer.enscrive.io/releases/dev/latest.json`
 /// today, and a `https://enscrive.io/...` URL once the prod CloudFront is
 /// provisioned.
 pub async fn fetch_manifest(manifest_url: &str) -> Result<Manifest, FetchError> {

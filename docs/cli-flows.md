@@ -82,7 +82,7 @@ mutations, synchronous neural search" stance.
 **Self-managed** (`SelfManagedInitOptions`, `local.rs:46`):
 1. Resolve the **release manifest URL** — `--manifest-url` /
    `ENSCRIVE_MANIFEST_URL`, default `DEFAULT_RELEASE_MANIFEST_URL =
-   https://dev.enscrive.io/releases/dev/latest.json` (`local.rs:84`).
+   https://developer.enscrive.io/releases/dev/latest.json` (`local.rs:82`).
    `file://` is accepted for offline harnesses.
 2. Fetch + verify each service binary (`enscrive-developer`, `-observe`,
    `-embed`, `enscrive-docs`) from the manifest via `fetch_verify`:

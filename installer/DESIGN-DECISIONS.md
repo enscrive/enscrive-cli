@@ -24,8 +24,11 @@ cross-repo manifest published by the Factory Squad (ENS-91).
 
 ## §2. Dev channel URL for the install one-liner
 
-**Decision:** The install one-liner uses `https://dev.enscrive.io/install`
-during beta.
+**Decision:** The install one-liner uses `https://install.enscrive.io/install`
+during beta. (`install.enscrive.io` is the canonical installer host; the
+former `dev.enscrive.io` alias was retired in the DNS refactor —
+`developer.enscrive.io` now fronts the same distribution for
+manifest-fetch internals.)
 
 Production CloudFront at `enscrive.io/install` is not yet provisioned
 (pending CLI-REL-010 / ENS-81 GA sub-ticket).  The dev distribution

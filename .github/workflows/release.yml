@@ -210,7 +210,7 @@ jobs:
           body: |
             ## Verification
 
-            Checksums: `curl -fsSL https://dev.enscrive.io/releases/dev/${{ github.ref_name }}/SHA256SUMS | sha256sum -c --ignore-missing`
+            Checksums: `curl -fsSL https://developer.enscrive.io/releases/dev/${{ github.ref_name }}/SHA256SUMS | sha256sum -c --ignore-missing`
 
             Signatures: `cosign verify-blob --bundle <artifact>.bundle --certificate-identity-regexp 'https://github.com/enscrive/enscrive-cli' --certificate-oidc-issuer https://token.actions.githubusercontent.com <artifact>`
           files: |
