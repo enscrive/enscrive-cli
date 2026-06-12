@@ -303,18 +303,6 @@ struct InitArgs {
     #[arg(long = "nebius-api-key")]
     nebius_api_key: Option<String>,
 
-    /// Optional local or LAN-hosted BGE embeddings endpoint
-    #[arg(long = "bge-endpoint")]
-    bge_endpoint: Option<String>,
-
-    /// Optional bearer token for a secured BGE endpoint
-    #[arg(long = "bge-api-key")]
-    bge_api_key: Option<String>,
-
-    /// Pinned BGE model name for the endpoint
-    #[arg(long = "bge-model-name")]
-    bge_model_name: Option<String>,
-
     /// Set this profile as the default CLI profile
     #[arg(long, default_value_t = false)]
     set_default: bool,
@@ -1730,7 +1718,7 @@ struct AdminRateLimitsSetArgs {
     #[arg(long, required = true)]
     tenant: String,
 
-    /// Provider key: openai | voyage | nebius | bge-local
+    /// Provider key: openai | voyage | nebius
     #[arg(long, required = true)]
     provider: String,
 
@@ -3342,9 +3330,6 @@ async fn main() {
                         anthropic_api_key: args.anthropic_api_key.clone(),
                         voyage_api_key: args.voyage_api_key.clone(),
                         nebius_api_key: args.nebius_api_key.clone(),
-                        bge_endpoint: args.bge_endpoint.clone(),
-                        bge_api_key: args.bge_api_key.clone(),
-                        bge_model_name: args.bge_model_name.clone(),
                         set_default: args.set_default,
                         manifest_url: args.manifest_url.clone(),
                         force_refetch: args.force_refetch,

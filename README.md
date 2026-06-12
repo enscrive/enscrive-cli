@@ -10,7 +10,7 @@ One binary. Same commands either way.
 
 ## What you can do
 
-- **Search + embed**: semantic search over your documents with hybrid ranking and adaptive resolution. Choose from OpenAI, Voyage, Nebius, or local BGE embedding models.
+- **Search + embed**: semantic search over your documents with hybrid ranking and adaptive resolution. Choose from OpenAI, Voyage, or Nebius (BGE) embedding models.
 - **Structured ingestion**: chunk, segment, and index long-form content with SHA256 deduplication and change detection.
 - **Voice authoring**: define and compare chunking strategies (Baseline / Story Beats / Tone Segments). Optimize voices with eval campaigns against your own datasets or HuggingFace corpora *(Professional plan)*.
 - **Operational primitives**: corpora CRUD, staging/commit, background jobs, usage metering.
@@ -112,7 +112,6 @@ enscrive status
 | `--openai-api-key` | OpenAI embeddings + LLM-reasoned chunking |
 | `--voyage-api-key` | Voyage AI embeddings |
 | `--nebius-api-key` | Nebius Token Factory embeddings (BGE) |
-| `--bge-endpoint http://host:8088` | Your own BGE inference endpoint |
 | `--anthropic-api-key` | Anthropic LLM-reasoned chunking |
 
 Bring-your-own-key for embeddings works on every plan.

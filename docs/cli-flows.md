@@ -93,8 +93,8 @@ mutations, synchronous neural search" stance.
    bypasses the SHA fast-path. `esm` is discovered on `PATH` (not fetched),
    `--esm-bin` overrides (`local.rs:53`).
 3. BYOK provider keys (`--openai-api-key`, `--voyage-api-key`,
-   `--nebius-api-key`, `--anthropic-api-key`, `--bge-endpoint`/`-api-key`/
-   `-model-name`) are recorded for the local stack.
+   `--nebius-api-key`, `--anthropic-api-key`) are recorded for the
+   local stack.
 
 > **Determinism note:** the default manifest points at the **dev** channel;
 > the source comments (`InitArgs:310`, `local.rs:72`) flag ENS-81 to
