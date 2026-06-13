@@ -281,6 +281,7 @@ jobs:
           assert 'BINARIES[enscrive-observe]'            "${BINARIES[enscrive-observe]:-}"            "enscrive-observe"
           assert 'BINARIES[enscrive-embed]'              "${BINARIES[enscrive-embed]:-}"              "enscrive-embed"
           assert 'BINARIES[esm]'                         "${BINARIES[esm]:-}"                         "esm"
+          assert 'BINARIES[eba]'                         "${BINARIES[eba]:-}"                         "eba"
           assert 'BINARIES[enscrive-metering-sentinel]'  "${BINARIES[enscrive-metering-sentinel]:-}"  "enscrive-metering-sentinel"
           assert 'BINARIES[enscrive-docs]'               "${BINARIES[enscrive-docs]:-}"               "enscrive-docs"
 
@@ -290,6 +291,7 @@ jobs:
           assert 'ARTIFACT_KIND[enscrive-observe]'            "${ARTIFACT_KIND[enscrive-observe]:-}"            "binary"
           assert 'ARTIFACT_KIND[enscrive-embed]'              "${ARTIFACT_KIND[enscrive-embed]:-}"              "binary"
           assert 'ARTIFACT_KIND[esm]'                         "${ARTIFACT_KIND[esm]:-}"                         "binary"
+          assert 'ARTIFACT_KIND[eba]'                         "${ARTIFACT_KIND[eba]:-}"                         "binary"
           assert 'ARTIFACT_KIND[enscrive-metering-sentinel]'  "${ARTIFACT_KIND[enscrive-metering-sentinel]:-}"  "binary"
           assert 'ARTIFACT_KIND[enscrive-docs]'               "${ARTIFACT_KIND[enscrive-docs]:-}"               "binary"
 
@@ -299,6 +301,7 @@ jobs:
           assert 'PLATFORMS[enscrive-observe]'            "${PLATFORMS[enscrive-observe]:-}"            "${ALL_TARGETS}"
           assert 'PLATFORMS[enscrive-embed]'              "${PLATFORMS[enscrive-embed]:-}"              "${ALL_TARGETS}"
           assert 'PLATFORMS[esm]'                         "${PLATFORMS[esm]:-}"                         "${ALL_TARGETS}"
+          assert 'PLATFORMS[eba]'                         "${PLATFORMS[eba]:-}"                         "${ALL_TARGETS}"
           assert 'PLATFORMS[enscrive-metering-sentinel]'  "${PLATFORMS[enscrive-metering-sentinel]:-}"  "${ALL_TARGETS}"
           assert 'PLATFORMS[enscrive-docs]'               "${PLATFORMS[enscrive-docs]:-}"               "${ALL_TARGETS}"
 
@@ -306,7 +309,7 @@ jobs:
           # platform_version pin (NOT the workflow input). Pattern B uses
           # the resolved docs version (operator input > channel override).
           # Both are non-empty for any valid roster/channel toml pair.
-          for key in enscrive-cli enscrive-developer enscrive-observe enscrive-embed esm enscrive-metering-sentinel enscrive-docs; do
+          for key in enscrive-cli enscrive-developer enscrive-observe enscrive-embed esm eba enscrive-metering-sentinel enscrive-docs; do
             val="${SOURCE_VERSIONS[$key]:-}"
             if [[ -z "${val}" ]]; then
               echo "FAIL SOURCE_VERSIONS[${key}] is empty"
