@@ -78,10 +78,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Map repo name → roster component key. Most are identity; esm and eba are special.
+          # Map repo name → roster component key. Most are identity; esm, eba,
+          # and the probe are special (signer repo name ≠ roster key).
           case "$REPO" in
             enscrive-secrets-manager) ROSTER_KEY="esm" ;;
             enscrive-bootstrap-authority) ROSTER_KEY="eba" ;;
+            # The telemetry probe is built/signed/published by the
+            # enscrive-control-tower-tui repo but lands in the roster under the
+            # key "enscrive-probe" (see enscrive-deploy/channels/roster.toml).
+            # Without this row the probe's release-published dispatch would hit
+            # the *) "not in the dev roster" branch and the pin would never bump.
+            enscrive-control-tower-tui) ROSTER_KEY="enscrive-probe" ;;
             enscrive-cli|enscrive-developer|enscrive-observe|enscrive-embed|enscrive-metering-sentinel|enscrive-docs)
               ROSTER_KEY="$REPO" ;;
             *)
