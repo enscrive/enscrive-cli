@@ -31,11 +31,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Fedora-only Phase 0 (ENS-536, 2026-05-27): single target on
-          # self-hosted EC2 enscrive-builder runner pool.
-          # Mac/ARM64/musl deferred to a later phase with bespoke runners.
+          # Phase 0: single Linux target built on GitHub-hosted runners.
+          # (Self-hosted EC2 enscrive-builder pool decommissioned 2026-06-19;
+          # cut over to ubuntu-latest.)
+          # Mac/ARM64/musl deferred to a later phase.
           - target: x86_64-unknown-linux-gnu
-            os: [self-hosted, enscrive-builder]
+            os: ubuntu-latest
             cross: false
     steps:
       - name: Checkout
@@ -136,7 +137,7 @@ jobs:
   aggregate:
     name: aggregate + release
     needs: build
-    runs-on: [self-hosted, enscrive-builder]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -226,7 +227,7 @@ jobs:
   sign:
     name: cosign keyless signing
     needs: [build, aggregate]
-    runs-on: [self-hosted, enscrive-builder]
+    runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for OIDC token (Fulcio certificate issuance)
       contents: write   # required to update GitHub Release body
