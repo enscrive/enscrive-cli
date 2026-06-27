@@ -3,7 +3,9 @@ name = "enscrive"
 version = "0.1.0"
 edition = "2024"
 description = "Enscrive CLI for managed and self-managed memory/search workflows"
-license = "MIT"
+# PolyForm Noncommercial 1.0.0 is not an SPDX identifier; reference the file.
+# Free for noncommercial dev/eval; production/commercial requires a paid license.
+license-file = "LICENSE"
 repository = "https://github.com/enscrive/enscrive-cli"
 homepage = "https://enscrive.io"
 documentation = "https://enscrive.io/docs"

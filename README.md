@@ -168,7 +168,7 @@ Runtime state (Docker Compose volumes, container IDs, logs) for self-hosted prof
 
 Enscrive runs on three plans:
 
-- **Free self-hosted** — run the full stack on your machine, forever, for free. You pay your own embedding-provider costs. Chunking, embedding, and neural search are the core loop you get.
+- **Free self-hosted** — run the full stack on your machine, forever, for free, **for noncommercial dev/eval/exploration** (see [License](#license)). You pay your own embedding-provider costs. Chunking, embedding, and neural search are the core loop you get. Production or commercial self-hosted use requires a commercial license.
 - **Professional** — adds first-class evals, voice-gated promotion across Dev/Staging/Prod, daily backups, structured data portability, and extended audit retention. Cloud-managed or self-hosted with a license.
 - **Enterprise** — adds dedicated tenancy, SSO enforcement, BYOK encryption-at-rest, VPC peering, compliance attestations, and an uptime SLA.
 
@@ -237,4 +237,22 @@ Issues and PRs welcome at [github.com/enscrive/enscrive-cli](https://github.com/
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Enscrive CLI is licensed under the **[PolyForm Noncommercial License 1.0.0](LICENSE)**. Licensor: Enscrive.
+
+**Free for noncommercial use only — exploratory, evaluation, and development.**
+Download it, run it, and build against Enscrive as your neural backend to learn
+and prototype, for free, forever.
+
+**Production or commercial use requires a paid license:**
+
+- **Managed** (`api.enscrive.io`): an Enscrive **subscription** with metered billing.
+- **Self-managed** (CLI / self-hosted stack): an Enscrive **commercial license**.
+- **Enterprise**: a **custom agreement**.
+
+"Commercial use" includes serving end users, generating revenue, or running a
+commercial workload — whether managed or self-managed. The CLI download/run path
+stays frictionless and requires no signup; the *license*, not a technical lock,
+bounds the free grant to noncommercial dev/eval/exploration.
+
+Terms and pricing: [enscrive.io/pricing](https://enscrive.io/pricing). See
+[LICENSE](LICENSE) for the full PolyForm Noncommercial 1.0.0 text.
