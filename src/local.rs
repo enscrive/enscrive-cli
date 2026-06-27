@@ -52,7 +52,7 @@ pub struct SelfManagedInitOptions {
     pub embed_bin: Option<String>,
     /// ENS-153: explicit override for the `esm` binary path. When unset,
     /// `enscrive init` discovers `esm` via PATH lookup (the binary is
-    /// expected to be globally installed today, built from ENSCRIBE-SECRETS).
+    /// expected to be globally installed today, built from ENSCRIVE-SECRETS).
     /// Future release-pipeline work will let init fetch it from the
     /// manifest like the other binaries.
     pub esm_bin: Option<String>,
@@ -160,7 +160,7 @@ struct LocalBinaries {
     embed: String,
     /// ENS-153: esm binary used to synthesize and access per-service ESM
     /// vaults at init/start time. Globally installed today (built from
-    /// ENSCRIBE-SECRETS); a future release-pipeline change will publish
+    /// ENSCRIVE-SECRETS); a future release-pipeline change will publish
     /// it in the manifest alongside the other binaries.
     esm: String,
     /// ENS-153 (4b): enscrive-docs sidecar binary. Fetched from the release
@@ -1990,7 +1990,7 @@ async fn synthesize_local_esm_vaults(
     if !esm_path.is_file() {
         eprintln!(
             "  [esm] note: synthesis skipped — '{esm_binary}' is not an executable file. \
-             Vaults will not be populated. Install esm from ENSCRIBE-SECRETS or pass --esm-bin <path>."
+             Vaults will not be populated. Install esm from ENSCRIVE-SECRETS or pass --esm-bin <path>."
         );
         return Ok(());
     }
@@ -3881,7 +3881,7 @@ mod tests {
         std::fs::create_dir_all(site_root.join("pkg")).unwrap();
         std::fs::write(
             &env_path,
-            "HMAC_PEPPER=test-pepper\nAES_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nLOCAL_BOOTSTRAP_SECRET=test-secret\nLEPTOS_OUTPUT_NAME=enscribe-developer\nLEPTOS_SITE_ROOT=/stale/site\nLEPTOS_SITE_PKG_DIR=assets\n",
+            "HMAC_PEPPER=test-pepper\nAES_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\nLOCAL_BOOTSTRAP_SECRET=test-secret\nLEPTOS_OUTPUT_NAME=stale-developer\nLEPTOS_SITE_ROOT=/stale/site\nLEPTOS_SITE_PKG_DIR=assets\n",
         )
         .unwrap();
 
