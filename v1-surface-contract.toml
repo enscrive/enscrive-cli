@@ -836,6 +836,26 @@ status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
+# ── Wallet (ENS-476 / ENS-750) ──────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/wallet/balance"
+cli_command = "wallet balance"
+status = "implemented"
+note = "API-key mirror of the portal wallet balance read; caller's own tenant only"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/wallet/debits"
+cli_command = "wallet debits"
+status = "implemented"
+note = "Debit ledger history (debit_request/debit_disk_rent); paginates via next_page_token"
+deployment_tier = "any-mode"
+required_plan = "free"
+
 # ── Admin: Export ───────────────────────────────────────
 
 [[endpoint]]
