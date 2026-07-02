@@ -391,6 +391,44 @@ impl EnscriveClient {
         self.send_json(Method::POST, path, Some(body)).await
     }
 
+    /// POST with URL query parameters (not a JSON body). Used by endpoints
+    /// whose handler extracts `Query<..>` on a POST route (e.g.
+    /// `POST /v1/admin/metering/backfill`) rather than `Json<..>`.
+    pub async fn post_json_with_query(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> Result<Value, ApiError> {
+        let url = format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        );
+
+        let response = self
+            .with_auth_headers(self.http.request(Method::POST, &url))
+            .query(query)
+            .send()
+            .await
+            .map_err(map_reqwest_err)?;
+
+        let status = response.status().as_u16();
+        let body_text = response.text().await.map_err(map_reqwest_err)?;
+
+        if !(200..300).contains(&(status as u32)) {
+            return Err(classify_error_response(status, &body_text));
+        }
+
+        if body_text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+
+        serde_json::from_str(&body_text).map_err(|_| ApiError::InvalidResponse {
+            status,
+            body: body_text,
+        })
+    }
+
     pub async fn post_text(&self, path: &str, body: Value, accept: &str) -> Result<String, String> {
         let url = format!(
             "{}/{}",
