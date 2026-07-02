@@ -170,6 +170,12 @@ enum Commands {
     /// Usage and metering commands
     Usage(UsageArgs),
 
+    /// Wallet balance + debit history commands (ENS-476 / ENS-750)
+    Wallet {
+        #[command(subcommand)]
+        sub: WalletSubcommand,
+    },
+
     /// Background job management commands
     Jobs {
         #[command(subcommand)]
@@ -1527,6 +1533,33 @@ struct UpdateEvalDatasetArgs {
     queries_file: Option<String>,
 }
 
+/// Wallet subcommands (ENS-476 / ENS-750) — mirrors of the portal wallet
+/// read surface onto the API-key `/v1` surface.
+#[derive(Subcommand)]
+enum WalletSubcommand {
+    /// Show current wallet balance (GET /v1/wallet/balance)
+    Balance,
+
+    /// List debit transaction history (GET /v1/wallet/debits)
+    Debits(WalletDebitsArgs),
+}
+
+#[derive(Args)]
+struct WalletDebitsArgs {
+    /// Inclusive lower bound on created_at (RFC3339). Omit for all-time.
+    #[arg(long)]
+    since: Option<String>,
+
+    /// Pagination cursor — pass back the previous page's `next_page_token`
+    /// verbatim. Opaque; do not construct or parse it client-side.
+    #[arg(long)]
+    before: Option<String>,
+
+    /// Page size. Server default 50, clamped to 1..=200.
+    #[arg(long)]
+    limit: Option<i64>,
+}
+
 #[derive(Args)]
 struct UsageArgs {
     /// RFC3339/ISO8601 start timestamp
@@ -2691,6 +2724,20 @@ fn build_usage_query(args: &UsageArgs) -> Vec<(&'static str, String)> {
     query
 }
 
+fn build_wallet_debits_query(args: &WalletDebitsArgs) -> Vec<(&'static str, String)> {
+    let mut query: Vec<(&'static str, String)> = vec![];
+    if let Some(value) = &args.since {
+        query.push(("since", value.clone()));
+    }
+    if let Some(value) = &args.before {
+        query.push(("before", value.clone()));
+    }
+    if let Some(value) = args.limit {
+        query.push(("limit", value.to_string()));
+    }
+    query
+}
+
 fn build_backup_list_query(args: &BackupListArgs) -> Vec<(&'static str, String)> {
     let mut query = Vec::new();
     if let Some(limit) = args.limit {
@@ -3118,6 +3165,10 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
             ExportSubcommand::TokenUsage(_) => "export token-usage",
         },
         Commands::Usage(_) => "usage",
+        Commands::Wallet { sub } => match sub {
+            WalletSubcommand::Balance => "wallet balance",
+            WalletSubcommand::Debits(_) => "wallet debits",
+        },
         Commands::Jobs { sub } => match sub {
             JobsSubcommand::List(_) => "jobs list",
             JobsSubcommand::Get(_) => "jobs get",
@@ -4765,6 +4816,25 @@ async fn main() {
             match client.get_json_with_query("/v1/usage", &query).await {
                 Ok(data) => CliResponse::success("usage", data).emit(fmt),
                 Err(e) => request_failure("usage", e).emit(fmt),
+            }
+        }
+        Commands::Wallet { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            match sub {
+                WalletSubcommand::Balance => {
+                    match client.get_json("/v1/wallet/balance").await {
+                        Ok(data) => CliResponse::success("wallet balance", data).emit(fmt),
+                        Err(e) => request_failure("wallet balance", e).emit(fmt),
+                    }
+                }
+                WalletSubcommand::Debits(args) => {
+                    let query = build_wallet_debits_query(args);
+                    match client.get_json_with_query("/v1/wallet/debits", &query).await {
+                        Ok(data) => CliResponse::success("wallet debits", data).emit(fmt),
+                        Err(e) => request_failure("wallet debits", e).emit(fmt),
+                    }
+                }
             }
         }
         Commands::Jobs { sub } => {
