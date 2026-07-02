@@ -90,6 +90,17 @@ enum Commands {
     /// Search corpora through /v1/search
     Search(SearchArgs),
 
+    /// Enscrive Agents — open-ended reasoning through /v1/complete
+    /// (managed reasoning; proxies the tenant's BYOK or platform-managed
+    /// provider key, budget-gated and metered).
+    Complete(CompleteArgs),
+
+    /// Rate card commands (public, no auth required)
+    Ratecard {
+        #[command(subcommand)]
+        sub: RatecardSubcommand,
+    },
+
     /// Embedding commands
     Embeddings {
         #[command(subcommand)]
@@ -395,6 +406,77 @@ struct SearchArgs {
     /// Target named vector resolution (e.g. "dense_256", "dense_512")
     #[arg(long)]
     resolution: Option<String>,
+}
+
+/// Arguments for `enscrive complete` (ENS-751, POST /v1/complete).
+///
+/// Single-shot mode (`--prompt`) and agentic tool-use mode (`--messages`)
+/// are mutually exclusive — exactly one is required, matching the server's
+/// `prompt` XOR `messages` contract. `--tools` is only meaningful alongside
+/// `--messages`.
+#[derive(Args)]
+struct CompleteArgs {
+    /// Reasoning provider: anthropic | openai | openrouter | custom | bedrock | vertex
+    #[arg(long)]
+    provider: String,
+
+    /// Model identifier as the provider names it (e.g. "claude-opus-4-8").
+    /// Required — there is no platform default.
+    #[arg(long)]
+    model: String,
+
+    /// Single-shot prompt text. Mutually exclusive with --messages.
+    #[arg(long, conflicts_with = "messages", required_unless_present = "messages")]
+    prompt: Option<String>,
+
+    /// Path to a JSON file containing the agentic transcript: an array of
+    /// `{"role": "user"|"assistant", "content": [ ...blocks ]}` messages.
+    /// Mutually exclusive with --prompt.
+    #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
+    messages: Option<String>,
+
+    /// Path to a JSON file containing the tool catalogue: an array of
+    /// `{"name", "description", "input_schema"}` objects. Only valid with
+    /// --messages (agentic mode).
+    ///
+    /// NOTE: enforced in `build_complete_body`, not via clap's `requires` —
+    /// clap's `requires` does not fire here because `messages` is itself
+    /// only conditionally required (`required_unless_present = "prompt"`),
+    /// which defeats the `requires` check on a dependent arg.
+    #[arg(long)]
+    tools: Option<String>,
+
+    /// Optional system prompt / instructions.
+    #[arg(long)]
+    system: Option<String>,
+
+    /// Hard ceiling on generated tokens. Defaults to 1024 server-side if unset.
+    #[arg(long)]
+    max_tokens: Option<u32>,
+
+    /// Sampling temperature in [0.0, 1.0]. Provider default applies if unset.
+    #[arg(long)]
+    temperature: Option<f32>,
+
+    /// Nucleus sampling in [0.0, 1.0]. Provider default applies if unset.
+    #[arg(long)]
+    top_p: Option<f32>,
+}
+
+#[derive(Subcommand)]
+enum RatecardSubcommand {
+    /// Show the active (or historical, via --at) rate card. Public — no
+    /// API key required.
+    Show(RatecardShowArgs),
+}
+
+/// Arguments for `enscrive ratecard show` (ENS-751, GET /v1/ratecard).
+#[derive(Args)]
+struct RatecardShowArgs {
+    /// RFC3339 timestamp; look up the rate card active at this instant
+    /// instead of the currently active one.
+    #[arg(long)]
+    at: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -2592,6 +2674,58 @@ fn parse_metadata_filters(entries: &[String]) -> Result<Map<String, Value>, Stri
     Ok(metadata)
 }
 
+/// Read a JSON file for `enscrive complete` (`--messages` / `--tools`) and
+/// parse it as a `serde_json::Value`. The server validates array shape /
+/// content — this only guarantees the file is readable and is valid JSON.
+fn read_complete_json_file(path: &str, label: &str) -> Result<Value, String> {
+    let raw =
+        fs::read_to_string(path).map_err(|e| format!("read {label} file '{path}': {e}"))?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse {label} JSON in '{path}': {e}"))
+}
+
+/// Build the `POST /v1/complete` request body (ENS-751).
+///
+/// `--prompt` / `--messages` are enforced mutually-exclusive-and-required by
+/// clap (see `CompleteArgs`); this only needs to load the JSON file contents
+/// for `--messages` / `--tools` and assemble the wire body. Fields the caller
+/// omitted serialize as JSON `null`, which the server's `#[serde(default)]`
+/// `Option<T>` fields treat identically to an absent field.
+fn build_complete_body(args: &CompleteArgs) -> Result<Value, String> {
+    // clap's `requires = "messages"` cannot express "--tools only valid with
+    // --messages" here because `messages` is itself only conditionally
+    // required (required_unless_present = "prompt"), so enforce it here
+    // instead of relying on clap — same rule the server applies (mod.rs:
+    // "`tools` is only valid with `messages` (agentic mode)").
+    if args.tools.is_some() && args.messages.is_none() {
+        return Err("--tools is only valid with --messages (agentic mode)".to_string());
+    }
+
+    let messages = args
+        .messages
+        .as_deref()
+        .map(|path| read_complete_json_file(path, "messages"))
+        .transpose()?;
+    let tools = args
+        .tools
+        .as_deref()
+        .map(|path| read_complete_json_file(path, "tools"))
+        .transpose()?;
+
+    Ok(json!({
+        "prompt": args.prompt,
+        "provider": args.provider,
+        "model": args.model,
+        "system": args.system,
+        "messages": messages,
+        "tools": tools,
+        "params": {
+            "max_tokens": args.max_tokens,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+        },
+    }))
+}
+
 fn build_search_body(args: &SearchArgs) -> Result<Value, String> {
     let metadata = parse_metadata_filters(&args.filter_metadata)?;
     let filters = if args.filter_document_id.is_some()
@@ -3019,6 +3153,10 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
     use evals2::{Datasets2Subcommand, EvalDefsSubcommand, EvalRunsSubcommand, VoiceDiff2Subcommand};
     let key: &str = match cmd {
         Commands::Search(_) => "search",
+        Commands::Complete(_) => "complete",
+        Commands::Ratecard { sub } => match sub {
+            RatecardSubcommand::Show(_) => "ratecard show",
+        },
         Commands::Embeddings { sub } => match sub {
             EmbeddingsSubcommand::Query(_) => "embeddings query",
         },
@@ -3245,6 +3383,9 @@ async fn main() {
         | Commands::Stop(_)
         | Commands::Status(_) => None,
         Commands::Health => None,
+        // ENS-751: GET /v1/ratecard is public (no API-key auth) — resolved
+        // directly inside the handler, same pattern as Health.
+        Commands::Ratecard { .. } => None,
         // CLI-TIER-007: license activation is a local filesystem write;
         // profile mode is consulted directly inside the handler so we can
         // emit FAIL_UNSUPPORTED when it's called against a managed profile.
@@ -3494,6 +3635,45 @@ async fn main() {
                     Err(e) => request_failure("search", e).emit(fmt),
                 },
                 Err(e) => CliResponse::fail("search", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt),
+            }
+        }
+        Commands::Complete(args) => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            match build_complete_body(args) {
+                Ok(body) => match client.post_json("/v1/complete", body).await {
+                    Ok(data) => CliResponse::success("complete", data).emit(fmt),
+                    Err(e) => request_failure("complete", e).emit(fmt),
+                },
+                Err(e) => CliResponse::fail("complete", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt),
+            }
+        }
+        Commands::Ratecard { sub } => {
+            // ENS-751: GET /v1/ratecard is public (no API-key auth) — resolve
+            // the endpoint directly rather than through api_context, same
+            // pattern as Commands::Health above. Any --api-key the caller
+            // passes is still forwarded (harmless; the route bypasses the
+            // auth middleware entirely) so the same profile/env config works
+            // uniformly across commands.
+            let endpoint = local::resolve_api_context(
+                cli.profile.as_deref(),
+                cli.endpoint.clone(),
+                cli.api_key.clone(),
+            )
+            .map(|ctx| ctx.endpoint)
+            .unwrap_or_else(|_| "http://localhost:3000".to_string());
+            let client = make_client(endpoint, cli.api_key.clone().unwrap_or_default());
+            match sub {
+                RatecardSubcommand::Show(args) => {
+                    let mut query: Vec<(&str, String)> = vec![];
+                    if let Some(at) = &args.at {
+                        query.push(("at", at.clone()));
+                    }
+                    match client.get_json_with_query("/v1/ratecard", &query).await {
+                        Ok(data) => CliResponse::success("ratecard show", data).emit(fmt),
+                        Err(e) => request_failure("ratecard show", e).emit(fmt),
+                    }
+                }
             }
         }
         Commands::Embeddings { sub } => {
@@ -5209,6 +5389,159 @@ mod tests {
     }
 
     #[test]
+    fn parse_complete_command_single_shot() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "--api-key",
+            "test-key",
+            "complete",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-opus-4-8",
+            "--prompt",
+            "hello world",
+        ]);
+        match args.command {
+            Commands::Complete(CompleteArgs {
+                provider,
+                model,
+                prompt,
+                messages,
+                tools,
+                ..
+            }) => {
+                assert_eq!(provider, "anthropic");
+                assert_eq!(model, "claude-opus-4-8");
+                assert_eq!(prompt.as_deref(), Some("hello world"));
+                assert!(messages.is_none());
+                assert!(tools.is_none());
+            }
+            _ => panic!("expected Complete"),
+        }
+    }
+
+    #[test]
+    fn parse_complete_command_agentic_messages_file() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "--api-key",
+            "test-key",
+            "complete",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-opus-4-8",
+            "--messages",
+            "/tmp/transcript.json",
+            "--tools",
+            "/tmp/tools.json",
+        ]);
+        match args.command {
+            Commands::Complete(CompleteArgs {
+                prompt,
+                messages,
+                tools,
+                ..
+            }) => {
+                assert!(prompt.is_none());
+                assert_eq!(messages.as_deref(), Some("/tmp/transcript.json"));
+                assert_eq!(tools.as_deref(), Some("/tmp/tools.json"));
+            }
+            _ => panic!("expected Complete"),
+        }
+    }
+
+    #[test]
+    fn complete_command_rejects_prompt_and_messages_together() {
+        let result = Cli::try_parse_from([
+            "enscrive",
+            "--api-key",
+            "test-key",
+            "complete",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-opus-4-8",
+            "--prompt",
+            "hi",
+            "--messages",
+            "/tmp/transcript.json",
+        ]);
+        assert!(
+            result.is_err(),
+            "expected clap to reject --prompt and --messages together"
+        );
+    }
+
+    #[test]
+    fn complete_command_requires_prompt_or_messages() {
+        let result = Cli::try_parse_from([
+            "enscrive",
+            "--api-key",
+            "test-key",
+            "complete",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-opus-4-8",
+        ]);
+        assert!(
+            result.is_err(),
+            "expected clap to require one of --prompt or --messages"
+        );
+    }
+
+    #[test]
+    fn complete_command_parses_tools_without_messages_clap_only() {
+        // clap itself allows this combination through (see build_complete_body's
+        // doc comment: `requires = "messages"` doesn't fire when `messages` is
+        // only conditionally required). The rejection happens one layer up, in
+        // `build_complete_body` — see `build_complete_body_rejects_tools_without_messages`.
+        let result = Cli::try_parse_from([
+            "enscrive",
+            "--api-key",
+            "test-key",
+            "complete",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-opus-4-8",
+            "--prompt",
+            "hi",
+            "--tools",
+            "/tmp/tools.json",
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_ratecard_show_command() {
+        let args = Cli::parse_from(["enscrive", "ratecard", "show", "--at", "2026-06-01T00:00:00Z"]);
+        match args.command {
+            Commands::Ratecard { sub } => match sub {
+                RatecardSubcommand::Show(RatecardShowArgs { at }) => {
+                    assert_eq!(at.as_deref(), Some("2026-06-01T00:00:00Z"));
+                }
+            },
+            _ => panic!("expected Ratecard"),
+        }
+    }
+
+    #[test]
+    fn parse_ratecard_show_command_without_at() {
+        let args = Cli::parse_from(["enscrive", "ratecard", "show"]);
+        match args.command {
+            Commands::Ratecard { sub } => match sub {
+                RatecardSubcommand::Show(RatecardShowArgs { at }) => {
+                    assert!(at.is_none());
+                }
+            },
+            _ => panic!("expected Ratecard"),
+        }
+    }
+
+    #[test]
     fn parse_logs_stream_command() {
         let args = Cli::parse_from([
             "enscrive",
@@ -5733,6 +6066,112 @@ mod tests {
         assert_eq!(body["filters"]["strategy"], "baseline");
         assert_eq!(body["filters"]["metadata"]["tag"], "alpha");
         assert_eq!(body["filters"]["metadata"]["color"], "red");
+    }
+
+    fn complete_args_base() -> CompleteArgs {
+        CompleteArgs {
+            provider: "anthropic".to_string(),
+            model: "claude-opus-4-8".to_string(),
+            prompt: None,
+            messages: None,
+            tools: None,
+            system: None,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+        }
+    }
+
+    #[test]
+    fn build_complete_body_single_shot_prompt() {
+        let body = build_complete_body(&CompleteArgs {
+            prompt: Some("hello world".to_string()),
+            system: Some("be terse".to_string()),
+            max_tokens: Some(256),
+            temperature: Some(0.5),
+            ..complete_args_base()
+        })
+        .unwrap();
+
+        assert_eq!(body["provider"], "anthropic");
+        assert_eq!(body["model"], "claude-opus-4-8");
+        assert_eq!(body["prompt"], "hello world");
+        assert_eq!(body["system"], "be terse");
+        assert!(body["messages"].is_null());
+        assert!(body["tools"].is_null());
+        assert_eq!(body["params"]["max_tokens"], 256);
+        assert_eq!(body["params"]["temperature"], 0.5);
+        assert!(body["params"]["top_p"].is_null());
+    }
+
+    #[test]
+    fn build_complete_body_agentic_reads_messages_and_tools_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let messages_path = tmp.path().join("messages.json");
+        let tools_path = tmp.path().join("tools.json");
+        std::fs::write(
+            &messages_path,
+            r#"[{"role":"user","content":[{"type":"text","text":"what's the weather?"}]}]"#,
+        )
+        .expect("write messages file");
+        std::fs::write(
+            &tools_path,
+            r#"[{"name":"get_weather","input_schema":{"type":"object","properties":{}}}]"#,
+        )
+        .expect("write tools file");
+
+        let body = build_complete_body(&CompleteArgs {
+            messages: Some(messages_path.display().to_string()),
+            tools: Some(tools_path.display().to_string()),
+            ..complete_args_base()
+        })
+        .unwrap();
+
+        assert!(body["prompt"].is_null());
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"][0]["text"], "what's the weather?");
+        assert_eq!(body["tools"][0]["name"], "get_weather");
+    }
+
+    #[test]
+    fn build_complete_body_rejects_tools_without_messages() {
+        let err = build_complete_body(&CompleteArgs {
+            prompt: Some("hi".to_string()),
+            tools: Some("/tmp/tools.json".to_string()),
+            ..complete_args_base()
+        })
+        .unwrap_err();
+
+        assert!(
+            err.contains("--tools is only valid with --messages"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn build_complete_body_missing_messages_file_is_a_clean_error() {
+        let err = build_complete_body(&CompleteArgs {
+            messages: Some("/nonexistent/path/messages.json".to_string()),
+            ..complete_args_base()
+        })
+        .unwrap_err();
+
+        assert!(err.contains("messages"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn build_complete_body_invalid_json_in_messages_file_is_a_clean_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let messages_path = tmp.path().join("messages.json");
+        std::fs::write(&messages_path, "not json").expect("write messages file");
+
+        let err = build_complete_body(&CompleteArgs {
+            messages: Some(messages_path.display().to_string()),
+            ..complete_args_base()
+        })
+        .unwrap_err();
+
+        assert!(err.contains("parse messages JSON"), "unexpected error: {err}");
     }
 
     #[test]
