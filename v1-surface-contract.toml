@@ -211,18 +211,18 @@ required_plan = "free"
 [[endpoint]]
 method = "POST"
 path = "/v1/preview-chunking"
-cli_command = "segment preview-chunking"
-status = "deferred"
-reason = "Chunking preview is a developer-portal convenience; low CLI priority until voice-builder workflow lands"
+cli_command = "preview-chunking"
+status = "implemented"
+note = "ENS-752 — local-only preview, no ingest/storage/metering"
 deployment_tier = "any-mode"
 required_plan = "free"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/preview-with-template"
-cli_command = "segment preview-with-template"
-status = "deferred"
-reason = "Template-driven preview is a developer-portal convenience; low CLI priority until segmentation-template workflow lands"
+cli_command = "preview-with-template"
+status = "implemented"
+note = "ENS-752"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
@@ -468,54 +468,54 @@ required_plan = "professional"
 [[endpoint]]
 method = "GET"
 path = "/v1/segmentation-templates"
-cli_command = "templates list"
-status = "deferred"
-reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+cli_command = "segmentation-templates list"
+status = "implemented"
+note = "ENS-752"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/segmentation-templates"
-cli_command = "templates create"
-status = "deferred"
-reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+cli_command = "segmentation-templates create"
+status = "implemented"
+note = "ENS-752"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
 [[endpoint]]
 method = "GET"
 path = "/v1/segmentation-templates/{id}"
-cli_command = "templates get"
-status = "deferred"
-reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+cli_command = "segmentation-templates get"
+status = "implemented"
+note = "ENS-752"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
 [[endpoint]]
 method = "PUT"
 path = "/v1/segmentation-templates/{id}"
-cli_command = "templates update"
-status = "deferred"
-reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+cli_command = "segmentation-templates update"
+status = "implemented"
+note = "ENS-752"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
 [[endpoint]]
 method = "DELETE"
 path = "/v1/segmentation-templates/{id}"
-cli_command = "templates delete"
-status = "deferred"
-reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+cli_command = "segmentation-templates delete"
+status = "implemented"
+note = "ENS-752"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
 [[endpoint]]
 method = "POST"
 path = "/v1/segmentation-templates/{id}/clone"
-cli_command = "templates clone"
-status = "deferred"
-reason = "Segmentation templates are a new API surface; CLI commands deferred until template authoring workflow is validated"
+cli_command = "segmentation-templates clone"
+status = "implemented"
+note = "ENS-752"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
@@ -957,4 +957,122 @@ cli_command = "admin rate-limits set"
 status = "implemented"
 note = "Cross-tenant rate-limit override — managed-mode operator tooling only"
 deployment_tier = "managed-only"
+required_plan = "enterprise"
+
+# ── Admin: Operator Ops (ENS-752) ──────────────────────
+#
+# Every endpoint below requires an Admin-capability API key (operator /
+# platform-admin scoped, not a normal tenant key). These are not
+# customer-plan-gated features; `required_plan = "enterprise"` here just
+# reflects "internal operator surface", and the CLI does not enforce a
+# client-side plan/deployment-mode preflight gate for this group (see
+# `cmd_key_for_command`'s admin skip-list in src/main.rs) — the server's
+# own Admin-capability check is the real gate.
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/wallets/credit"
+cli_command = "admin wallet credit"
+status = "implemented"
+note = "ENS-752 — operator wallet top-up; writes transaction_type='admin_seed'"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/audit"
+cli_command = "admin audit list"
+status = "implemented"
+note = "ENS-752 / ENS-250 / WS-16 — durable admin_audit_log read surface"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/incidents"
+cli_command = "admin incidents list"
+status = "implemented"
+note = "ENS-752 / ENS-298 Phase 3"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/incidents/{id}"
+cli_command = "admin incidents get"
+status = "implemented"
+note = "ENS-752 / ENS-298 Phase 3"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/migrations"
+cli_command = "admin migrations status"
+status = "implemented"
+note = "ENS-752 / ENS-229 — applied vs pending vs failed sqlx migrations"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/telemetry/stats"
+cli_command = "admin telemetry stats"
+status = "implemented"
+note = "ENS-752 — aggregate-only wallet + incident + six-sigma stack counters"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/metering/backfill"
+cli_command = "admin metering backfill"
+status = "implemented"
+note = "ENS-752 / Pillar 2 M3.2-5 — one-shot Loki -> metering_events backfill; infra-internal, kept managed-only"
+deployment_tier = "managed-only"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/tenants"
+cli_command = "admin tenants create"
+status = "implemented"
+note = "ENS-752 — idempotent on tenant name (migration 056 partial unique index)"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/tenants/erase"
+cli_command = "admin tenants erase"
+status = "implemented"
+note = "ENS-752 / ENS-652 / ENS-659 — DESTRUCTIVE + IRREVERSIBLE tenant backup erasure (GDPR Article 17); confirm-gated client- and server-side"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/api-keys"
+cli_command = "admin api-keys create"
+status = "implemented"
+note = "ENS-752 — cross-tenant API-key minting"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/catalog-import"
+cli_command = "admin catalog-import"
+status = "implemented"
+note = "ENS-752 / ENS-648 — confirm-gated catalog restore from a backup artifact; checksum-verified before any write"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/corpora/{id}/reconcile"
+cli_command = "admin corpora reconcile"
+status = "implemented"
+note = "ENS-752 / ENS-660 — always-async catalog/substrate repair"
+deployment_tier = "any-mode"
 required_plan = "enterprise"
