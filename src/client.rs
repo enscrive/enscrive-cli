@@ -32,10 +32,17 @@ pub enum ApiError {
     /// 4xx response whose JSON body did NOT carry a `failure_class`.
     Http4xx {
         status: u16,
-        /// Convenience extraction of a `code` field if present.
+        /// Convenience extraction of a `code` field if present. Not read
+        /// today (Display only prints `message`) but kept for callers that
+        /// match on the variant directly; reserved for richer error
+        /// reporting.
+        #[allow(dead_code)]
         code: Option<String>,
         /// Convenience extraction of a `message` or `error` field.
         message: String,
+        /// Raw JSON body. Not read today; reserved for richer error
+        /// reporting alongside `code`.
+        #[allow(dead_code)]
         body: Value,
     },
 
