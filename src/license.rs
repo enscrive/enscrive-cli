@@ -16,10 +16,10 @@ use std::path::PathBuf;
 ///
 /// Returns a descriptive error if HOME is unset and no override is provided.
 pub fn resolve_license_path() -> Result<PathBuf, String> {
-    if let Ok(p) = std::env::var("ENSCRIVE_LICENSE_PATH") {
-        if !p.is_empty() {
-            return Ok(PathBuf::from(p));
-        }
+    if let Ok(p) = std::env::var("ENSCRIVE_LICENSE_PATH")
+        && !p.is_empty()
+    {
+        return Ok(PathBuf::from(p));
     }
     let home = std::env::var("HOME").map_err(|_| {
         "cannot resolve license path: HOME is unset; set ENSCRIVE_LICENSE_PATH to override"

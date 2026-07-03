@@ -108,10 +108,10 @@ pub async fn handle_revisions(
             let query = build_revisions_list_query(args);
             match client.get_json_with_query("/v1/backups", &query).await {
                 Ok(data) => {
-                    if matches!(fmt, OutputFormat::Human) {
-                        if let Some(table) = render_revisions_table(&data) {
-                            println!("{table}");
-                        }
+                    if matches!(fmt, OutputFormat::Human)
+                        && let Some(table) = render_revisions_table(&data)
+                    {
+                        println!("{table}");
                     }
                     CliResponse::success("revisions list", data).emit(fmt)
                 }
@@ -128,10 +128,10 @@ pub async fn handle_revisions(
             let path = format!("/v1/backups/{}", args.revision_id);
             match client.get_json(&path).await {
                 Ok(data) => {
-                    if matches!(fmt, OutputFormat::Human) {
-                        if let Some(detail) = render_revision_detail(&data) {
-                            println!("{detail}");
-                        }
+                    if matches!(fmt, OutputFormat::Human)
+                        && let Some(detail) = render_revision_detail(&data)
+                    {
+                        println!("{detail}");
                     }
                     CliResponse::success("revisions show", data).emit(fmt)
                 }
@@ -603,24 +603,24 @@ pub(crate) fn render_revision_detail(data: &Value) -> Option<String> {
         out.push_str(&format!("Expires:    {expires}\n"));
     }
 
-    if let Some(collections) = data.get("collections").and_then(Value::as_object) {
-        if !collections.is_empty() {
-            out.push_str("Checksums:\n");
-            let mut names: Vec<&String> = collections.keys().collect();
-            names.sort();
-            for name in names {
-                let info = &collections[name];
-                let points = info
-                    .get("point_count")
-                    .and_then(Value::as_u64)
-                    .map(format_count)
-                    .unwrap_or_else(|| "-".to_string());
-                let checksum = info
-                    .get("checksum")
-                    .and_then(Value::as_str)
-                    .unwrap_or("-");
-                out.push_str(&format!("  {name}  points={points}  checksum={checksum}\n"));
-            }
+    if let Some(collections) = data.get("collections").and_then(Value::as_object)
+        && !collections.is_empty()
+    {
+        out.push_str("Checksums:\n");
+        let mut names: Vec<&String> = collections.keys().collect();
+        names.sort();
+        for name in names {
+            let info = &collections[name];
+            let points = info
+                .get("point_count")
+                .and_then(Value::as_u64)
+                .map(format_count)
+                .unwrap_or_else(|| "-".to_string());
+            let checksum = info
+                .get("checksum")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            out.push_str(&format!("  {name}  points={points}  checksum={checksum}\n"));
         }
     }
     Some(out.trim_end().to_string())
