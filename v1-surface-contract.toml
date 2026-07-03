@@ -1007,3 +1007,25 @@ status = "implemented"
 note = "ENS-486 — current or a specific rate card version; requires Admin-capability API key"
 deployment_tier = "managed-only"
 required_plan = "enterprise"
+
+# ── Enscrive Agents: Complete (managed reasoning) ──────
+
+[[endpoint]]
+method = "POST"
+path = "/v1/complete"
+cli_command = "complete"
+status = "implemented"
+note = "ENS-751 — single-shot (--prompt) and agentic tool-use (--messages/--tools) reasoning; BYOK or platform-managed fallback, budget-gated + metered"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+# ── Rate Card ───────────────────────────────────────────
+
+[[endpoint]]
+method = "GET"
+path = "/v1/ratecard"
+cli_command = "ratecard show"
+status = "implemented"
+note = "ENS-751 — public, no API-key auth; supports historical lookup via ?at=<RFC3339>"
+deployment_tier = "any-mode"
+required_plan = "free"
