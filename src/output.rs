@@ -113,6 +113,10 @@ impl CliResponse {
         }
     }
 
+    /// Only exercised by tests today (call sites build `FailureClass::Unsupported`
+    /// via `CliResponse::fail` directly); kept as the documented shorthand
+    /// constructor for future call sites.
+    #[allow(dead_code)]
     pub fn unsupported(command: &str, message: &str) -> Self {
         Self::fail(
             command,

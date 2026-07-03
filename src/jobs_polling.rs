@@ -67,16 +67,22 @@ pub enum PollOutcome {
         kind: TerminalKind,
         raw_status: String,
         job: Value,
+        /// Not read today; kept for future progress/telemetry reporting.
+        #[allow(dead_code)]
         poll_count: u64,
     },
     TimedOut {
         last_status: String,
         last_job: Value,
+        /// Not read today; kept for future progress/telemetry reporting.
+        #[allow(dead_code)]
         poll_count: u64,
     },
     PollFailed {
         error: String,
         last_job: Value,
+        /// Not read today; kept for future progress/telemetry reporting.
+        #[allow(dead_code)]
         poll_count: u64,
     },
 }

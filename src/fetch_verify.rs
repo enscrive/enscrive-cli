@@ -67,21 +67,16 @@ pub struct Manifest {
     pub signature: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ArtifactKind {
     /// Plain executable. Place at the destination path; chmod 0755.
+    #[default]
     Binary,
     /// tar.gz containing a server binary at the archive root plus a
     /// `site/` directory. Extract; place binary at the destination
     /// path; place site/ at a sibling location managed by the caller.
     Archive,
-}
-
-impl Default for ArtifactKind {
-    fn default() -> Self {
-        Self::Binary
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

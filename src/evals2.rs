@@ -369,7 +369,7 @@ async fn handle_datasets_create(
             match serde_json::from_str::<Value>(p) {
                 Ok(v) => sample["params"] = v,
                 Err(e) => {
-                    return CliResponse::fail(
+                    CliResponse::fail(
                         command,
                         format!("--sample-params is not valid JSON: {e}"),
                         FailureClass::Bug,
@@ -398,7 +398,7 @@ async fn handle_datasets_create(
 
     let response = match client.post_json("/v1/datasets", body).await {
         Ok(v) => v,
-        Err(e) => return request_failure(command, e).emit(fmt),
+        Err(e) => request_failure(command, e).emit(fmt),
     };
 
     // ENS-397 Phase 1.5: HuggingFace source returns
@@ -415,7 +415,7 @@ async fn handle_datasets_create(
         if args.r#async {
             // Return the launch response and let the caller poll
             // `enscrive jobs get --id <job_id>` themselves.
-            return CliResponse::success(command, response).emit(fmt);
+            CliResponse::success(command, response).emit(fmt);
         }
         // The success-data builder lifts dataset_id out of the job row
         // to `.data.id` + `.data.dataset_id` so downstream harnesses
@@ -466,7 +466,7 @@ async fn handle_datasets_upload(
     } else if flat_qrels_path.exists() {
         flat_qrels_path
     } else {
-        return CliResponse::fail(
+        CliResponse::fail(
             "datasets upload",
             format!(
                 "missing qrels: expected either {} or {}",
@@ -481,7 +481,7 @@ async fn handle_datasets_upload(
 
     for p in [&corpus_path, &queries_path] {
         if !p.exists() {
-            return CliResponse::fail(
+            CliResponse::fail(
                 "datasets upload",
                 format!("missing required file: {}", p.display()),
                 FailureClass::Bug,
@@ -494,7 +494,7 @@ async fn handle_datasets_upload(
     let corpus_bytes = match std::fs::read(&corpus_path) {
         Ok(b) => b,
         Err(e) => {
-            return CliResponse::fail(
+            CliResponse::fail(
                 "datasets upload",
                 format!("read corpus.jsonl: {e}"),
                 FailureClass::Bug,
@@ -506,7 +506,7 @@ async fn handle_datasets_upload(
     let queries_bytes = match std::fs::read(&queries_path) {
         Ok(b) => b,
         Err(e) => {
-            return CliResponse::fail(
+            CliResponse::fail(
                 "datasets upload",
                 format!("read queries.jsonl: {e}"),
                 FailureClass::Bug,
@@ -518,7 +518,7 @@ async fn handle_datasets_upload(
     let qrels_bytes = match std::fs::read(&qrels_path) {
         Ok(b) => b,
         Err(e) => {
-            return CliResponse::fail(
+            CliResponse::fail(
                 "datasets upload",
                 format!("read qrels.tsv: {e}"),
                 FailureClass::Bug,
@@ -541,7 +541,7 @@ async fn handle_datasets_upload(
             match serde_json::from_str::<Value>(&params_str) {
                 Ok(v) => sample["params"] = v,
                 Err(e) => {
-                    return CliResponse::fail(
+                    CliResponse::fail(
                         "datasets upload",
                         format!("--sample-params is not valid JSON: {e}"),
                         FailureClass::Bug,
@@ -579,7 +579,7 @@ async fn handle_datasets_upload(
         .await
     {
         Ok(data) => data,
-        Err(e) => return request_failure("datasets upload", e).emit(fmt),
+        Err(e) => request_failure("datasets upload", e).emit(fmt),
     };
 
     jobs_polling::maybe_await_async_launch(
@@ -672,7 +672,7 @@ async fn handle_eval_defs_create(
         match serde_json::from_str::<Value>(&m_str) {
             Ok(v) => body["methodology"] = v,
             Err(e) => {
-                return CliResponse::fail(
+                CliResponse::fail(
                     "eval-defs create",
                     format!("--methodology is not valid JSON: {e}"),
                     FailureClass::Bug,
@@ -696,11 +696,11 @@ async fn handle_eval_defs_run(
     let path = format!("/v1/eval-defs/{}/runs", args.id);
     let accepted = match client.post_json(&path, json!({})).await {
         Ok(v) => v,
-        Err(e) => return request_failure("eval-defs run", e).emit(fmt),
+        Err(e) => request_failure("eval-defs run", e).emit(fmt),
     };
 
     if args.no_follow {
-        return CliResponse::success("eval-defs run (accepted)", accepted).emit(fmt);
+        CliResponse::success("eval-defs run (accepted)", accepted).emit(fmt);
     }
 
     let run_id = accepted
@@ -709,7 +709,7 @@ async fn handle_eval_defs_run(
         .map(|s| s.to_string())
         .unwrap_or_default();
     if run_id.is_empty() {
-        return CliResponse::fail(
+        CliResponse::fail(
             "eval-defs run",
             "server accepted the run but did not return run_id; aborting polling".into(),
             FailureClass::Bug,
@@ -727,7 +727,7 @@ async fn handle_eval_defs_run(
     loop {
         let run = match client.get_json(&run_path).await {
             Ok(v) => v,
-            Err(e) => return request_failure("eval-defs run (poll)", e).emit(fmt),
+            Err(e) => request_failure("eval-defs run (poll)", e).emit(fmt),
         };
         let status = run
             .get("status")
@@ -735,9 +735,9 @@ async fn handle_eval_defs_run(
             .unwrap_or("unknown")
             .to_string();
         match status.as_str() {
-            "completed" => return CliResponse::success("eval-defs run", run).emit(fmt),
+            "completed" => CliResponse::success("eval-defs run", run).emit(fmt),
             "failed" => {
-                return CliResponse::fail(
+                CliResponse::fail(
                     "eval-defs run",
                     run.get("error_message")
                         .and_then(|v| v.as_str())
@@ -751,7 +751,7 @@ async fn handle_eval_defs_run(
             _ => {}
         }
         if started.elapsed() > timeout {
-            return CliResponse::fail(
+            CliResponse::fail(
                 "eval-defs run",
                 format!("polling timed out after {}s (run still {status})", args.timeout_secs),
                 FailureClass::Bug,
@@ -835,7 +835,7 @@ pub async fn run_voice_diff(
             let bytes = match std::fs::read(&args.proposed_file) {
                 Ok(b) => b,
                 Err(e) => {
-                    return CliResponse::fail(
+                    CliResponse::fail(
                         "voices diff-proposal",
                         format!("read {}: {e}", args.proposed_file),
                         FailureClass::Bug,
@@ -847,7 +847,7 @@ pub async fn run_voice_diff(
             let body: Value = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
                 Err(e) => {
-                    return CliResponse::fail(
+                    CliResponse::fail(
                         "voices diff-proposal",
                         format!("parse {} as JSON: {e}", args.proposed_file),
                         FailureClass::Bug,
