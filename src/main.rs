@@ -1,3 +1,4 @@
+mod admin_ops;
 mod client;
 mod evals2;
 mod fetch_verify;
@@ -8,6 +9,7 @@ mod output;
 mod preflight;
 mod release_channel;
 mod revisions;
+mod segmentation;
 #[cfg(test)]
 mod test_support;
 mod version;
@@ -117,6 +119,21 @@ enum Commands {
     Segment {
         #[command(subcommand)]
         sub: SegmentSubcommand,
+    },
+
+    /// Preview how content will be chunked without ingesting it
+    /// (`POST /v1/preview-chunking`). All preview is local — no server-side
+    /// storage or metering.
+    PreviewChunking(segmentation::PreviewChunkingArgs),
+
+    /// Preview template-driven segmentation of a document
+    /// (`POST /v1/preview-with-template`).
+    PreviewWithTemplate(segmentation::PreviewWithTemplateArgs),
+
+    /// Segmentation template commands (`/v1/segmentation-templates*`)
+    SegmentationTemplates {
+        #[command(subcommand)]
+        sub: segmentation::SegmentationTemplatesSubcommand,
     },
 
     /// Content analysis commands
@@ -1809,6 +1826,64 @@ enum AdminSubcommand {
         #[command(subcommand)]
         sub: AdminRatecardSubcommand,
     },
+
+    /// Operator wallet top-up commands (ENS-752)
+    Wallet {
+        #[command(subcommand)]
+        sub: admin_ops::AdminWalletSubcommand,
+    },
+
+    /// Durable admin audit-log commands (ENS-752 / ENS-250 / WS-16)
+    Audit {
+        #[command(subcommand)]
+        sub: admin_ops::AdminAuditSubcommand,
+    },
+
+    /// Admin-scoped incident log viewer (ENS-752 / ENS-298)
+    Incidents {
+        #[command(subcommand)]
+        sub: admin_ops::AdminIncidentsSubcommand,
+    },
+
+    /// Migration status commands (ENS-752 / ENS-229)
+    Migrations {
+        #[command(subcommand)]
+        sub: admin_ops::AdminMigrationsSubcommand,
+    },
+
+    /// Aggregate stack telemetry commands (ENS-752)
+    Telemetry {
+        #[command(subcommand)]
+        sub: admin_ops::AdminTelemetrySubcommand,
+    },
+
+    /// Metering backfill commands (ENS-752 / Pillar 2 M3.2-5)
+    Metering {
+        #[command(subcommand)]
+        sub: admin_ops::AdminMeteringSubcommand,
+    },
+
+    /// Operator tenant provisioning + erasure commands (ENS-752)
+    Tenants {
+        #[command(subcommand)]
+        sub: admin_ops::AdminTenantsSubcommand,
+    },
+
+    /// Operator API-key minting commands (ENS-752)
+    ApiKeys {
+        #[command(subcommand)]
+        sub: admin_ops::AdminApiKeysSubcommand,
+    },
+
+    /// Import a tenant's catalog backup artifact (ENS-752 / ENS-648).
+    /// Admin-only; confirm-gated; checksum-verified before any write.
+    CatalogImport(admin_ops::AdminCatalogImportArgs),
+
+    /// Corpus repair commands (ENS-752 / ENS-660)
+    Corpora {
+        #[command(subcommand)]
+        sub: admin_ops::AdminCorporaSubcommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -3375,8 +3450,13 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
             BatchSetsSubcommand::List(_) | BatchSetsSubcommand::Get(_) => return None,
         },
         Commands::Admin { sub } => match sub {
+            // skip-list: every admin/operator command is Admin-capability
+            // gated (not customer-plan gated) — same posture as RateLimits
+            // above. Contract rows still exist in v1-surface-contract.toml
+            // (status = "implemented") to satisfy the surface-contract test;
+            // this function just opts them out of the client-side plan/
+            // deployment-mode preflight gate.
             AdminSubcommand::RateLimits { sub } => match sub {
-                // skip-list:
                 AdminRateLimitsSubcommand::Show(_) | AdminRateLimitsSubcommand::Set(_) => {
                     return None
                 }
@@ -3389,6 +3469,54 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
                 | AdminRatecardSubcommand::List(_)
                 | AdminRatecardSubcommand::Show(_) => return None,
             },
+            AdminSubcommand::Wallet { sub } => match sub {
+                admin_ops::AdminWalletSubcommand::Credit(_) => return None,
+            },
+            AdminSubcommand::Audit { sub } => match sub {
+                admin_ops::AdminAuditSubcommand::List(_) => return None,
+            },
+            AdminSubcommand::Incidents { sub } => match sub {
+                admin_ops::AdminIncidentsSubcommand::List(_)
+                | admin_ops::AdminIncidentsSubcommand::Get(_) => return None,
+            },
+            AdminSubcommand::Migrations { sub } => match sub {
+                admin_ops::AdminMigrationsSubcommand::Status => return None,
+            },
+            AdminSubcommand::Telemetry { sub } => match sub {
+                admin_ops::AdminTelemetrySubcommand::Stats => return None,
+            },
+            AdminSubcommand::Metering { sub } => match sub {
+                admin_ops::AdminMeteringSubcommand::Backfill(_) => return None,
+            },
+            AdminSubcommand::Tenants { sub } => match sub {
+                admin_ops::AdminTenantsSubcommand::Create(_)
+                | admin_ops::AdminTenantsSubcommand::Erase(_) => return None,
+            },
+            AdminSubcommand::ApiKeys { sub } => match sub {
+                admin_ops::AdminApiKeysSubcommand::Create(_) => return None,
+            },
+            AdminSubcommand::CatalogImport(_) => return None,
+            AdminSubcommand::Corpora { sub } => match sub {
+                admin_ops::AdminCorporaSubcommand::Reconcile(_) => return None,
+            },
+        },
+        Commands::PreviewChunking(_) => "preview-chunking",
+        Commands::PreviewWithTemplate(_) => "preview-with-template",
+        Commands::SegmentationTemplates { sub } => match sub {
+            segmentation::SegmentationTemplatesSubcommand::List => "segmentation-templates list",
+            segmentation::SegmentationTemplatesSubcommand::Create(_) => {
+                "segmentation-templates create"
+            }
+            segmentation::SegmentationTemplatesSubcommand::Get(_) => "segmentation-templates get",
+            segmentation::SegmentationTemplatesSubcommand::Update(_) => {
+                "segmentation-templates update"
+            }
+            segmentation::SegmentationTemplatesSubcommand::Delete(_) => {
+                "segmentation-templates delete"
+            }
+            segmentation::SegmentationTemplatesSubcommand::Clone(_) => {
+                "segmentation-templates clone"
+            }
         },
         Commands::Datasets { sub } => match sub {
             Datasets2Subcommand::List => return None,
@@ -5256,6 +5384,94 @@ async fn main() {
                         }
                     }
                 },
+                AdminSubcommand::Wallet { sub } => match sub {
+                    admin_ops::AdminWalletSubcommand::Credit(args) => {
+                        admin_ops::run_wallet_credit(&client, fmt, args).await
+                    }
+                },
+                AdminSubcommand::Audit { sub } => match sub {
+                    admin_ops::AdminAuditSubcommand::List(args) => {
+                        admin_ops::run_audit_list(&client, fmt, args).await
+                    }
+                },
+                AdminSubcommand::Incidents { sub } => match sub {
+                    admin_ops::AdminIncidentsSubcommand::List(args) => {
+                        admin_ops::run_incidents_list(&client, fmt, args).await
+                    }
+                    admin_ops::AdminIncidentsSubcommand::Get(args) => {
+                        admin_ops::run_incidents_get(&client, fmt, args).await
+                    }
+                },
+                AdminSubcommand::Migrations { sub } => match sub {
+                    admin_ops::AdminMigrationsSubcommand::Status => {
+                        admin_ops::run_migrations_status(&client, fmt).await
+                    }
+                },
+                AdminSubcommand::Telemetry { sub } => match sub {
+                    admin_ops::AdminTelemetrySubcommand::Stats => {
+                        admin_ops::run_telemetry_stats(&client, fmt).await
+                    }
+                },
+                AdminSubcommand::Metering { sub } => match sub {
+                    admin_ops::AdminMeteringSubcommand::Backfill(args) => {
+                        admin_ops::run_metering_backfill(&client, fmt, args).await
+                    }
+                },
+                AdminSubcommand::Tenants { sub } => match sub {
+                    admin_ops::AdminTenantsSubcommand::Create(args) => {
+                        admin_ops::run_tenants_create(&client, fmt, args).await
+                    }
+                    admin_ops::AdminTenantsSubcommand::Erase(args) => {
+                        admin_ops::run_tenants_erase(&client, fmt, args).await
+                    }
+                },
+                AdminSubcommand::ApiKeys { sub } => match sub {
+                    admin_ops::AdminApiKeysSubcommand::Create(args) => {
+                        admin_ops::run_api_keys_create(&client, fmt, args).await
+                    }
+                },
+                AdminSubcommand::CatalogImport(args) => {
+                    admin_ops::run_catalog_import(&client, fmt, args).await
+                }
+                AdminSubcommand::Corpora { sub } => match sub {
+                    admin_ops::AdminCorporaSubcommand::Reconcile(args) => {
+                        admin_ops::run_corpora_reconcile(&client, fmt, args).await
+                    }
+                },
+            }
+        }
+        Commands::PreviewChunking(args) => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            segmentation::run_preview_chunking(&client, fmt, args).await
+        }
+        Commands::PreviewWithTemplate(args) => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            segmentation::run_preview_with_template(&client, fmt, args).await
+        }
+        Commands::SegmentationTemplates { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            match sub {
+                segmentation::SegmentationTemplatesSubcommand::List => {
+                    segmentation::run_templates_list(&client, fmt).await
+                }
+                segmentation::SegmentationTemplatesSubcommand::Create(args) => {
+                    segmentation::run_templates_create(&client, fmt, args).await
+                }
+                segmentation::SegmentationTemplatesSubcommand::Get(args) => {
+                    segmentation::run_templates_get(&client, fmt, args).await
+                }
+                segmentation::SegmentationTemplatesSubcommand::Update(args) => {
+                    segmentation::run_templates_update(&client, fmt, args).await
+                }
+                segmentation::SegmentationTemplatesSubcommand::Delete(args) => {
+                    segmentation::run_templates_delete(&client, fmt, args).await
+                }
+                segmentation::SegmentationTemplatesSubcommand::Clone(args) => {
+                    segmentation::run_templates_clone(&client, fmt, args).await
+                }
             }
         }
         Commands::Datasets { sub } => {
