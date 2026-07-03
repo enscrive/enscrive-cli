@@ -3346,15 +3346,10 @@ async fn main() {
         Commands::Init(args) => {
             let mode = match args.mode {
                 Some(mode) => mode,
-                None => {
-                    let raw = match local_prompt_mode() {
-                        Ok(mode) => mode,
-                        Err(e) => {
-                            CliResponse::fail("init", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt)
-                        }
-                    };
-                    raw
-                }
+                None => match local_prompt_mode() {
+                    Ok(mode) => mode,
+                    Err(e) => CliResponse::fail("init", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt),
+                },
             };
 
             let result = match mode {
@@ -3445,7 +3440,7 @@ async fn main() {
                                 let plan = claims
                                     .plan
                                     .clone()
-                                    .map(|p| serde_json::Value::String(p))
+                                    .map(serde_json::Value::String)
                                     .unwrap_or_else(|| serde_json::Value::String("unknown".to_string()));
                                 let expires_at = claims.expires_at.clone();
                                 let lic = json!({
@@ -3478,10 +3473,10 @@ async fn main() {
 
                 if let Some(obj) = data.as_object_mut() {
                     obj.insert("plan".to_string(), plan.clone());
-                    if mode != "managed" {
-                        if let Some(lic) = license_field {
-                            obj.insert("license".to_string(), lic);
-                        }
+                    if mode != "managed"
+                        && let Some(lic) = license_field
+                    {
+                        obj.insert("license".to_string(), lic);
                     }
                 }
 
@@ -5137,24 +5132,20 @@ async fn main() {
             // ENS-64 / CLI-TIER-009: license deactivate
             LicenseSubcommand::Deactivate => {
                 // Refuse in managed mode.
-                match local::resolve_api_context(
+                if let Ok(ctx) = local::resolve_api_context(
                     cli.profile.as_deref(),
                     cli.endpoint.clone(),
                     cli.api_key.clone(),
-                ) {
-                    Ok(ctx) => {
-                        if ctx.profile_mode.as_deref() == Some("managed") {
-                            CliResponse::fail(
-                                "license deactivate",
-                                "license deactivation is only for self-hosted (--mode self-managed); managed mode reads plan from your Enscrive account."
-                                    .to_string(),
-                                FailureClass::Unsupported,
-                                EXIT_UNSUPPORTED,
-                            )
-                            .emit(fmt);
-                        }
-                    }
-                    Err(_) => {}
+                ) && ctx.profile_mode.as_deref() == Some("managed")
+                {
+                    CliResponse::fail(
+                        "license deactivate",
+                        "license deactivation is only for self-hosted (--mode self-managed); managed mode reads plan from your Enscrive account."
+                            .to_string(),
+                        FailureClass::Unsupported,
+                        EXIT_UNSUPPORTED,
+                    )
+                    .emit(fmt);
                 }
 
                 match license::remove_license_file() {

@@ -2194,10 +2194,8 @@ async fn resolve_self_managed_binaries(
     // fetch loop builds it like the other binaries.
     let esm_override: Option<String> = if let Some(path) = opts.esm_bin.as_ref() {
         Some(path.clone())
-    } else if let Some(found) = which_in_path(BINARY_ESM) {
-        Some(found.display().to_string())
     } else {
-        None
+        which_in_path(BINARY_ESM).map(|found| found.display().to_string())
     };
 
     // Short-circuit when all five binaries are operator-supplied (esm
@@ -2572,6 +2570,10 @@ fn stderr_string(output: &std::process::Output) -> String {
     }
 }
 
+/// Not called today (all call sites route through
+/// `spawn_service_with_extra_env`/`spawn_service_full` directly); kept as
+/// the documented zero-extra-env entry point for future callers.
+#[allow(dead_code)]
 fn spawn_service(
     service_name: &str,
     binary: &str,
@@ -3245,6 +3247,11 @@ mod tests {
         assert_eq!(resolved.profile_name.as_deref(), Some("managed"));
     }
 
+    // Intentionally holds `_guard` across the `.await` below: it serializes
+    // this test's env-var mutation (`set_xdg`, provider keys) against other
+    // tests running concurrently. Dropping it early would reintroduce the
+    // env-var race this lock exists to prevent.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn init_self_managed_with_openai_flag_enables_embeddings_and_llm_inference() {
         let _guard = crate::test_support::lock_env();
@@ -3287,6 +3294,8 @@ mod tests {
         assert!(local.providers.llm_inference.anthropic);
     }
 
+    // See allow rationale above: serializes env-var mutation across tests.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn init_self_managed_writes_runtime_files() {
         let _guard = crate::test_support::lock_env();
@@ -3345,6 +3354,8 @@ mod tests {
         assert_eq!(local.bootstrap.api_key_label, "local-cli");
     }
 
+    // See allow rationale above: serializes env-var mutation across tests.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn init_self_managed_preserves_existing_local_secrets() {
         let _guard = crate::test_support::lock_env();
@@ -3446,6 +3457,8 @@ mod tests {
         assert!(local.providers.llm_inference.openai);
     }
 
+    // See allow rationale above: serializes env-var mutation across tests.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn init_self_managed_accepts_custom_developer_port() {
         let _guard = crate::test_support::lock_env();
@@ -3504,6 +3517,8 @@ mod tests {
     /// Also exercises `--force-refetch` by mutating the installed binary on
     /// disk after the first fetch and confirming that the second init call
     /// with `force_refetch: true` restores the manifest content.
+    // See allow rationale above: serializes env-var mutation across tests.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn init_self_managed_fetches_binaries_from_file_manifest() {
         use sha2::{Digest, Sha256};
@@ -3695,6 +3710,8 @@ mod tests {
 
     /// Manifest-driven init must error clearly when the CLI's target triple
     /// has no row in the manifest — no silent PATH fallback.
+    // See allow rationale above: serializes env-var mutation across tests.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn init_self_managed_reports_platform_missing_error() {
         let _guard = crate::test_support::lock_env();
