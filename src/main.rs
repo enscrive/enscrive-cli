@@ -1720,6 +1720,13 @@ enum AdminSubcommand {
         #[command(subcommand)]
         sub: AdminRateLimitsSubcommand,
     },
+
+    /// Rate card management commands (ENS-175 / ENS-486). Requires an API
+    /// key with the Admin capability (operator key, not a normal tenant key).
+    Ratecard {
+        #[command(subcommand)]
+        sub: AdminRatecardSubcommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1770,6 +1777,55 @@ struct AdminRateLimitsSetArgs {
     /// Burst-token capacity (instantaneous headroom above steady-state TPM)
     #[arg(long, required = true)]
     burst_tpm: i64,
+}
+
+#[derive(Subcommand)]
+enum AdminRatecardSubcommand {
+    /// Apply a new rate card from a TOML file.
+    ///
+    /// POST /v1/admin/ratecard/apply. Reads the file at --file and posts its
+    /// raw contents as the request body's `toml` field; the server parses,
+    /// structurally validates, and applies it as the new active rate card
+    /// (singleton invariant; every running server's cache is invalidated via
+    /// `pg_notify`). 409 if the version already exists; 400 if the TOML fails
+    /// validation or its effective_from is not strictly after the currently
+    /// active card's.
+    Apply(AdminRatecardApplyArgs),
+
+    /// List rate card version history.
+    ///
+    /// GET /v1/admin/ratecard/list?limit=N
+    List(AdminRatecardListArgs),
+
+    /// Show the current or a specific rate card version.
+    ///
+    /// GET /v1/admin/ratecard/show[?version=X]. Without --version, returns
+    /// the currently-active card.
+    Show(AdminRatecardShowArgs),
+}
+
+#[derive(Args)]
+struct AdminRatecardApplyArgs {
+    /// Path to a rate card TOML file to read and apply as the new active
+    /// rate card.
+    #[arg(long, required = true)]
+    file: String,
+}
+
+#[derive(Args)]
+struct AdminRatecardListArgs {
+    /// Maximum number of history rows to return (default 20, max 1000 —
+    /// server clamps out-of-range values).
+    #[arg(long)]
+    limit: Option<i64>,
+}
+
+#[derive(Args)]
+struct AdminRatecardShowArgs {
+    /// Specific rate card version to show. Omit to show the currently-active
+    /// card.
+    #[arg(long)]
+    version: Option<String>,
 }
 
 fn require_api_key(api_key: Option<String>, fmt: OutputFormat) -> String {
@@ -3186,6 +3242,14 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
                 AdminRateLimitsSubcommand::Show(_) | AdminRateLimitsSubcommand::Set(_) => {
                     return None
                 }
+            },
+            AdminSubcommand::Ratecard { sub } => match sub {
+                // skip-list: Admin-capability operator commands, gated server-side
+                // by ApiKeyCapability::Admin rather than by CLI-side plan tier —
+                // same rationale as admin rate-limits above.
+                AdminRatecardSubcommand::Apply(_)
+                | AdminRatecardSubcommand::List(_)
+                | AdminRatecardSubcommand::Show(_) => return None,
             },
         },
         Commands::Datasets { sub } => match sub {
@@ -4959,6 +5023,56 @@ async fn main() {
                         match client.patch_json(&path, body).await {
                             Ok(data) => CliResponse::success("admin rate-limits set", data).emit(fmt),
                             Err(e) => request_failure("admin rate-limits set", e).emit(fmt),
+                        }
+                    }
+                },
+                AdminSubcommand::Ratecard { sub } => match sub {
+                    // apply — POST /v1/admin/ratecard/apply
+                    AdminRatecardSubcommand::Apply(args) => {
+                        let toml_contents = match fs::read_to_string(&args.file) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                CliResponse::fail(
+                                    "admin ratecard apply",
+                                    format!("read rate card file '{}': {e}", args.file),
+                                    FailureClass::Bug,
+                                    EXIT_CONFIG,
+                                )
+                                .emit(fmt)
+                            }
+                        };
+                        let body = json!({ "toml": toml_contents });
+                        match client.post_json("/v1/admin/ratecard/apply", body).await {
+                            Ok(data) => CliResponse::success("admin ratecard apply", data).emit(fmt),
+                            Err(e) => request_failure("admin ratecard apply", e).emit(fmt),
+                        }
+                    }
+                    // list — GET /v1/admin/ratecard/list?limit=N
+                    AdminRatecardSubcommand::List(args) => {
+                        let mut query: Vec<(&str, String)> = Vec::new();
+                        if let Some(limit) = args.limit {
+                            query.push(("limit", limit.to_string()));
+                        }
+                        match client
+                            .get_json_with_query("/v1/admin/ratecard/list", &query)
+                            .await
+                        {
+                            Ok(data) => CliResponse::success("admin ratecard list", data).emit(fmt),
+                            Err(e) => request_failure("admin ratecard list", e).emit(fmt),
+                        }
+                    }
+                    // show — GET /v1/admin/ratecard/show[?version=X]
+                    AdminRatecardSubcommand::Show(args) => {
+                        let mut query: Vec<(&str, String)> = Vec::new();
+                        if let Some(version) = &args.version {
+                            query.push(("version", version.clone()));
+                        }
+                        match client
+                            .get_json_with_query("/v1/admin/ratecard/show", &query)
+                            .await
+                        {
+                            Ok(data) => CliResponse::success("admin ratecard show", data).emit(fmt),
+                            Err(e) => request_failure("admin ratecard show", e).emit(fmt),
                         }
                     }
                 },
@@ -6818,6 +6932,99 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 assert_eq!(burst_tpm, 1_500_000);
             }
             _ => panic!("expected admin rate-limits set"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // admin ratecard parse tests (ENS-486)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_admin_ratecard_apply() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "admin",
+            "ratecard",
+            "apply",
+            "--file",
+            "/tmp/ratecard.toml",
+        ]);
+        match args.command {
+            Commands::Admin {
+                sub: AdminSubcommand::Ratecard {
+                    sub: AdminRatecardSubcommand::Apply(AdminRatecardApplyArgs { file }),
+                },
+            } => {
+                assert_eq!(file, "/tmp/ratecard.toml");
+            }
+            _ => panic!("expected admin ratecard apply"),
+        }
+    }
+
+    #[test]
+    fn parse_admin_ratecard_list_no_limit() {
+        let args = Cli::parse_from(["enscrive", "admin", "ratecard", "list"]);
+        match args.command {
+            Commands::Admin {
+                sub: AdminSubcommand::Ratecard {
+                    sub: AdminRatecardSubcommand::List(AdminRatecardListArgs { limit }),
+                },
+            } => {
+                assert!(limit.is_none(), "limit should be None when not provided");
+            }
+            _ => panic!("expected admin ratecard list"),
+        }
+    }
+
+    #[test]
+    fn parse_admin_ratecard_list_with_limit() {
+        let args = Cli::parse_from(["enscrive", "admin", "ratecard", "list", "--limit", "50"]);
+        match args.command {
+            Commands::Admin {
+                sub: AdminSubcommand::Ratecard {
+                    sub: AdminRatecardSubcommand::List(AdminRatecardListArgs { limit }),
+                },
+            } => {
+                assert_eq!(limit, Some(50));
+            }
+            _ => panic!("expected admin ratecard list"),
+        }
+    }
+
+    #[test]
+    fn parse_admin_ratecard_show_no_version() {
+        let args = Cli::parse_from(["enscrive", "admin", "ratecard", "show"]);
+        match args.command {
+            Commands::Admin {
+                sub: AdminSubcommand::Ratecard {
+                    sub: AdminRatecardSubcommand::Show(AdminRatecardShowArgs { version }),
+                },
+            } => {
+                assert!(version.is_none(), "version should be None when not provided");
+            }
+            _ => panic!("expected admin ratecard show"),
+        }
+    }
+
+    #[test]
+    fn parse_admin_ratecard_show_with_version() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "admin",
+            "ratecard",
+            "show",
+            "--version",
+            "v2026-06-26",
+        ]);
+        match args.command {
+            Commands::Admin {
+                sub: AdminSubcommand::Ratecard {
+                    sub: AdminRatecardSubcommand::Show(AdminRatecardShowArgs { version }),
+                },
+            } => {
+                assert_eq!(version.as_deref(), Some("v2026-06-26"));
+            }
+            _ => panic!("expected admin ratecard show"),
         }
     }
 

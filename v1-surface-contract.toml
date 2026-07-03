@@ -978,3 +978,32 @@ status = "implemented"
 note = "Cross-tenant rate-limit override — managed-mode operator tooling only"
 deployment_tier = "managed-only"
 required_plan = "enterprise"
+
+# ── Admin: Rate Card ───────────────────────────────────
+
+[[endpoint]]
+method = "POST"
+path = "/v1/admin/ratecard/apply"
+cli_command = "admin ratecard apply"
+status = "implemented"
+note = "ENS-486 / ENS-175 — parses+validates a TOML file and applies it as the new active rate card; requires Admin-capability API key"
+deployment_tier = "managed-only"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/ratecard/list"
+cli_command = "admin ratecard list"
+status = "implemented"
+note = "ENS-486 — rate card version history (default limit 20, max 1000); requires Admin-capability API key"
+deployment_tier = "managed-only"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/ratecard/show"
+cli_command = "admin ratecard show"
+status = "implemented"
+note = "ENS-486 — current or a specific rate card version; requires Admin-capability API key"
+deployment_tier = "managed-only"
+required_plan = "enterprise"
