@@ -58,38 +58,57 @@ pub struct AdminWalletCreditArgs {
     idempotency_key: Option<String>,
 }
 
-pub async fn run_wallet_credit(client: &EnscriveClient, fmt: OutputFormat, args: &AdminWalletCreditArgs) {
-    let command = "admin wallet credit";
-
-    if args.amount_micros <= 0 {
-        CliResponse::fail(
-            command,
-            format!(
-                "--amount-micros must be positive (got {}); the server refunds/adjustments use different transaction types",
-                args.amount_micros
-            ),
-            FailureClass::Bug,
-            EXIT_CONFIG,
-        )
-        .emit(fmt);
+/// Pure validation: `--amount-micros` must be positive. Extracted (rather
+/// than left inline) so this money-movement guard is unit-tested the same
+/// way `require_confirm_matches` is, instead of only being exercisable by
+/// actually invoking the process-exiting handler.
+fn validate_wallet_credit_amount(amount_micros: i64) -> Result<(), String> {
+    if amount_micros <= 0 {
+        Err(format!(
+            "--amount-micros must be positive (got {amount_micros}); the server refunds/adjustments use different transaction types"
+        ))
+    } else {
+        Ok(())
     }
+}
 
-    if args.reason.trim().is_empty() {
-        CliResponse::fail(
-            command,
-            "--reason cannot be empty — the server requires a non-empty justification for the audit trail".to_string(),
-            FailureClass::Bug,
-            EXIT_CONFIG,
+/// Pure validation: `--reason` must carry a non-empty justification (it
+/// lands on the durable `admin_audit_log` row).
+fn validate_wallet_credit_reason(reason: &str) -> Result<(), String> {
+    if reason.trim().is_empty() {
+        Err(
+            "--reason cannot be empty — the server requires a non-empty justification for the audit trail"
+                .to_string(),
         )
-        .emit(fmt);
+    } else {
+        Ok(())
     }
+}
 
-    let body = json!({
+/// Exact `POST /v1/admin/wallets/credit` request body. Extracted so the
+/// wire shape (field names, `idempotency_key` presence) is asserted by a
+/// test instead of only ever being exercised by a live network call.
+fn build_wallet_credit_body(args: &AdminWalletCreditArgs) -> Value {
+    json!({
         "tenant_id": args.tenant,
         "amount_micros": args.amount_micros,
         "reason": args.reason,
         "idempotency_key": args.idempotency_key,
-    });
+    })
+}
+
+pub async fn run_wallet_credit(client: &EnscriveClient, fmt: OutputFormat, args: &AdminWalletCreditArgs) {
+    let command = "admin wallet credit";
+
+    if let Err(e) = validate_wallet_credit_amount(args.amount_micros) {
+        CliResponse::fail(command, e, FailureClass::Bug, EXIT_CONFIG).emit(fmt);
+    }
+
+    if let Err(e) = validate_wallet_credit_reason(&args.reason) {
+        CliResponse::fail(command, e, FailureClass::Bug, EXIT_CONFIG).emit(fmt);
+    }
+
+    let body = build_wallet_credit_body(args);
 
     match client.post_json("/v1/admin/wallets/credit", body).await {
         Ok(data) => CliResponse::success(command, data).emit(fmt),
@@ -431,6 +450,18 @@ fn fail_confirm_mismatch(command: &str, err: String, fmt: OutputFormat) -> ! {
         .emit(fmt);
 }
 
+/// Exact `POST /v1/admin/tenants/erase` request body — this is the single
+/// most destructive admin mutation in this file (irreversible GDPR erasure),
+/// so the wire shape gets the same body-builder + test treatment as the
+/// read-only query builders above.
+fn build_tenants_erase_body(args: &AdminTenantsEraseArgs) -> Value {
+    json!({
+        "tenant_id": args.tenant,
+        "confirm": args.confirm,
+        "reason": args.reason,
+    })
+}
+
 pub async fn run_tenants_erase(client: &EnscriveClient, fmt: OutputFormat, args: &AdminTenantsEraseArgs) {
     let command = "admin tenants erase";
 
@@ -442,11 +473,7 @@ pub async fn run_tenants_erase(client: &EnscriveClient, fmt: OutputFormat, args:
         );
     }
 
-    let body = json!({
-        "tenant_id": args.tenant,
-        "confirm": args.confirm,
-        "reason": args.reason,
-    });
+    let body = build_tenants_erase_body(args);
 
     match client.post_json("/v1/admin/tenants/erase", body).await {
         Ok(data) => CliResponse::success(command, data).emit(fmt),
@@ -495,18 +522,81 @@ pub struct AdminApiKeysCreateArgs {
     /// accumulating dead rows.
     #[arg(long = "revoke-existing-with-label", default_value_t = false)]
     revoke_existing_with_label: bool,
+
+    /// Required (must exactly repeat --label) when minting a
+    /// privilege-escalating key: `--scope operator`/`--scope
+    /// platform_admin`, or any `--capabilities` entry of `admin`,
+    /// `operator`, or `platform_admin`. Defense-in-depth against a
+    /// fat-fingered scope/capability silently over-granting a fresh key —
+    /// mirrors the `--confirm` gate on `admin tenants erase`. Not required
+    /// for an ordinary tenant-scoped key.
+    #[arg(long)]
+    confirm: Option<String>,
 }
 
-pub async fn run_api_keys_create(client: &EnscriveClient, fmt: OutputFormat, args: &AdminApiKeysCreateArgs) {
-    let command = "admin api-keys create";
-    let body = json!({
+/// True when the requested scope/capabilities are privilege-escalating and
+/// therefore require the `--confirm` gate before minting. Pure + tested so
+/// the escalation classification itself (not just the confirm-matching) is
+/// covered — a bug here would silently skip the guard entirely.
+fn requires_privilege_confirmation(scope: Option<&str>, capabilities: &[String]) -> bool {
+    const PRIVILEGED_SCOPES: [&str; 2] = ["operator", "platform_admin"];
+    const PRIVILEGED_CAPABILITIES: [&str; 3] = ["admin", "operator", "platform_admin"];
+
+    if scope.is_some_and(|s| PRIVILEGED_SCOPES.contains(&s)) {
+        return true;
+    }
+    capabilities
+        .iter()
+        .any(|c| PRIVILEGED_CAPABILITIES.contains(&c.as_str()))
+}
+
+/// Exact `POST /v1/admin/api-keys` request body.
+fn build_api_keys_create_body(args: &AdminApiKeysCreateArgs) -> Value {
+    json!({
         "tenant_id": args.tenant,
         "environment_id": args.environment,
         "label": args.label,
         "scope": args.scope,
         "capabilities": args.capabilities,
         "revoke_existing_with_label": args.revoke_existing_with_label,
-    });
+    })
+}
+
+/// Single-evaluation confirmation gate for `admin api-keys create`, mirroring
+/// `restore_gate_decision`'s shape: every input the decision depends on is a
+/// parameter, so the whole branch (not just its pieces) is unit-tested
+/// without invoking the process-exiting handler.
+fn api_keys_create_confirm_decision(
+    scope: Option<&str>,
+    capabilities: &[String],
+    confirm: Option<&str>,
+    label: &str,
+) -> Result<(), String> {
+    if !requires_privilege_confirmation(scope, capabilities) {
+        return Ok(());
+    }
+    match confirm {
+        None => Err(format!(
+            "minting a privilege-escalating key (scope={scope:?}, capabilities={capabilities:?}) requires --confirm <label> to exactly repeat --label; refusing to mint without it"
+        )),
+        Some(c) => require_confirm_matches(c, label)
+            .map_err(|e| format!("{e}; refusing to mint a privilege-escalating key with a mismatched confirmation")),
+    }
+}
+
+pub async fn run_api_keys_create(client: &EnscriveClient, fmt: OutputFormat, args: &AdminApiKeysCreateArgs) {
+    let command = "admin api-keys create";
+
+    if let Err(e) = api_keys_create_confirm_decision(
+        args.scope.as_deref(),
+        &args.capabilities,
+        args.confirm.as_deref(),
+        &args.label,
+    ) {
+        fail_confirm_mismatch(command, e, fmt);
+    }
+
+    let body = build_api_keys_create_body(args);
     match client.post_json("/v1/admin/api-keys", body).await {
         Ok(data) => CliResponse::success(command, data).emit(fmt),
         Err(e) => crate::request_failure(command, e).emit(fmt),
@@ -641,6 +731,178 @@ mod tests {
         let err = require_confirm_matches("t-2", "t-1").expect_err("mismatch must be rejected");
         assert!(err.contains("t-2"));
         assert!(err.contains("t-1"));
+    }
+
+    // -- wallet credit: validation + wire-body shape (money movement) -----
+
+    #[test]
+    fn wallet_credit_amount_rejects_zero_and_negative() {
+        assert!(validate_wallet_credit_amount(0).is_err());
+        assert!(validate_wallet_credit_amount(-1).is_err());
+    }
+
+    #[test]
+    fn wallet_credit_amount_accepts_positive() {
+        assert!(validate_wallet_credit_amount(1).is_ok());
+        assert!(validate_wallet_credit_amount(5_000_000).is_ok());
+    }
+
+    #[test]
+    fn wallet_credit_reason_rejects_empty_and_whitespace_only() {
+        assert!(validate_wallet_credit_reason("").is_err());
+        assert!(validate_wallet_credit_reason("   ").is_err());
+    }
+
+    #[test]
+    fn wallet_credit_reason_accepts_non_empty() {
+        assert!(validate_wallet_credit_reason("seed docs sidecar").is_ok());
+    }
+
+    #[test]
+    fn wallet_credit_body_matches_server_wire_shape() {
+        let args = AdminWalletCreditArgs {
+            tenant: "t-1".to_string(),
+            amount_micros: 5_000_000,
+            reason: "seed docs sidecar".to_string(),
+            idempotency_key: Some("deploy-run-42".to_string()),
+        };
+        let body = build_wallet_credit_body(&args);
+        assert_eq!(
+            body,
+            json!({
+                "tenant_id": "t-1",
+                "amount_micros": 5_000_000,
+                "reason": "seed docs sidecar",
+                "idempotency_key": "deploy-run-42",
+            })
+        );
+    }
+
+    #[test]
+    fn wallet_credit_body_omits_nothing_when_idempotency_key_absent() {
+        let args = AdminWalletCreditArgs {
+            tenant: "t-1".to_string(),
+            amount_micros: 1,
+            reason: "r".to_string(),
+            idempotency_key: None,
+        };
+        let body = build_wallet_credit_body(&args);
+        assert_eq!(body["idempotency_key"], Value::Null);
+    }
+
+    // -- tenants erase: wire-body shape (irreversible GDPR erasure) --------
+
+    #[test]
+    fn tenants_erase_body_matches_server_wire_shape() {
+        let args = AdminTenantsEraseArgs {
+            tenant: "t-1".to_string(),
+            confirm: "t-1".to_string(),
+            reason: Some("gdpr request".to_string()),
+        };
+        let body = build_tenants_erase_body(&args);
+        assert_eq!(
+            body,
+            json!({
+                "tenant_id": "t-1",
+                "confirm": "t-1",
+                "reason": "gdpr request",
+            })
+        );
+    }
+
+    // -- api-keys create: privilege-escalation gate + wire-body shape -----
+
+    #[test]
+    fn privilege_confirmation_not_required_for_ordinary_tenant_key() {
+        assert!(!requires_privilege_confirmation(
+            None,
+            &["search".to_string(), "records".to_string()]
+        ));
+        assert!(!requires_privilege_confirmation(
+            Some("tenant"),
+            &["search".to_string()]
+        ));
+    }
+
+    #[test]
+    fn privilege_confirmation_required_for_operator_or_platform_admin_scope() {
+        assert!(requires_privilege_confirmation(Some("operator"), &[]));
+        assert!(requires_privilege_confirmation(Some("platform_admin"), &[]));
+    }
+
+    #[test]
+    fn privilege_confirmation_required_for_admin_capability_regardless_of_scope() {
+        assert!(requires_privilege_confirmation(
+            Some("tenant"),
+            &["search".to_string(), "admin".to_string()]
+        ));
+    }
+
+    #[test]
+    fn api_keys_confirm_decision_allows_ordinary_key_with_no_confirm() {
+        assert!(api_keys_create_confirm_decision(
+            None,
+            &["search".to_string()],
+            None,
+            "docs-sidecar",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn api_keys_confirm_decision_rejects_privileged_key_missing_confirm() {
+        let err = api_keys_create_confirm_decision(Some("operator"), &[], None, "ops-key")
+            .expect_err("privileged mint without --confirm must be refused");
+        assert!(err.contains("--confirm"));
+    }
+
+    #[test]
+    fn api_keys_confirm_decision_rejects_privileged_key_mismatched_confirm() {
+        let err = api_keys_create_confirm_decision(
+            Some("operator"),
+            &[],
+            Some("wrong-label"),
+            "ops-key",
+        )
+        .expect_err("mismatched --confirm must be refused");
+        assert!(err.contains("wrong-label"));
+        assert!(err.contains("ops-key"));
+    }
+
+    #[test]
+    fn api_keys_confirm_decision_accepts_privileged_key_matching_confirm() {
+        assert!(api_keys_create_confirm_decision(
+            Some("operator"),
+            &[],
+            Some("ops-key"),
+            "ops-key",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn api_keys_create_body_matches_server_wire_shape() {
+        let args = AdminApiKeysCreateArgs {
+            tenant: "t-1".to_string(),
+            environment: "e-1".to_string(),
+            label: "docs-sidecar".to_string(),
+            scope: None,
+            capabilities: vec!["search".to_string(), "records".to_string()],
+            revoke_existing_with_label: true,
+            confirm: None,
+        };
+        let body = build_api_keys_create_body(&args);
+        assert_eq!(
+            body,
+            json!({
+                "tenant_id": "t-1",
+                "environment_id": "e-1",
+                "label": "docs-sidecar",
+                "scope": null,
+                "capabilities": ["search", "records"],
+                "revoke_existing_with_label": true,
+            })
+        );
     }
 
     #[test]
@@ -780,6 +1042,7 @@ mod tests {
                         scope,
                         capabilities,
                         revoke_existing_with_label,
+                        confirm,
                     }),
                 },
             } => {
@@ -789,6 +1052,41 @@ mod tests {
                 assert_eq!(scope, None);
                 assert_eq!(capabilities, vec!["search".to_string(), "records".to_string()]);
                 assert!(revoke_existing_with_label);
+                assert_eq!(confirm, None);
+            }
+            _ => panic!("expected admin api-keys create"),
+        }
+    }
+
+    #[test]
+    fn parse_admin_api_keys_create_privileged_with_confirm() {
+        let args = crate::Cli::parse_from([
+            "enscrive",
+            "admin",
+            "api-keys",
+            "create",
+            "--tenant",
+            "t-1",
+            "--environment",
+            "e-1",
+            "--label",
+            "ops-key",
+            "--scope",
+            "operator",
+            "--confirm",
+            "ops-key",
+        ]);
+        match args.command {
+            crate::Commands::Admin {
+                sub: crate::AdminSubcommand::ApiKeys {
+                    sub: AdminApiKeysSubcommand::Create(AdminApiKeysCreateArgs {
+                        label, scope, confirm, ..
+                    }),
+                },
+            } => {
+                assert_eq!(label, "ops-key");
+                assert_eq!(scope.as_deref(), Some("operator"));
+                assert_eq!(confirm.as_deref(), Some("ops-key"));
             }
             _ => panic!("expected admin api-keys create"),
         }
