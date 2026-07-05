@@ -92,10 +92,23 @@ enum Commands {
     /// Search corpora through /v1/search
     Search(SearchArgs),
 
-    /// Enscrive Agents — open-ended reasoning through /v1/complete
-    /// (managed reasoning; proxies the tenant's BYOK or platform-managed
-    /// provider key, budget-gated and metered).
+    /// Managed reasoning — open-ended completion through /v1/complete
+    /// (proxies the tenant's BYOK or platform-managed provider key,
+    /// budget-gated and metered). For a persisted, corpus-bound agent
+    /// that answers repeatedly against the same retrieval config, see
+    /// `Commands::Agents`.
     Complete(CompleteArgs),
+
+    /// Enscrive Agents — persistent, corpus-bound agents through
+    /// /v1/agents (ENS-783). Each agent is a saved {provider, model,
+    /// system_prompt, corpus_id, top_k, max_tokens} config; `answer`
+    /// retrieves from the bound corpus and reasons over it in one call
+    /// (thin passthrough — no local scoring, budget-gated and metered
+    /// same as `complete`).
+    Agents {
+        #[command(subcommand)]
+        sub: AgentsSubcommand,
+    },
 
     /// Rate card commands (public, no auth required)
     Ratecard {
@@ -484,6 +497,80 @@ struct CompleteArgs {
     /// Nucleus sampling in [0.0, 1.0]. Provider default applies if unset.
     #[arg(long)]
     top_p: Option<f32>,
+}
+
+/// ENS-783 PR-5: `enscrive agents` subcommands — thin passthrough over
+/// enscrive-developer's `/v1/agents` CRUD + answer surface. No local
+/// scoring or reasoning logic lives in the CLI.
+#[derive(Subcommand)]
+enum AgentsSubcommand {
+    /// Create a persistent agent bound to a corpus (POST /v1/agents)
+    Create(AgentsCreateArgs),
+
+    /// List agents (GET /v1/agents)
+    List,
+
+    /// Get a single agent by id (GET /v1/agents/{id})
+    Get {
+        /// Agent UUID
+        id: String,
+    },
+
+    /// Delete an agent by id (DELETE /v1/agents/{id})
+    Delete {
+        /// Agent UUID
+        id: String,
+    },
+
+    /// Ask a question against an agent's bound corpus — retrieval +
+    /// managed reasoning in one call (POST /v1/agents/{id}/answer).
+    /// `corpus_id`, `top_k`, and `max_tokens` are hard-locked from the
+    /// persisted agent row server-side (never request-supplied) — there
+    /// is no per-answer override; adjust the agent itself instead.
+    Answer(AgentsAnswerArgs),
+}
+
+#[derive(Args)]
+struct AgentsCreateArgs {
+    /// Human-readable agent name
+    #[arg(long)]
+    name: String,
+
+    /// Reasoning provider. Server-validated (v1: anthropic | openai).
+    #[arg(long)]
+    provider: String,
+
+    /// Model identifier as the provider names it (e.g. "claude-opus-4-8").
+    /// Required — there is no platform default.
+    #[arg(long)]
+    model: String,
+
+    /// Corpus UUID the agent retrieves from. Hard-locked at create time —
+    /// never request-supplied again for this agent's answers.
+    #[arg(long = "corpus-id")]
+    corpus_id: String,
+
+    /// Optional system prompt / instructions.
+    #[arg(long = "system-prompt")]
+    system_prompt: Option<String>,
+
+    /// Number of chunks to retrieve per answer. Server default applies if unset.
+    #[arg(long = "top-k")]
+    top_k: Option<u32>,
+
+    /// Hard ceiling on generated tokens. Server default applies if unset.
+    #[arg(long = "max-tokens")]
+    max_tokens: Option<u32>,
+}
+
+#[derive(Args)]
+struct AgentsAnswerArgs {
+    /// Agent UUID
+    id: String,
+
+    /// The question to ask the agent
+    #[arg(long)]
+    question: String,
 }
 
 #[derive(Subcommand)]
@@ -2847,6 +2934,49 @@ fn read_complete_json_file(path: &str, label: &str) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|e| format!("parse {label} JSON in '{path}': {e}"))
 }
 
+/// ENS-783 PR-5: human-readable shaping for `POST /v1/agents/{id}/answer`
+/// on top of the raw JSON dump `CliResponse::success` already prints —
+/// same "extra summary lines before the full JSON" pattern used by
+/// `license status` / `license deactivate` above. Reads the response as a
+/// plain `serde_json::Value` (the CLI has no shared-types dependency on
+/// enscrive-developer's `types_api` crate; every other command in this
+/// file works the same way) rather than deserializing into a typed
+/// struct, so an additive server-side field never breaks this printer.
+fn print_agent_answer_human(data: &Value) {
+    if let Some(answer) = data.get("answer").and_then(Value::as_str) {
+        println!("{answer}");
+    }
+
+    if let Some(citations) = data.get("citations").and_then(Value::as_array) {
+        if !citations.is_empty() {
+            println!();
+        }
+        for c in citations {
+            let doc = c.get("document_id").and_then(Value::as_str).unwrap_or("?");
+            let chunk = c.get("chunk_index").and_then(Value::as_u64);
+            let score = c.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+            let snippet = c.get("snippet").and_then(Value::as_str).unwrap_or("");
+            let doc_label = match chunk {
+                Some(idx) => format!("{doc}#{idx}"),
+                None => doc.to_string(),
+            };
+            println!("[{doc_label}] {score:.3} {snippet}");
+        }
+    }
+
+    if let Some(usage) = data.get("usage") {
+        let reasoning_in = usage.get("reasoning_input_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let reasoning_out = usage.get("reasoning_output_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let reasoning_turns = usage.get("reasoning_turns").and_then(Value::as_u64).unwrap_or(0);
+        let retrieval_searches = usage.get("retrieval_searches").and_then(Value::as_u64).unwrap_or(0);
+        let retrieval_chunks = usage.get("retrieval_chunks").and_then(Value::as_u64).unwrap_or(0);
+        println!();
+        println!(
+            "usage: reasoning {reasoning_in}+{reasoning_out} tokens / {reasoning_turns} turn(s), retrieval {retrieval_chunks} chunk(s) / {retrieval_searches} search(es)"
+        );
+    }
+}
+
 /// Build the `POST /v1/complete` request body (ENS-751).
 ///
 /// `--prompt` / `--messages` are enforced mutually-exclusive-and-required by
@@ -3332,6 +3462,13 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
     let key: &str = match cmd {
         Commands::Search(_) => "search",
         Commands::Complete(_) => "complete",
+        Commands::Agents { sub } => match sub {
+            AgentsSubcommand::Create(_) => "agents create",
+            AgentsSubcommand::List => "agents list",
+            AgentsSubcommand::Get { .. } => "agents get",
+            AgentsSubcommand::Delete { .. } => "agents delete",
+            AgentsSubcommand::Answer(_) => "agents answer",
+        },
         Commands::Ratecard { sub } => match sub {
             RatecardSubcommand::Show(_) => "ratecard show",
         },
@@ -3884,6 +4021,58 @@ async fn main() {
                     Err(e) => request_failure("complete", e).emit(fmt),
                 },
                 Err(e) => CliResponse::fail("complete", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt),
+            }
+        }
+        Commands::Agents { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            match sub {
+                AgentsSubcommand::Create(args) => {
+                    let body = json!({
+                        "name": args.name,
+                        "provider": args.provider,
+                        "model": args.model,
+                        "system_prompt": args.system_prompt,
+                        "corpus_id": args.corpus_id,
+                        "top_k": args.top_k,
+                        "max_tokens": args.max_tokens,
+                    });
+                    match client.post_json("/v1/agents", body).await {
+                        Ok(data) => CliResponse::success("agents create", data).emit(fmt),
+                        Err(e) => request_failure("agents create", e).emit(fmt),
+                    }
+                }
+                AgentsSubcommand::List => match client.get_json("/v1/agents").await {
+                    Ok(data) => CliResponse::success("agents list", data).emit(fmt),
+                    Err(e) => request_failure("agents list", e).emit(fmt),
+                },
+                AgentsSubcommand::Get { id } => {
+                    let path = format!("/v1/agents/{id}");
+                    match client.get_json(&path).await {
+                        Ok(data) => CliResponse::success("agents get", data).emit(fmt),
+                        Err(e) => request_failure("agents get", e).emit(fmt),
+                    }
+                }
+                AgentsSubcommand::Delete { id } => {
+                    let path = format!("/v1/agents/{id}");
+                    match client.delete_json(&path).await {
+                        Ok(data) => CliResponse::success("agents delete", data).emit(fmt),
+                        Err(e) => request_failure("agents delete", e).emit(fmt),
+                    }
+                }
+                AgentsSubcommand::Answer(args) => {
+                    let path = format!("/v1/agents/{}/answer", args.id);
+                    let body = json!({ "question": args.question });
+                    match client.post_json(&path, body).await {
+                        Ok(data) => {
+                            if let OutputFormat::Human = fmt {
+                                print_agent_answer_human(&data);
+                            }
+                            CliResponse::success("agents answer", data).emit(fmt)
+                        }
+                        Err(e) => request_failure("agents answer", e).emit(fmt),
+                    }
+                }
             }
         }
         Commands::Ratecard { sub } => {
@@ -5810,6 +5999,208 @@ mod tests {
             }
             _ => panic!("expected Complete"),
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // ENS-783 PR-5: `enscrive agents` command parsing + human-output shaping.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn parse_agents_create_command() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "--api-key",
+            "test-key",
+            "agents",
+            "create",
+            "--name",
+            "docs-bot",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-opus-4-8",
+            "--corpus-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--system-prompt",
+            "Answer from the docs corpus only.",
+            "--top-k",
+            "8",
+            "--max-tokens",
+            "1024",
+        ]);
+        match args.command {
+            Commands::Agents {
+                sub:
+                    AgentsSubcommand::Create(AgentsCreateArgs {
+                        name,
+                        provider,
+                        model,
+                        corpus_id,
+                        system_prompt,
+                        top_k,
+                        max_tokens,
+                    }),
+            } => {
+                assert_eq!(name, "docs-bot");
+                assert_eq!(provider, "anthropic");
+                assert_eq!(model, "claude-opus-4-8");
+                assert_eq!(corpus_id, "11111111-1111-1111-1111-111111111111");
+                assert_eq!(
+                    system_prompt.as_deref(),
+                    Some("Answer from the docs corpus only.")
+                );
+                assert_eq!(top_k, Some(8));
+                assert_eq!(max_tokens, Some(1024));
+            }
+            _ => panic!("expected agents create"),
+        }
+    }
+
+    #[test]
+    fn parse_agents_create_command_minimal() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "agents",
+            "create",
+            "--name",
+            "docs-bot",
+            "--provider",
+            "anthropic",
+            "--model",
+            "claude-opus-4-8",
+            "--corpus-id",
+            "11111111-1111-1111-1111-111111111111",
+        ]);
+        match args.command {
+            Commands::Agents {
+                sub:
+                    AgentsSubcommand::Create(AgentsCreateArgs {
+                        system_prompt,
+                        top_k,
+                        max_tokens,
+                        ..
+                    }),
+            } => {
+                assert!(system_prompt.is_none());
+                assert!(top_k.is_none());
+                assert!(max_tokens.is_none());
+            }
+            _ => panic!("expected agents create"),
+        }
+    }
+
+    #[test]
+    fn parse_agents_list_command() {
+        let args = Cli::parse_from(["enscrive", "agents", "list"]);
+        assert!(matches!(
+            args.command,
+            Commands::Agents {
+                sub: AgentsSubcommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_agents_get_command() {
+        let args = Cli::parse_from(["enscrive", "agents", "get", "agent-1"]);
+        match args.command {
+            Commands::Agents {
+                sub: AgentsSubcommand::Get { id },
+            } => assert_eq!(id, "agent-1"),
+            _ => panic!("expected agents get"),
+        }
+    }
+
+    #[test]
+    fn parse_agents_delete_command() {
+        let args = Cli::parse_from(["enscrive", "agents", "delete", "agent-1"]);
+        match args.command {
+            Commands::Agents {
+                sub: AgentsSubcommand::Delete { id },
+            } => assert_eq!(id, "agent-1"),
+            _ => panic!("expected agents delete"),
+        }
+    }
+
+    #[test]
+    fn parse_agents_answer_command() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "agents",
+            "answer",
+            "agent-1",
+            "--question",
+            "what is the refund policy?",
+        ]);
+        match args.command {
+            Commands::Agents {
+                sub: AgentsSubcommand::Answer(AgentsAnswerArgs { id, question }),
+            } => {
+                assert_eq!(id, "agent-1");
+                assert_eq!(question, "what is the refund policy?");
+            }
+            _ => panic!("expected agents answer"),
+        }
+    }
+
+    #[test]
+    fn agents_command_keys_present_in_command_tiers() {
+        for key in [
+            "agents create",
+            "agents list",
+            "agents get",
+            "agents delete",
+            "agents answer",
+        ] {
+            assert!(
+                COMMAND_TIERS.iter().any(|(cmd, _, _)| *cmd == key),
+                "expected {key:?} to be present in COMMAND_TIERS (add a row to v1-surface-contract.toml)"
+            );
+        }
+    }
+
+    #[test]
+    fn print_agent_answer_human_does_not_panic_on_full_shape() {
+        // Ground-truth shape from enscrive-developer's `types_api::AnswerResponse`
+        // (ENS-783 PR-4): exercise the printer end-to-end so a future field
+        // rename is caught here rather than only in a live smoke test.
+        let data = json!({
+            "answer": "Refunds are available within 30 days.",
+            "citations": [
+                {
+                    "document_id": "doc-1",
+                    "chunk_index": 2,
+                    "score": 0.83,
+                    "snippet": "Refunds within 30 days of purchase.",
+                }
+            ],
+            "usage": {
+                "reasoning_input_tokens": 512,
+                "reasoning_output_tokens": 64,
+                "reasoning_turns": 1,
+                "retrieval_searches": 1,
+                "retrieval_chunks": 8,
+            },
+            "model": "claude-opus-4-8",
+            "stop_reason": "end_turn",
+        });
+        // No assertion on stdout content — this guards against a panic (e.g.
+        // an unwrap on a missing/renamed field) when the server's response
+        // shape drifts, mirroring the other "does not panic" tests in this
+        // module.
+        print_agent_answer_human(&data);
+    }
+
+    #[test]
+    fn print_agent_answer_human_does_not_panic_on_empty_citations() {
+        let data = json!({
+            "answer": "No matching documents.",
+            "citations": [],
+            "usage": {},
+            "model": "claude-opus-4-8",
+            "stop_reason": "end_turn",
+        });
+        print_agent_answer_human(&data);
     }
 
     #[test]
