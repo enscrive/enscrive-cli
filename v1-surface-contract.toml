@@ -1147,3 +1147,56 @@ status = "implemented"
 note = "ENS-752 / ENS-660 — always-async catalog/substrate repair"
 deployment_tier = "any-mode"
 required_plan = "enterprise"
+
+# ── Enscrive Agents: persistent agents (ENS-783) ────────
+#
+# Distinct from `complete` (ad-hoc /v1/complete calls): an "agent" is a
+# named, persisted {provider, model, system_prompt, corpus_id, top_k,
+# max_tokens} config that answers questions against its bound corpus
+# (RAG passthrough — retrieval + reasoning, budget-gated and metered same
+# as /v1/complete). enscrive-developer PR #167 (CRUD) + #169 (answer).
+
+[[endpoint]]
+method = "POST"
+path = "/v1/agents"
+cli_command = "agents create"
+status = "implemented"
+note = "ENS-783 PR-5 — create a persistent agent bound to a corpus"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/agents"
+cli_command = "agents list"
+status = "implemented"
+note = "ENS-783 PR-5"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/agents/{id}"
+cli_command = "agents get"
+status = "implemented"
+note = "ENS-783 PR-5"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/agents/{id}"
+cli_command = "agents delete"
+status = "implemented"
+note = "ENS-783 PR-5"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/agents/{id}/answer"
+cli_command = "agents answer"
+status = "implemented"
+note = "ENS-783 PR-5 — retrieval + managed reasoning against the agent's bound corpus; thin passthrough, no local scoring"
+deployment_tier = "any-mode"
+required_plan = "free"
