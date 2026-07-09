@@ -18,6 +18,27 @@ on:
         description: "Unified Enscrive release version tag (e.g. v0.1.0-beta.3)"
         required: true
         type: string
+      channel:
+        # ENS Step-2 (channel isolation): which release channel this dispatch
+        # publishes. `dev` is the default and is the ONLY channel the
+        # release-orchestrator auto-dispatches (it never passes `channel`, so
+        # this default keeps the automatic dev path intact). Dispatching with
+        # `stage` or `prod` reads that channel's pins from
+        # enscrive-deploy/channels/<channel>.toml and publishes
+        # releases/<channel>/latest.json — a manifest INDEPENDENT of dev's.
+        #
+        # This manual dispatch IS the promotion-ceremony trigger: a stage/prod
+        # manifest only moves after a reviewer-approved PR bumps the channel
+        # toml pins AND an operator manually dispatches this workflow with the
+        # matching channel. There is no automatic stage/prod advance.
+        description: "Release channel to publish (dev auto-advances; stage/prod are promotion-ceremony only)"
+        required: false
+        type: choice
+        default: dev
+        options:
+          - dev
+          - stage
+          - prod
       enscrive_docs_version:
         description: "enscrive-docs version tag to bundle (leave empty to resolve the latest tag automatically)"
         required: false
@@ -33,12 +54,22 @@ env:
   AWS_ROLE_ARN: arn:aws:iam::535002853127:role/enscrive-releases-publisher
   S3_BUCKET: enscrive-install-artifacts-dev
   CF_DISTRIBUTION_ID: EWE9BH1POOS0A
-  CHANNEL: dev
 
 jobs:
   generate-manifest:
     name: generate and publish manifest
     runs-on: ubuntu-latest
+    env:
+      # ENS Step-2: channel is now dispatch-selected (default dev) instead of
+      # hardcoded. Every downstream step reads ${CHANNEL} — reading channels/
+      # ${CHANNEL}.toml, verifying releases/${CHANNEL}/<ver>/ S3 keys, and
+      # publishing releases/${CHANNEL}/latest.json — so a single input flips
+      # the whole generator between the dev, stage, and prod channels.
+      # `inputs.channel` is always populated on workflow_dispatch (the sole
+      # trigger) via its `dev` default, so this never resolves empty. Held at
+      # job scope (not workflow scope) so the `inputs` context is unambiguously
+      # available.
+      CHANNEL: ${{ inputs.channel }}
 
     steps:
       - name: Checkout enscrive-cli at main (per ENS-538)
