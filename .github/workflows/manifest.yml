@@ -319,7 +319,12 @@ jobs:
           # ARTIFACT_KIND
           assert 'ARTIFACT_KIND[enscrive-cli]'                "${ARTIFACT_KIND[enscrive-cli]:-}"                "binary"
           assert 'ARTIFACT_KIND[enscrive-developer]'          "${ARTIFACT_KIND[enscrive-developer]:-}"          "archive"
-          assert 'ARTIFACT_KIND[enscrive-observe]'            "${ARTIFACT_KIND[enscrive-observe]:-}"            "binary"
+          # ENS Step-2: enscrive-observe is now an archive (binary + observability
+          # configs) like enscrive-developer, so its S3 artifact is a .tar.gz.
+          # This assertion tracks roster.toml's kind for enscrive-observe; it
+          # MUST move in lockstep with that roster flip or manifest generation
+          # fails its own self-check.
+          assert 'ARTIFACT_KIND[enscrive-observe]'            "${ARTIFACT_KIND[enscrive-observe]:-}"            "archive"
           assert 'ARTIFACT_KIND[enscrive-embed]'              "${ARTIFACT_KIND[enscrive-embed]:-}"              "binary"
           assert 'ARTIFACT_KIND[esm]'                         "${ARTIFACT_KIND[esm]:-}"                         "binary"
           assert 'ARTIFACT_KIND[eba]'                         "${ARTIFACT_KIND[eba]:-}"                         "binary"
