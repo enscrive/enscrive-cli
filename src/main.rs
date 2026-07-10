@@ -110,6 +110,16 @@ enum Commands {
         sub: AgentsSubcommand,
     },
 
+    /// Records — the bounded structural store (`/v1/records`). Tenant-scoped
+    /// collections of JSON records with declared indexed fields for typed
+    /// filter/sort/keyset-page queries. Slice 1 is the structural store;
+    /// embedding-backed collections (`--embed`) and `--vector-query` return
+    /// 501 until Slice 2. Requires the `records` API-key capability.
+    Records {
+        #[command(subcommand)]
+        sub: RecordsSubcommand,
+    },
+
     /// Rate card commands (public, no auth required)
     Ratecard {
         #[command(subcommand)]
@@ -571,6 +581,142 @@ struct AgentsAnswerArgs {
     /// The question to ask the agent
     #[arg(long)]
     question: String,
+}
+
+#[derive(Subcommand)]
+enum RecordsSubcommand {
+    /// Manage record collections (schemas) — `/v1/records/collections`
+    Collections {
+        #[command(subcommand)]
+        sub: RecordsCollectionsSubcommand,
+    },
+
+    /// Upsert a record into a collection by id
+    /// (POST /v1/records/{collection}). Last-write-wins; no versioning.
+    Put(RecordsPutArgs),
+
+    /// Query records with typed filters, sort, and keyset pagination
+    /// (POST /v1/records/{collection}/query).
+    Query(RecordsQueryArgs),
+
+    /// Get a single record by id (GET /v1/records/{collection}/{id})
+    Get {
+        /// Collection name
+        collection: String,
+        /// Record id
+        id: String,
+    },
+
+    /// Delete a single record by id (DELETE /v1/records/{collection}/{id})
+    Delete {
+        /// Collection name
+        collection: String,
+        /// Record id
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RecordsCollectionsSubcommand {
+    /// Create a collection (POST /v1/records/collections)
+    Create(RecordsCollectionCreateArgs),
+
+    /// List collections (GET /v1/records/collections)
+    List,
+
+    /// Replace a collection's indexed-field set — whole-set replace, not a
+    /// merge (PUT /v1/records/collections/{collection}).
+    Update(RecordsCollectionUpdateArgs),
+
+    /// Delete a collection and cascade-delete all its records
+    /// (DELETE /v1/records/collections/{collection}).
+    Delete {
+        /// Collection name
+        collection: String,
+    },
+}
+
+#[derive(Args)]
+struct RecordsCollectionCreateArgs {
+    /// Collection name (unique per tenant)
+    #[arg(long)]
+    collection: String,
+
+    /// Declare an indexed field as `NAME:TYPE`
+    /// (TYPE = string | number | bool | timestamp). Repeatable.
+    #[arg(long = "indexed-field", value_name = "NAME:TYPE")]
+    indexed_field: Vec<String>,
+
+    /// Request an embedding-backed collection. Slice-1 server returns 501
+    /// (embedding lands in Slice 2).
+    #[arg(long)]
+    embed: bool,
+
+    /// Embedding model for `--embed` collections (unused in Slice 1).
+    #[arg(long = "embedding-model")]
+    embedding_model: Option<String>,
+}
+
+#[derive(Args)]
+struct RecordsCollectionUpdateArgs {
+    /// Collection name
+    collection: String,
+
+    /// Replacement indexed field as `NAME:TYPE`
+    /// (TYPE = string | number | bool | timestamp). Repeatable; the supplied
+    /// set replaces the collection's entire declared field set.
+    #[arg(long = "indexed-field", value_name = "NAME:TYPE")]
+    indexed_field: Vec<String>,
+}
+
+#[derive(Args)]
+struct RecordsPutArgs {
+    /// Collection name
+    collection: String,
+
+    /// Record id (unique within the collection; upsert-by-id)
+    #[arg(long)]
+    id: String,
+
+    /// Record body as an inline JSON object
+    #[arg(long = "json")]
+    json: Option<String>,
+
+    /// Record body read from a JSON file
+    #[arg(long = "json-file")]
+    json_file: Option<String>,
+}
+
+#[derive(Args)]
+struct RecordsQueryArgs {
+    /// Collection name
+    collection: String,
+
+    /// Filter as `FIELD:OP:VALUE` (OP = eq | neq | lt | lte | gt | gte). The
+    /// field must be a declared indexed field. VALUE is parsed as JSON when it
+    /// parses (number/bool/quoted-string), otherwise treated as a string (so
+    /// bare timestamps work). Repeatable.
+    #[arg(long = "filter", value_name = "FIELD:OP:VALUE")]
+    filter: Vec<String>,
+
+    /// Sort as `FIELD:DIR` (DIR = asc | desc; default asc). Field must be a
+    /// declared indexed field. Repeatable. Cannot be combined with --cursor.
+    #[arg(long = "sort", value_name = "FIELD:DIR")]
+    sort: Vec<String>,
+
+    /// Max rows to return (server clamps to 1..=200; default 50).
+    #[arg(long)]
+    limit: Option<u32>,
+
+    /// Keyset cursor = the id of the last row from the previous page. Only
+    /// valid under the default id-ascending order (cannot combine with --sort).
+    #[arg(long)]
+    cursor: Option<String>,
+
+    /// Full `QueryRecordsBody` as raw JSON — escape hatch that overrides the
+    /// structured --filter/--sort/--limit/--cursor flags entirely.
+    #[arg(long = "query-json")]
+    query_json: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -2402,6 +2548,115 @@ fn parse_json_source(
     serde_json::from_str(&raw).map_err(|e| format!("parse {label} JSON: {e}"))
 }
 
+/// Parse repeated `NAME:TYPE` `--indexed-field` specs into the `indexed_fields`
+/// JSON array for the Records collection API. TYPE is one of
+/// `string|number|bool|timestamp` (the server's `RecordFieldType`). Validation
+/// here is a client-side courtesy; the server re-validates authoritatively.
+fn parse_record_indexed_fields(specs: &[String]) -> Result<Value, String> {
+    let mut out = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let (name, ty) = spec
+            .split_once(':')
+            .ok_or_else(|| format!("--indexed-field '{spec}' must be NAME:TYPE"))?;
+        let name = name.trim();
+        let ty = ty.trim();
+        if name.is_empty() {
+            return Err(format!("--indexed-field '{spec}' has an empty field name"));
+        }
+        if !matches!(ty, "string" | "number" | "bool" | "timestamp") {
+            return Err(format!(
+                "--indexed-field '{spec}' type must be one of string|number|bool|timestamp"
+            ));
+        }
+        out.push(json!({ "name": name, "type": ty }));
+    }
+    Ok(Value::Array(out))
+}
+
+/// Parse the record body for `records put` from exactly one of `--json` /
+/// `--json-file`. Mirrors `parse_json_source` but with the flag names this
+/// command exposes.
+fn parse_record_json_body(
+    inline_json: &Option<String>,
+    file_path: &Option<String>,
+) -> Result<Value, String> {
+    let raw = match (inline_json, file_path) {
+        (Some(json), None) => json.clone(),
+        (None, Some(path)) => {
+            fs::read_to_string(path).map_err(|e| format!("read record JSON file '{path}': {e}"))?
+        }
+        (None, None) | (Some(_), Some(_)) => {
+            return Err("provide exactly one of --json or --json-file".to_string());
+        }
+    };
+    serde_json::from_str(&raw).map_err(|e| format!("parse record JSON: {e}"))
+}
+
+/// Build the `QueryRecordsBody` JSON for `records query`. When `--query-json`
+/// is supplied it is used verbatim (escape hatch) and the structured flags are
+/// ignored; otherwise the body is assembled from --filter/--sort/--limit/--cursor.
+fn build_record_query_body(args: &RecordsQueryArgs) -> Result<Value, String> {
+    if let Some(raw) = &args.query_json {
+        return serde_json::from_str(raw).map_err(|e| format!("parse --query-json: {e}"));
+    }
+    if args.cursor.is_some() && !args.sort.is_empty() {
+        return Err(
+            "--cursor cannot be combined with --sort (keyset paging is valid only under the \
+             default id-ascending order)"
+                .to_string(),
+        );
+    }
+    let mut filters = Vec::with_capacity(args.filter.len());
+    for spec in &args.filter {
+        let mut parts = spec.splitn(3, ':');
+        let field = parts.next().unwrap_or("").trim();
+        let op = parts
+            .next()
+            .ok_or_else(|| format!("--filter '{spec}' must be FIELD:OP:VALUE"))?
+            .trim();
+        let raw_val = parts
+            .next()
+            .ok_or_else(|| format!("--filter '{spec}' must be FIELD:OP:VALUE"))?;
+        if field.is_empty() {
+            return Err(format!("--filter '{spec}' has an empty field name"));
+        }
+        if !matches!(op, "eq" | "neq" | "lt" | "lte" | "gt" | "gte") {
+            return Err(format!(
+                "--filter '{spec}' op must be one of eq|neq|lt|lte|gt|gte"
+            ));
+        }
+        // VALUE parses as JSON when it can (number/bool/quoted-string/object);
+        // otherwise it is a bare string (so unquoted timestamps pass through).
+        let value: Value =
+            serde_json::from_str(raw_val).unwrap_or_else(|_| Value::String(raw_val.to_string()));
+        filters.push(json!({ "field": field, "op": op, "value": value }));
+    }
+    let mut sort = Vec::with_capacity(args.sort.len());
+    for spec in &args.sort {
+        let (field, dir) = match spec.split_once(':') {
+            Some((f, d)) => (f.trim(), d.trim()),
+            None => (spec.trim(), "asc"),
+        };
+        if field.is_empty() {
+            return Err(format!("--sort '{spec}' has an empty field name"));
+        }
+        if !matches!(dir, "asc" | "desc") {
+            return Err(format!("--sort '{spec}' dir must be asc|desc"));
+        }
+        sort.push(json!({ "field": field, "dir": dir }));
+    }
+    let mut body = serde_json::Map::new();
+    body.insert("filters".to_string(), Value::Array(filters));
+    body.insert("sort".to_string(), Value::Array(sort));
+    if let Some(limit) = args.limit {
+        body.insert("limit".to_string(), json!(limit));
+    }
+    if let Some(cursor) = &args.cursor {
+        body.insert("cursor".to_string(), json!(cursor));
+    }
+    Ok(Value::Object(body))
+}
+
 fn parse_segments_source(args: &IngestPreparedArgs) -> Result<Value, String> {
     let value = parse_json_source(&args.segments_json, &args.segments_file, "segments")?;
     let segments = coerce_prepared_segments(value)?;
@@ -3469,6 +3724,18 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
             AgentsSubcommand::Delete { .. } => "agents delete",
             AgentsSubcommand::Answer(_) => "agents answer",
         },
+        Commands::Records { sub } => match sub {
+            RecordsSubcommand::Collections { sub } => match sub {
+                RecordsCollectionsSubcommand::Create(_) => "records collections create",
+                RecordsCollectionsSubcommand::List => "records collections list",
+                RecordsCollectionsSubcommand::Update(_) => "records collections update",
+                RecordsCollectionsSubcommand::Delete { .. } => "records collections delete",
+            },
+            RecordsSubcommand::Put(_) => "records put",
+            RecordsSubcommand::Query(_) => "records query",
+            RecordsSubcommand::Get { .. } => "records get",
+            RecordsSubcommand::Delete { .. } => "records delete",
+        },
         Commands::Ratecard { sub } => match sub {
             RatecardSubcommand::Show(_) => "ratecard show",
         },
@@ -4071,6 +4338,131 @@ async fn main() {
                             CliResponse::success("agents answer", data).emit(fmt)
                         }
                         Err(e) => request_failure("agents answer", e).emit(fmt),
+                    }
+                }
+            }
+        }
+        Commands::Records { sub } => {
+            let ctx = api_context.clone().unwrap();
+            let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+            match sub {
+                RecordsSubcommand::Collections { sub } => match sub {
+                    RecordsCollectionsSubcommand::Create(args) => {
+                        let indexed_fields = match parse_record_indexed_fields(&args.indexed_field)
+                        {
+                            Ok(v) => v,
+                            Err(e) => CliResponse::fail(
+                                "records collections create",
+                                e,
+                                FailureClass::Bug,
+                                EXIT_CONFIG,
+                            )
+                            .emit(fmt),
+                        };
+                        let body = json!({
+                            "collection": args.collection,
+                            "indexed_fields": indexed_fields,
+                            "embed": args.embed,
+                            "embedding_model": args.embedding_model,
+                        });
+                        match client.post_json("/v1/records/collections", body).await {
+                            Ok(data) => {
+                                CliResponse::success("records collections create", data).emit(fmt)
+                            }
+                            Err(e) => {
+                                request_failure("records collections create", e).emit(fmt)
+                            }
+                        }
+                    }
+                    RecordsCollectionsSubcommand::List => {
+                        match client.get_json("/v1/records/collections").await {
+                            Ok(data) => {
+                                CliResponse::success("records collections list", data).emit(fmt)
+                            }
+                            Err(e) => request_failure("records collections list", e).emit(fmt),
+                        }
+                    }
+                    RecordsCollectionsSubcommand::Update(args) => {
+                        let indexed_fields = match parse_record_indexed_fields(&args.indexed_field)
+                        {
+                            Ok(v) => v,
+                            Err(e) => CliResponse::fail(
+                                "records collections update",
+                                e,
+                                FailureClass::Bug,
+                                EXIT_CONFIG,
+                            )
+                            .emit(fmt),
+                        };
+                        let path = format!("/v1/records/collections/{}", args.collection);
+                        let body = json!({ "indexed_fields": indexed_fields });
+                        match client.put_json(&path, body).await {
+                            Ok(data) => {
+                                CliResponse::success("records collections update", data).emit(fmt)
+                            }
+                            Err(e) => {
+                                request_failure("records collections update", e).emit(fmt)
+                            }
+                        }
+                    }
+                    RecordsCollectionsSubcommand::Delete { collection } => {
+                        let path = format!("/v1/records/collections/{collection}");
+                        match client.delete_json(&path).await {
+                            Ok(data) => {
+                                let data = if data.is_null() {
+                                    json!({ "deleted": true, "collection": collection })
+                                } else {
+                                    data
+                                };
+                                CliResponse::success("records collections delete", data).emit(fmt)
+                            }
+                            Err(e) => {
+                                request_failure("records collections delete", e).emit(fmt)
+                            }
+                        }
+                    }
+                },
+                RecordsSubcommand::Put(args) => {
+                    let json_body = match parse_record_json_body(&args.json, &args.json_file) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            CliResponse::fail("records put", e, FailureClass::Bug, EXIT_CONFIG)
+                                .emit(fmt)
+                        }
+                    };
+                    let path = format!("/v1/records/{}", args.collection);
+                    let body = json!({ "id": args.id, "json_body": json_body });
+                    match client.post_json(&path, body).await {
+                        Ok(data) => CliResponse::success("records put", data).emit(fmt),
+                        Err(e) => request_failure("records put", e).emit(fmt),
+                    }
+                }
+                RecordsSubcommand::Query(args) => {
+                    let body = match build_record_query_body(args) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            CliResponse::fail("records query", e, FailureClass::Bug, EXIT_CONFIG)
+                                .emit(fmt)
+                        }
+                    };
+                    let path = format!("/v1/records/{}/query", args.collection);
+                    match client.post_json(&path, body).await {
+                        Ok(data) => CliResponse::success("records query", data).emit(fmt),
+                        Err(e) => request_failure("records query", e).emit(fmt),
+                    }
+                }
+                RecordsSubcommand::Get { collection, id } => {
+                    let path = format!("/v1/records/{collection}/{id}");
+                    match client.get_json(&path).await {
+                        Ok(data) => CliResponse::success("records get", data).emit(fmt),
+                        Err(e) => request_failure("records get", e).emit(fmt),
+                    }
+                }
+                RecordsSubcommand::Delete { collection, id } => {
+                    let path = format!("/v1/records/{collection}/{id}");
+                    match client.delete_json(&path).await {
+                        Ok(data) => CliResponse::success("records delete", data).emit(fmt),
+                        Err(e) => request_failure("records delete", e).emit(fmt),
                     }
                 }
             }
@@ -8852,5 +9244,134 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
     fn require_managed_confirmation_accepts_present_token_in_managed() {
         let result = require_managed_confirmation("managed", Some("ecf_xyz"), "test-cmd");
         assert_eq!(result, Ok(Some("ecf_xyz".to_string())));
+    }
+
+    // ── Records command family ──────────────────────────
+
+    #[test]
+    fn records_collections_create_parses() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "records",
+            "collections",
+            "create",
+            "--collection",
+            "notes",
+            "--indexed-field",
+            "author:string",
+            "--indexed-field",
+            "created:timestamp",
+        ]);
+        match args.command {
+            Commands::Records {
+                sub:
+                    RecordsSubcommand::Collections {
+                        sub: RecordsCollectionsSubcommand::Create(a),
+                    },
+            } => {
+                assert_eq!(a.collection, "notes");
+                assert_eq!(a.indexed_field, vec!["author:string", "created:timestamp"]);
+                assert!(!a.embed, "embed defaults false");
+                assert!(a.embedding_model.is_none());
+            }
+            _ => panic!("expected records collections create"),
+        }
+    }
+
+    #[test]
+    fn parse_record_indexed_fields_maps_name_type() {
+        let out = parse_record_indexed_fields(&[
+            "author:string".to_string(),
+            "score:number".to_string(),
+        ])
+        .expect("valid specs parse");
+        assert_eq!(
+            out,
+            json!([
+                { "name": "author", "type": "string" },
+                { "name": "score", "type": "number" },
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_record_indexed_fields_rejects_bad_type_and_shape() {
+        assert!(parse_record_indexed_fields(&["author:uuid".to_string()]).is_err());
+        assert!(parse_record_indexed_fields(&["author".to_string()]).is_err());
+        assert!(parse_record_indexed_fields(&[":string".to_string()]).is_err());
+    }
+
+    #[test]
+    fn build_record_query_body_structured() {
+        let args = RecordsQueryArgs {
+            collection: "events".to_string(),
+            filter: vec![
+                "kind:eq:signup".to_string(),
+                "count:gte:5".to_string(),
+                "active:eq:true".to_string(),
+                // value with colons (timestamp) survives via splitn(3)
+                "ts:gt:2026-07-10T12:00:00Z".to_string(),
+            ],
+            sort: vec!["count:desc".to_string(), "kind".to_string()],
+            limit: Some(25),
+            cursor: None,
+            query_json: None,
+        };
+        let body = build_record_query_body(&args).expect("valid query builds");
+        assert_eq!(
+            body["filters"],
+            json!([
+                { "field": "kind", "op": "eq", "value": "signup" },
+                { "field": "count", "op": "gte", "value": 5 },
+                { "field": "active", "op": "eq", "value": true },
+                { "field": "ts", "op": "gt", "value": "2026-07-10T12:00:00Z" },
+            ])
+        );
+        assert_eq!(
+            body["sort"],
+            json!([
+                { "field": "count", "dir": "desc" },
+                { "field": "kind", "dir": "asc" },
+            ])
+        );
+        assert_eq!(body["limit"], json!(25));
+        assert!(body.get("cursor").is_none(), "no cursor supplied");
+    }
+
+    #[test]
+    fn build_record_query_body_rejects_cursor_with_sort() {
+        let args = RecordsQueryArgs {
+            collection: "events".to_string(),
+            filter: vec![],
+            sort: vec!["count:desc".to_string()],
+            limit: None,
+            cursor: Some("last-id".to_string()),
+            query_json: None,
+        };
+        assert!(build_record_query_body(&args).is_err());
+    }
+
+    #[test]
+    fn build_record_query_body_query_json_overrides() {
+        let args = RecordsQueryArgs {
+            collection: "events".to_string(),
+            filter: vec!["ignored:eq:x".to_string()],
+            sort: vec![],
+            limit: None,
+            cursor: None,
+            query_json: Some(r#"{"limit":7,"filters":[]}"#.to_string()),
+        };
+        let body = build_record_query_body(&args).expect("raw json parses");
+        assert_eq!(body["limit"], json!(7));
+    }
+
+    #[test]
+    fn parse_record_json_body_requires_exactly_one_source() {
+        assert!(parse_record_json_body(&None, &None).is_err());
+        assert!(
+            parse_record_json_body(&Some("{}".to_string()), &Some("x".to_string())).is_err()
+        );
+        let ok = parse_record_json_body(&Some(r#"{"a":1}"#.to_string()), &None).unwrap();
+        assert_eq!(ok, json!({ "a": 1 }));
     }
 }

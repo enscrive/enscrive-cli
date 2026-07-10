@@ -1019,6 +1019,86 @@ note = "ENS-751 — single-shot (--prompt) and agentic tool-use (--messages/--to
 deployment_tier = "any-mode"
 required_plan = "free"
 
+# ── Records: bounded structural store (Slice 1) ─────────
+#
+# Tenant-scoped JSON-record collections with declared indexed fields for typed
+# filter/sort/keyset-page queries. Requires the `records` API-key capability.
+# Slice 1 is the structural store; embedding-backed collections (embed=true) and
+# vector_query return 501 until Slice 2 (embedding). No versioning on put
+# (last-write-wins upsert by (collection, id)).
+
+[[endpoint]]
+method = "POST"
+path = "/v1/records/collections"
+cli_command = "records collections create"
+status = "implemented"
+note = "Records Slice 1 — create a collection with declared indexed_fields (name:type). embed=true returns 501 (Slice 2)"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/records/collections"
+cli_command = "records collections list"
+status = "implemented"
+note = "Records Slice 1 — list collections for the tenant"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "PUT"
+path = "/v1/records/collections/{collection}"
+cli_command = "records collections update"
+status = "implemented"
+note = "Records Slice 1 — whole-set replace of a collection's indexed_fields (not a merge)"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/records/collections/{collection}"
+cli_command = "records collections delete"
+status = "implemented"
+note = "Records Slice 1 — delete a collection; cascade-deletes its records (204 No Content)"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/records/{collection}"
+cli_command = "records put"
+status = "implemented"
+note = "Records Slice 1 — upsert a record by id (201 created / 200 replaced); last-write-wins, no versioning"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/records/{collection}/query"
+cli_command = "records query"
+status = "implemented"
+note = "Records Slice 1 — typed filters (field:op:value), sort (field:dir), keyset cursor; vector_query returns 501 (Slice 2). --query-json escape hatch"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "GET"
+path = "/v1/records/{collection}/{id}"
+cli_command = "records get"
+status = "implemented"
+note = "Records Slice 1 — fetch a single record by id"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/records/{collection}/{id}"
+cli_command = "records delete"
+status = "implemented"
+note = "Records Slice 1 — delete a single record by id (200 with {deleted:true,...})"
+deployment_tier = "any-mode"
+required_plan = "free"
+
 # ── Rate Card ───────────────────────────────────────────
 
 [[endpoint]]
