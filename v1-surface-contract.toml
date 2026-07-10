@@ -1024,6 +1024,33 @@ note = "Cross-tenant rate-limit override — managed-mode operator tooling only"
 deployment_tier = "managed-only"
 required_plan = "enterprise"
 
+[[endpoint]]
+method = "GET"
+path = "/v1/admin/api-rate-limits/{tenant_id}"
+cli_command = "admin api-rate-limits list"
+status = "implemented"
+note = "ENS-782 — list a tenant's inbound /v1 edge rate-limit overrides. Admin capability; distinct from the provider governor above"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "PATCH"
+path = "/v1/admin/api-rate-limits/{tenant_id}/{category}"
+cli_command = "admin api-rate-limits set"
+status = "implemented"
+note = "ENS-782 — upsert a per-tenant, per-category inbound rate-limit override (requests_per_minute >= 1). Categories: search|query_embeddings|ingest|corpus_crud|voice_crud|preview_chunking"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
+[[endpoint]]
+method = "DELETE"
+path = "/v1/admin/api-rate-limits/{tenant_id}/{category}"
+cli_command = "admin api-rate-limits delete"
+status = "implemented"
+note = "ENS-782 — remove a per-tenant override, reverting to service default (204; 404 when absent)"
+deployment_tier = "any-mode"
+required_plan = "enterprise"
+
 # ── Admin: Rate Card ───────────────────────────────────
 
 [[endpoint]]
