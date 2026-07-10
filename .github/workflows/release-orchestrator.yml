@@ -59,6 +59,9 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Triggered by: repo=$REPO version=$VERSION"
 
+      - name: Checkout enscrive-cli (for the bump generator script)
+        uses: actions/checkout@v4
+
       - name: Checkout enscrive-deploy main (PAT for cross-repo write)
         uses: actions/checkout@v4
         with:
@@ -99,64 +102,11 @@ jobs:
           echo "Bumping [overrides] entry for roster key '$ROSTER_KEY' -> '$VERSION'"
           export ROSTER_KEY VERSION
 
-          # Write the Python patcher to a temp file so we can use <<'PYEOF'
-          # (no shell-variable interpolation inside) while still passing the
-          # values via os.environ — same pattern as manifest.yml generator.
-          GEN=/tmp/bump-dev-toml.py
-          cat > "${GEN}" <<'PYEOF'
-          import os
-          import re
-          import sys
-
-          path = "channels/dev.toml"
-          roster_key = os.environ["ROSTER_KEY"]
-          version = os.environ["VERSION"]
-
-          with open(path, "r") as f:
-              content = f.read()
-
-          # Idempotency: if the exact pin already exists, no-op
-          already = re.search(
-              rf'^[ \t]*{re.escape(roster_key)}[ \t]*=[ \t]*"{re.escape(version)}"[ \t]*$',
-              content, re.MULTILINE,
-          )
-          if already:
-              print(f"NO_OP: {roster_key} already pinned to {version}")
-              sys.exit(0)
-
-          # Update existing override line, or insert into [overrides] table
-          existing = re.search(
-              rf'^([ \t]*){re.escape(roster_key)}[ \t]*=[ \t]*"[^"]*"[ \t]*$',
-              content, re.MULTILINE,
-          )
-          if existing:
-              new_content = re.sub(
-                  rf'^([ \t]*){re.escape(roster_key)}[ \t]*=[ \t]*"[^"]*"[ \t]*$',
-                  rf'\g<1>{roster_key} = "{version}"',
-                  content, count=1, flags=re.MULTILINE,
-              )
-          else:
-              overrides_header = re.search(r'(^\[overrides\][ \t]*$)', content, re.MULTILINE)
-              if not overrides_header:
-                  sys.stderr.write("ERROR: [overrides] section not found in channels/dev.toml\n")
-                  sys.exit(1)
-              # Insert immediately after the [overrides] header line
-              new_content = (
-                  content[:overrides_header.end()] +
-                  f'\n{roster_key} = "{version}"' +
-                  content[overrides_header.end():]
-              )
-
-          if new_content == content:
-              sys.stderr.write("ERROR: planned an edit but content unchanged\n")
-              sys.exit(1)
-
-          with open(path, "w") as f:
-              f.write(new_content)
-          print(f'WROTE: {roster_key} = "{version}"')
-          PYEOF
-
-          python3 "${GEN}"
+          # Generator lives in enscrive-cli's own tree (not _deploy's), so
+          # reference it relative to GITHUB_WORKSPACE. Extracted from an
+          # inline heredoc (2026-07-10) so the monotonic guard is
+          # unit-testable; see .github/scripts/bump-dev-toml-test.py.
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/bump-dev-toml.py"
 
           if git diff --quiet channels/dev.toml; then
             echo "no_change=true" >> "$GITHUB_OUTPUT"
