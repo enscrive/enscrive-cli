@@ -353,6 +353,18 @@ def main() -> int:
         print("ENSCRIVE_API_KEY is required for a live run (or use --plan-only)", file=sys.stderr)
         return 2
 
+    # Secret hygiene: the injected keys must NEVER surface in any emitted
+    # artifact (stdout or --json-out). Scrub them from every captured error
+    # string, and assert on the serialized output before we print/write it.
+    secrets = sorted({s for s in (api_key, admin_key) if s}, key=len, reverse=True)
+
+    def scrub(text):
+        if not text:
+            return text
+        for s in secrets:
+            text = text.replace(s, "***REDACTED***")
+        return text
+
     results: dict[str, dict] = {}  # endpoint key -> {status, reason}
     ctx: dict[str, str] = {}
     step_ok: dict[str, bool] = {}
@@ -396,7 +408,7 @@ def main() -> int:
                 if val is not None:
                     ctx[var] = str(val)
         for k in step["endpoints"]:
-            results[k] = {"status": "passed" if ok else "failed", "reason": None if ok else err}
+            results[k] = {"status": "passed" if ok else "failed", "reason": None if ok else scrub(err)}
 
     # Fold in skips + deferred + unplanned.
     for k, reason in SKIPS.items():
@@ -418,6 +430,15 @@ def main() -> int:
         "failed": len(failed),
         "skipped": [{"endpoint": k, "reason": results[k]["reason"]} for k in skipped],
     }
+
+    # Secret-scan assert (parity with the campaign runner's bundle guard): the
+    # operator/tenant keys must not appear in anything we emit. Fail loud.
+    emitted = json.dumps(summary) + "".join(str(r.get("reason")) for r in results.values())
+    leaked = [s for s in secrets if s in emitted]
+    if leaked:
+        print("FATAL: secret material detected in parity-full output — aborting emit",
+              file=sys.stderr)
+        return 2
 
     # Human table.
     print(f"\nparity-full vs {args.base_url}")
