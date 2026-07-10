@@ -2101,6 +2101,16 @@ enum AdminSubcommand {
         sub: AdminRateLimitsSubcommand,
     },
 
+    /// Inbound /v1 edge rate-limit override commands (ENS-782). Distinct from
+    /// the provider governor above: these manage the per-tenant override layer
+    /// on the inbound request limiter, keyed by route CATEGORY
+    /// (search | query_embeddings | ingest | corpus_crud | voice_crud |
+    /// preview_chunking). Admin capability required.
+    ApiRateLimits {
+        #[command(subcommand)]
+        sub: AdminApiRateLimitsSubcommand,
+    },
+
     /// Rate card management commands (ENS-175 / ENS-486). Requires an API
     /// key with the Admin capability (operator key, not a normal tenant key).
     Ratecard {
@@ -2215,6 +2225,56 @@ struct AdminRateLimitsSetArgs {
     /// Burst-token capacity (instantaneous headroom above steady-state TPM)
     #[arg(long, required = true)]
     burst_tpm: i64,
+}
+
+#[derive(Subcommand)]
+enum AdminApiRateLimitsSubcommand {
+    /// List a tenant's inbound edge rate-limit overrides
+    /// (GET /v1/admin/api-rate-limits/{tenant_id}).
+    List(AdminApiRateLimitsListArgs),
+
+    /// Upsert a per-tenant, per-category inbound rate-limit override
+    /// (PATCH /v1/admin/api-rate-limits/{tenant_id}/{category}).
+    Set(AdminApiRateLimitsSetArgs),
+
+    /// Remove a per-tenant override, reverting the category to the service
+    /// default (DELETE /v1/admin/api-rate-limits/{tenant_id}/{category};
+    /// 404 when no override exists).
+    Delete(AdminApiRateLimitsDeleteArgs),
+}
+
+#[derive(Args)]
+struct AdminApiRateLimitsListArgs {
+    /// Tenant UUID to list overrides for
+    #[arg(long = "tenant-id", required = true)]
+    tenant_id: String,
+}
+
+#[derive(Args)]
+struct AdminApiRateLimitsSetArgs {
+    /// Tenant UUID to override
+    #[arg(long = "tenant-id", required = true)]
+    tenant_id: String,
+
+    /// Route category: search | query_embeddings | ingest | corpus_crud |
+    /// voice_crud | preview_chunking. Unknown categories are rejected 400.
+    #[arg(long, required = true)]
+    category: String,
+
+    /// Requests-per-minute ceiling (per API key of the tenant; must be >= 1).
+    #[arg(long = "requests-per-minute", required = true)]
+    requests_per_minute: i64,
+}
+
+#[derive(Args)]
+struct AdminApiRateLimitsDeleteArgs {
+    /// Tenant UUID
+    #[arg(long = "tenant-id", required = true)]
+    tenant_id: String,
+
+    /// Route category to revert to the service default
+    #[arg(long, required = true)]
+    category: String,
 }
 
 #[derive(Subcommand)]
@@ -3918,6 +3978,11 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
                 AdminRateLimitsSubcommand::Show(_) | AdminRateLimitsSubcommand::Set(_) => {
                     return None
                 }
+            },
+            AdminSubcommand::ApiRateLimits { sub } => match sub {
+                AdminApiRateLimitsSubcommand::List(_)
+                | AdminApiRateLimitsSubcommand::Set(_)
+                | AdminApiRateLimitsSubcommand::Delete(_) => return None,
             },
             AdminSubcommand::Ratecard { sub } => match sub {
                 // skip-list: Admin-capability operator commands, gated server-side
@@ -6019,6 +6084,60 @@ async fn main() {
                         match client.patch_json(&path, body).await {
                             Ok(data) => CliResponse::success("admin rate-limits set", data).emit(fmt),
                             Err(e) => request_failure("admin rate-limits set", e).emit(fmt),
+                        }
+                    }
+                },
+                AdminSubcommand::ApiRateLimits { sub } => match sub {
+                    // list — GET /v1/admin/api-rate-limits/{tenant_id}
+                    AdminApiRateLimitsSubcommand::List(args) => {
+                        let path = format!("/v1/admin/api-rate-limits/{}", args.tenant_id);
+                        match client.get_json(&path).await {
+                            Ok(data) => {
+                                CliResponse::success("admin api-rate-limits list", data).emit(fmt)
+                            }
+                            Err(e) => {
+                                request_failure("admin api-rate-limits list", e).emit(fmt)
+                            }
+                        }
+                    }
+                    // set — PATCH /v1/admin/api-rate-limits/{tenant_id}/{category}
+                    AdminApiRateLimitsSubcommand::Set(args) => {
+                        let path = format!(
+                            "/v1/admin/api-rate-limits/{}/{}",
+                            args.tenant_id, args.category
+                        );
+                        let body = json!({ "requests_per_minute": args.requests_per_minute });
+                        match client.patch_json(&path, body).await {
+                            Ok(data) => {
+                                CliResponse::success("admin api-rate-limits set", data).emit(fmt)
+                            }
+                            Err(e) => {
+                                request_failure("admin api-rate-limits set", e).emit(fmt)
+                            }
+                        }
+                    }
+                    // delete — DELETE /v1/admin/api-rate-limits/{tenant_id}/{category}
+                    AdminApiRateLimitsSubcommand::Delete(args) => {
+                        let path = format!(
+                            "/v1/admin/api-rate-limits/{}/{}",
+                            args.tenant_id, args.category
+                        );
+                        match client.delete_json(&path).await {
+                            Ok(data) => {
+                                let data = if data.is_null() {
+                                    json!({
+                                        "deleted": true,
+                                        "tenant_id": args.tenant_id,
+                                        "category": args.category,
+                                    })
+                                } else {
+                                    data
+                                };
+                                CliResponse::success("admin api-rate-limits delete", data).emit(fmt)
+                            }
+                            Err(e) => {
+                                request_failure("admin api-rate-limits delete", e).emit(fmt)
+                            }
                         }
                     }
                 },
@@ -9593,6 +9712,73 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 sub: BatchSetsSubcommand::Abandon(BatchSetsGetArgs { id: got }),
             } => assert_eq!(got, id),
             _ => panic!("expected batch-sets abandon"),
+        }
+    }
+
+    // ── Admin api-rate-limits (ENS-782, parity W3) ──────
+
+    #[test]
+    fn admin_api_rate_limits_parse() {
+        let tenant = "11111111-1111-1111-1111-111111111111";
+        match Cli::parse_from(["enscrive", "admin", "api-rate-limits", "list", "--tenant-id", tenant])
+            .command
+        {
+            Commands::Admin {
+                sub:
+                    AdminSubcommand::ApiRateLimits {
+                        sub: AdminApiRateLimitsSubcommand::List(a),
+                    },
+            } => assert_eq!(a.tenant_id, tenant),
+            _ => panic!("expected admin api-rate-limits list"),
+        }
+        match Cli::parse_from([
+            "enscrive",
+            "admin",
+            "api-rate-limits",
+            "set",
+            "--tenant-id",
+            tenant,
+            "--category",
+            "ingest",
+            "--requests-per-minute",
+            "120",
+        ])
+        .command
+        {
+            Commands::Admin {
+                sub:
+                    AdminSubcommand::ApiRateLimits {
+                        sub: AdminApiRateLimitsSubcommand::Set(a),
+                    },
+            } => {
+                assert_eq!(a.tenant_id, tenant);
+                assert_eq!(a.category, "ingest");
+                assert_eq!(a.requests_per_minute, 120);
+            }
+            _ => panic!("expected admin api-rate-limits set"),
+        }
+        match Cli::parse_from([
+            "enscrive",
+            "admin",
+            "api-rate-limits",
+            "delete",
+            "--tenant-id",
+            tenant,
+            "--category",
+            "search",
+        ])
+        .command
+        {
+            Commands::Admin {
+                sub:
+                    AdminSubcommand::ApiRateLimits {
+                        sub: AdminApiRateLimitsSubcommand::Delete(a),
+                    },
+            } => {
+                assert_eq!(a.tenant_id, tenant);
+                assert_eq!(a.category, "search");
+            }
+            _ => panic!("expected admin api-rate-limits delete"),
         }
     }
 }
