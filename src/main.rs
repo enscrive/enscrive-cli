@@ -1240,6 +1240,13 @@ enum VoicesSubcommand {
         sub: VoiceGatesSubcommand,
     },
 
+    /// Inspect the version history of a voice (the `voice_versions` audit
+    /// table that `voices update` appends to).
+    Versions {
+        #[command(subcommand)]
+        sub: VoiceVersionsSubcommand,
+    },
+
     /// Search with a voice profile
     Search(VoiceSearchArgs),
 
@@ -1388,6 +1395,29 @@ enum VoiceGatesSubcommand {
     Delete(VoiceGateDeleteArgs),
 }
 
+#[derive(Subcommand)]
+enum VoiceVersionsSubcommand {
+    /// List all versions of a voice, newest first
+    /// (GET /v1/voices/{id}/versions).
+    List {
+        /// Voice id
+        #[arg(long)]
+        id: String,
+    },
+
+    /// Get a specific version of a voice
+    /// (GET /v1/voices/{id}/versions/{version}).
+    Get {
+        /// Voice id
+        #[arg(long)]
+        id: String,
+
+        /// Version number (1-based, as returned by `voices versions list`)
+        #[arg(long)]
+        version: u32,
+    },
+}
+
 #[derive(Args)]
 struct VoiceGateSetArgs {
     #[arg(long = "voice-id")]
@@ -1501,6 +1531,35 @@ enum EvalsSubcommand {
         #[arg(long = "voice-id")]
         voice_id: String,
     },
+
+    /// Convergence status across a voice's completed campaign series — is the
+    /// metric still improving, converging, or converged?
+    /// (GET /v1/evals/convergence).
+    Convergence(EvalsConvergenceArgs),
+}
+
+#[derive(Args)]
+struct EvalsConvergenceArgs {
+    /// Voice id whose campaign series to analyze
+    #[arg(long = "voice-id")]
+    voice_id: String,
+
+    /// Restrict to campaigns on a single dataset (optional)
+    #[arg(long = "dataset-id")]
+    dataset_id: Option<String>,
+
+    /// Metric to track (server default: ndcg@10)
+    #[arg(long)]
+    metric: Option<String>,
+
+    /// Number of recent campaigns to consider (server default: 5)
+    #[arg(long)]
+    window: Option<u32>,
+
+    /// Minimum absolute improvement counted as "still improving"
+    /// (server default: 0.005 = 0.5%)
+    #[arg(long)]
+    threshold: Option<f64>,
 }
 
 #[derive(Args)]
@@ -3899,6 +3958,10 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
                 VoiceGatesSubcommand::Set(_) => "voices gates set",
                 VoiceGatesSubcommand::Delete(_) => "voices gates delete",
             },
+            VoicesSubcommand::Versions { sub } => match sub {
+                VoiceVersionsSubcommand::List { .. } => "voices versions list",
+                VoiceVersionsSubcommand::Get { .. } => "voices versions get",
+            },
             VoicesSubcommand::Diff2(d) => match d {
                 VoiceDiff2Subcommand::Diff(_) => return None,
                 VoiceDiff2Subcommand::DiffCost(_) => return None,
@@ -3925,6 +3988,7 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
                 EvalDatasetsSubcommand::Promote { .. } => "evals datasets promote",
             },
             EvalsSubcommand::VoiceStatus { .. } => "evals voice-status",
+            EvalsSubcommand::Convergence(_) => "evals convergence",
         },
         Commands::Logs { sub } => match sub {
             LogsSubcommand::Stream(_) => "logs stream",
@@ -5268,6 +5332,26 @@ async fn main() {
                     Err(e) => CliResponse::fail("voices search", e, FailureClass::Bug, EXIT_CONFIG)
                         .emit(fmt),
                 },
+                VoicesSubcommand::Versions { sub } => match sub {
+                    VoiceVersionsSubcommand::List { id } => {
+                        let path = format!("/v1/voices/{id}/versions");
+                        match client.get_json(&path).await {
+                            Ok(data) => {
+                                CliResponse::success("voices versions list", data).emit(fmt)
+                            }
+                            Err(e) => request_failure("voices versions list", e).emit(fmt),
+                        }
+                    }
+                    VoiceVersionsSubcommand::Get { id, version } => {
+                        let path = format!("/v1/voices/{id}/versions/{version}");
+                        match client.get_json(&path).await {
+                            Ok(data) => {
+                                CliResponse::success("voices versions get", data).emit(fmt)
+                            }
+                            Err(e) => request_failure("voices versions get", e).emit(fmt),
+                        }
+                    }
+                },
                 VoicesSubcommand::Diff2(sub) => {
                     evals2::run_voice_diff(&client, fmt, sub.clone()).await;
                 }
@@ -5711,6 +5795,27 @@ async fn main() {
                 match client.get_json(&path).await {
                     Ok(data) => CliResponse::success("evals voice-status", data).emit(fmt),
                     Err(e) => request_failure("evals voice-status", e).emit(fmt),
+                }
+            }
+            EvalsSubcommand::Convergence(args) => {
+                let ctx = api_context.clone().unwrap();
+                let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
+                let mut query: Vec<(&str, String)> = vec![("voice_id", args.voice_id.clone())];
+                if let Some(dataset_id) = &args.dataset_id {
+                    query.push(("dataset_id", dataset_id.clone()));
+                }
+                if let Some(metric) = &args.metric {
+                    query.push(("metric", metric.clone()));
+                }
+                if let Some(window) = args.window {
+                    query.push(("window", window.to_string()));
+                }
+                if let Some(threshold) = args.threshold {
+                    query.push(("threshold", threshold.to_string()));
+                }
+                match client.get_json_with_query("/v1/evals/convergence", &query).await {
+                    Ok(data) => CliResponse::success("evals convergence", data).emit(fmt),
+                    Err(e) => request_failure("evals convergence", e).emit(fmt),
                 }
             }
         },
@@ -9779,6 +9884,68 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 assert_eq!(a.category, "search");
             }
             _ => panic!("expected admin api-rate-limits delete"),
+        }
+    }
+
+    // ── Voices versions + evals convergence (parity W-B) ──
+
+    #[test]
+    fn voices_versions_parse() {
+        match Cli::parse_from(["enscrive", "voices", "versions", "list", "--id", "v1"]).command {
+            Commands::Voices {
+                sub: VoicesSubcommand::Versions { sub: VoiceVersionsSubcommand::List { id } },
+            } => assert_eq!(id, "v1"),
+            _ => panic!("expected voices versions list"),
+        }
+        match Cli::parse_from([
+            "enscrive", "voices", "versions", "get", "--id", "v1", "--version", "3",
+        ])
+        .command
+        {
+            Commands::Voices {
+                sub:
+                    VoicesSubcommand::Versions {
+                        sub: VoiceVersionsSubcommand::Get { id, version },
+                    },
+            } => {
+                assert_eq!(id, "v1");
+                assert_eq!(version, 3);
+            }
+            _ => panic!("expected voices versions get"),
+        }
+    }
+
+    #[test]
+    fn evals_convergence_parse() {
+        // minimal: only --voice-id
+        match Cli::parse_from(["enscrive", "evals", "convergence", "--voice-id", "v1"]).command {
+            Commands::Evals {
+                sub: EvalsSubcommand::Convergence(a),
+            } => {
+                assert_eq!(a.voice_id, "v1");
+                assert!(a.dataset_id.is_none());
+                assert!(a.metric.is_none());
+                assert!(a.window.is_none());
+                assert!(a.threshold.is_none());
+            }
+            _ => panic!("expected evals convergence"),
+        }
+        // full flags
+        match Cli::parse_from([
+            "enscrive", "evals", "convergence", "--voice-id", "v1", "--dataset-id", "d1",
+            "--metric", "ndcg@10", "--window", "7", "--threshold", "0.01",
+        ])
+        .command
+        {
+            Commands::Evals {
+                sub: EvalsSubcommand::Convergence(a),
+            } => {
+                assert_eq!(a.dataset_id.as_deref(), Some("d1"));
+                assert_eq!(a.metric.as_deref(), Some("ndcg@10"));
+                assert_eq!(a.window, Some(7));
+                assert_eq!(a.threshold, Some(0.01));
+            }
+            _ => panic!("expected evals convergence"),
         }
     }
 }
