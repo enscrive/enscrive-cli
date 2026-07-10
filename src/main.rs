@@ -1012,6 +1012,20 @@ enum CorpusSubcommand {
     /// space; the voice's embedding_model is advisory only. Returns 409
     /// if the corpus already has documents.
     PopulateFromDataset(CorpusPopulateFromDatasetArgs),
+
+    /// Promote a corpus into another environment (WS-45 / ADR
+    /// CORPUS-ENV-PROMOTION-2026-06-27). Requires a Pro+/Enterprise plan
+    /// (MultiEnv entitlement); the target env must belong to the same tenant
+    /// and differ from the source (POST /v1/corpora/{id}/promote).
+    Promote {
+        /// Source corpus UUID
+        #[arg(long)]
+        id: String,
+
+        /// Target environment UUID to promote the corpus into
+        #[arg(long = "target-environment-id")]
+        target_environment_id: String,
+    },
 }
 
 /// CLI-TIER-013: args for `enscrive corpus delete`.
@@ -1539,6 +1553,19 @@ enum EvalCampaignsSubcommand {
         #[arg(long)]
         id: String,
     },
+
+    /// Promote an eval campaign into another environment
+    /// (POST /v1/evals/{id}/promote). Target env must belong to the same
+    /// tenant and differ from the source.
+    Promote {
+        /// Campaign UUID
+        #[arg(long)]
+        id: String,
+
+        /// Target environment UUID to promote the campaign into
+        #[arg(long = "target-environment-id")]
+        target_environment_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1569,6 +1596,19 @@ enum EvalDatasetsSubcommand {
     Delete {
         #[arg(long)]
         id: String,
+    },
+
+    /// Promote an eval dataset into another environment
+    /// (POST /v1/evals/datasets/{id}/promote). Target env must belong to the
+    /// same tenant and differ from the source.
+    Promote {
+        /// Dataset UUID
+        #[arg(long)]
+        id: String,
+
+        /// Target environment UUID to promote the dataset into
+        #[arg(long = "target-environment-id")]
+        target_environment_id: String,
     },
 }
 
@@ -2016,6 +2056,14 @@ enum BatchSetsSubcommand {
 
     /// Get details of a specific batch-set
     Get(BatchSetsGetArgs),
+
+    /// Retry a recoverable-failed batch-set (POST /v1/batch-sets/{id}/retry).
+    /// Only valid when the batch-set is in the `failed_recoverable` state.
+    Retry(BatchSetsGetArgs),
+
+    /// Abandon a batch-set (POST /v1/batch-sets/{id}/abandon). Invalid for
+    /// terminal states (committed / already-abandoned).
+    Abandon(BatchSetsGetArgs),
 }
 
 /// J-024: Arguments for `enscrive batch-sets list`.
@@ -3768,6 +3816,7 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
             CorpusSubcommand::Commit(_) => "corpus commit",
             CorpusSubcommand::Pending(_) => "corpus pending",
             CorpusSubcommand::PendingDelete(_) => "corpus pending-delete",
+            CorpusSubcommand::Promote { .. } => "corpus promote",
             // Local-only / skip-list commands:
             CorpusSubcommand::Get { .. }
             | CorpusSubcommand::Revert { .. }
@@ -3800,6 +3849,7 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
             EvalsSubcommand::Campaigns { sub } => match sub {
                 EvalCampaignsSubcommand::List => "evals campaigns list",
                 EvalCampaignsSubcommand::Get { .. } => "evals campaigns get",
+                EvalCampaignsSubcommand::Promote { .. } => "evals campaigns promote",
             },
             EvalsSubcommand::RunCampaign(_) => "evals run-campaign",
             EvalsSubcommand::RunCampaignStream(_) => "evals run-campaign-stream",
@@ -3812,6 +3862,7 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
                 EvalDatasetsSubcommand::Queries { .. } => "evals datasets queries",
                 EvalDatasetsSubcommand::Update(_) => "evals datasets update",
                 EvalDatasetsSubcommand::Delete { .. } => "evals datasets delete",
+                EvalDatasetsSubcommand::Promote { .. } => "evals datasets promote",
             },
             EvalsSubcommand::VoiceStatus { .. } => "evals voice-status",
         },
@@ -3851,7 +3902,10 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
         },
         Commands::BatchSets { sub } => match sub {
             // skip-list:
-            BatchSetsSubcommand::List(_) | BatchSetsSubcommand::Get(_) => return None,
+            BatchSetsSubcommand::List(_)
+            | BatchSetsSubcommand::Get(_)
+            | BatchSetsSubcommand::Retry(_)
+            | BatchSetsSubcommand::Abandon(_) => return None,
         },
         Commands::Admin { sub } => match sub {
             // skip-list: every admin/operator command is Admin-capability
@@ -4945,6 +4999,17 @@ async fn main() {
                         Err(e) => request_failure("corpus metrics", e).emit(fmt),
                     }
                 }
+                CorpusSubcommand::Promote {
+                    id,
+                    target_environment_id,
+                } => {
+                    let path = format!("/v1/corpora/{id}/promote");
+                    let body = json!({ "target_environment_id": target_environment_id });
+                    match client.post_json(&path, body).await {
+                        Ok(data) => CliResponse::success("corpus promote", data).emit(fmt),
+                        Err(e) => request_failure("corpus promote", e).emit(fmt),
+                    }
+                }
             }
         }
         Commands::Voices { sub } => {
@@ -5161,6 +5226,21 @@ async fn main() {
                         match client.get_json(&path).await {
                             Ok(data) => CliResponse::success("evals campaigns get", data).emit(fmt),
                             Err(e) => request_failure("evals campaigns get", e).emit(fmt),
+                        }
+                    }
+                    EvalCampaignsSubcommand::Promote {
+                        id,
+                        target_environment_id,
+                    } => {
+                        let path = format!("/v1/evals/{id}/promote");
+                        let body = json!({ "target_environment_id": target_environment_id });
+                        match client.post_json(&path, body).await {
+                            Ok(data) => {
+                                CliResponse::success("evals campaigns promote", data).emit(fmt)
+                            }
+                            Err(e) => {
+                                request_failure("evals campaigns promote", e).emit(fmt)
+                            }
                         }
                     }
                 }
@@ -5544,6 +5624,19 @@ async fn main() {
                             Err(e) => request_failure("evals datasets delete", e).emit(fmt),
                         }
                     }
+                    EvalDatasetsSubcommand::Promote {
+                        id,
+                        target_environment_id,
+                    } => {
+                        let path = format!("/v1/evals/datasets/{id}/promote");
+                        let body = json!({ "target_environment_id": target_environment_id });
+                        match client.post_json(&path, body).await {
+                            Ok(data) => {
+                                CliResponse::success("evals datasets promote", data).emit(fmt)
+                            }
+                            Err(e) => request_failure("evals datasets promote", e).emit(fmt),
+                        }
+                    }
                 }
             }
             EvalsSubcommand::VoiceStatus { voice_id } => {
@@ -5880,6 +5973,20 @@ async fn main() {
                     match client.get_json(&path).await {
                         Ok(data) => CliResponse::success("batch-sets get", data).emit(fmt),
                         Err(e) => request_failure("batch-sets get", e).emit(fmt),
+                    }
+                }
+                BatchSetsSubcommand::Retry(args) => {
+                    let path = format!("/v1/batch-sets/{}/retry", args.id);
+                    match client.post_json(&path, json!({})).await {
+                        Ok(data) => CliResponse::success("batch-sets retry", data).emit(fmt),
+                        Err(e) => request_failure("batch-sets retry", e).emit(fmt),
+                    }
+                }
+                BatchSetsSubcommand::Abandon(args) => {
+                    let path = format!("/v1/batch-sets/{}/abandon", args.id);
+                    match client.post_json(&path, json!({})).await {
+                        Ok(data) => CliResponse::success("batch-sets abandon", data).emit(fmt),
+                        Err(e) => request_failure("batch-sets abandon", e).emit(fmt),
                     }
                 }
             }
@@ -9373,5 +9480,119 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         );
         let ok = parse_record_json_body(&Some(r#"{"a":1}"#.to_string()), &None).unwrap();
         assert_eq!(ok, json!({ "a": 1 }));
+    }
+
+    // ── Promote trio + batch-sets retry/abandon (parity W2) ──
+
+    #[test]
+    fn corpus_promote_parses() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "corpus",
+            "promote",
+            "--id",
+            "11111111-1111-1111-1111-111111111111",
+            "--target-environment-id",
+            "22222222-2222-2222-2222-222222222222",
+        ]);
+        match args.command {
+            Commands::Corpus {
+                sub:
+                    CorpusSubcommand::Promote {
+                        id,
+                        target_environment_id,
+                    },
+            } => {
+                assert_eq!(id, "11111111-1111-1111-1111-111111111111");
+                assert_eq!(
+                    target_environment_id,
+                    "22222222-2222-2222-2222-222222222222"
+                );
+            }
+            _ => panic!("expected corpus promote"),
+        }
+    }
+
+    #[test]
+    fn evals_campaigns_promote_parses() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "evals",
+            "campaigns",
+            "promote",
+            "--id",
+            "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "--target-environment-id",
+            "dddddddd-dddd-dddd-dddd-dddddddddddd",
+        ]);
+        match args.command {
+            Commands::Evals {
+                sub:
+                    EvalsSubcommand::Campaigns {
+                        sub:
+                            EvalCampaignsSubcommand::Promote {
+                                id,
+                                target_environment_id,
+                            },
+                    },
+            } => {
+                assert_eq!(id, "cccccccc-cccc-cccc-cccc-cccccccccccc");
+                assert_eq!(
+                    target_environment_id,
+                    "dddddddd-dddd-dddd-dddd-dddddddddddd"
+                );
+            }
+            _ => panic!("expected evals campaigns promote"),
+        }
+    }
+
+    #[test]
+    fn evals_datasets_promote_parses() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "evals",
+            "datasets",
+            "promote",
+            "--id",
+            "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+            "--target-environment-id",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        ]);
+        match args.command {
+            Commands::Evals {
+                sub:
+                    EvalsSubcommand::Datasets {
+                        sub:
+                            EvalDatasetsSubcommand::Promote {
+                                id,
+                                target_environment_id,
+                            },
+                    },
+            } => {
+                assert_eq!(id, "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+                assert_eq!(
+                    target_environment_id,
+                    "ffffffff-ffff-ffff-ffff-ffffffffffff"
+                );
+            }
+            _ => panic!("expected evals datasets promote"),
+        }
+    }
+
+    #[test]
+    fn batch_sets_retry_and_abandon_parse() {
+        let id = "5171d423-b261-4e3d-b9a4-fb1205e34903";
+        match Cli::parse_from(["enscrive", "batch-sets", "retry", id]).command {
+            Commands::BatchSets {
+                sub: BatchSetsSubcommand::Retry(BatchSetsGetArgs { id: got }),
+            } => assert_eq!(got, id),
+            _ => panic!("expected batch-sets retry"),
+        }
+        match Cli::parse_from(["enscrive", "batch-sets", "abandon", id]).command {
+            Commands::BatchSets {
+                sub: BatchSetsSubcommand::Abandon(BatchSetsGetArgs { id: got }),
+            } => assert_eq!(got, id),
+            _ => panic!("expected batch-sets abandon"),
+        }
     }
 }

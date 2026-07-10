@@ -181,6 +181,15 @@ note = "ENS-133 (parent ENS-132) — Step-4 primitive of the canonical 5-step ev
 deployment_tier = "any-mode"
 required_plan = "free"
 
+[[endpoint]]
+method = "POST"
+path = "/v1/corpora/{id}/promote"
+cli_command = "corpus promote"
+status = "implemented"
+note = "WS-45 / ADR CORPUS-ENV-PROMOTION-2026-06-27 — promote a corpus into another environment; MultiEnv (Pro+) entitlement; target env must belong to the same tenant and differ from the source (400 on same-env)"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
 # ── Ingestion ───────────────────────────────────────────
 
 [[endpoint]]
@@ -290,6 +299,24 @@ path = "/v1/batch-sets/{id}"
 cli_command = "batch-sets get"
 status = "implemented"
 note = "J-024 Unit 5 — batch-set detail"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/batch-sets/{id}/retry"
+cli_command = "batch-sets retry"
+status = "implemented"
+note = "retry a failed_recoverable batch-set (invalid in other states)"
+deployment_tier = "any-mode"
+required_plan = "free"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/batch-sets/{id}/abandon"
+cli_command = "batch-sets abandon"
+status = "implemented"
+note = "abandon a batch-set (invalid for terminal committed/abandoned states)"
 deployment_tier = "any-mode"
 required_plan = "free"
 
@@ -562,6 +589,15 @@ deployment_tier = "any-mode"
 required_plan = "professional"
 
 [[endpoint]]
+method = "POST"
+path = "/v1/evals/datasets/{id}/promote"
+cli_command = "evals datasets promote"
+status = "implemented"
+note = "promote an eval dataset into another environment; target env must belong to the same tenant and differ from the source (400 on same-env)"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
 method = "GET"
 path = "/v1/evals/datasets/{id}/queries"
 cli_command = "evals datasets queries"
@@ -584,6 +620,15 @@ method = "GET"
 path = "/v1/evals/{id}"
 cli_command = "evals campaigns get"
 status = "implemented"
+deployment_tier = "any-mode"
+required_plan = "professional"
+
+[[endpoint]]
+method = "POST"
+path = "/v1/evals/{id}/promote"
+cli_command = "evals campaigns promote"
+status = "implemented"
+note = "promote an eval campaign into another environment; target env must belong to the same tenant and differ from the source (400 on same-env)"
 deployment_tier = "any-mode"
 required_plan = "professional"
 
