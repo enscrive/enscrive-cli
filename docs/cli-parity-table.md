@@ -8,7 +8,7 @@ CI-checked source of truth (`tests/surface_contract.rs` +
 `python3 scripts/gen_parity_table.py`; do not hand-edit rows. Last reconciled:
 **2026-07-10** (CLI 100%-parity workstream).
 
-**Totals: 147 endpoints — 141 `implemented`, 6 `deferred`, 0 `missing`.** Tiers: 142 any-mode / 5 managed-only. Plans: 66 free / 61 professional / 20 enterprise.
+**Totals: 147 endpoints — 144 `implemented`, 3 `deferred`, 0 `missing`.** Tiers: 142 any-mode / 5 managed-only. Plans: 66 free / 61 professional / 20 enterprise.
 
 Status: ✅ implemented (CLI command exists + wired to this endpoint) · ⛔ deferred (explicit `reason` in the contract; not silently missing).
 
@@ -108,8 +108,8 @@ Status: ✅ implemented (CLI command exists + wired to this endpoint) · ⛔ def
 
 | Command | Verb · `/v1` path | Status | Plan | Notes |
 |---|---|---|---|---|
-| `voices versions list` | GET `/v1/voices/{id}/versions` | ⛔ deferred | professional | Voice version history is a post-launch audit feature; requires version-aware voice model |
-| `voices versions get` | GET `/v1/voices/{id}/versions/{version}` | ⛔ deferred | professional | Voice version history is a post-launch audit feature; requires version-aware voice model |
+| `voices versions list` | GET `/v1/voices/{id}/versions` | ✅ | professional | GET /v1/voices/{id}/versions — list the voice_versions audit history, newest first (parity W-B 2026-07-10) |
+| `voices versions get` | GET `/v1/voices/{id}/versions/{version}` | ✅ | professional | GET /v1/voices/{id}/versions/{version} — fetch a single voice version (parity W-B 2026-07-10) |
 
 ## Voice Promotion & Gates
 
@@ -167,7 +167,7 @@ Status: ✅ implemented (CLI command exists + wired to this endpoint) · ⛔ def
 | Command | Verb · `/v1` path | Status | Plan | Notes |
 |---|---|---|---|---|
 | `evals voice-status` | GET `/v1/evals/voice-status/{voice_id}` | ✅ | professional |  |
-| `evals convergence` | GET `/v1/evals/convergence` | ⛔ deferred | professional | Convergence analysis requires multi-campaign history; deferred until eval maturity milestone |
+| `evals convergence` | GET `/v1/evals/convergence` | ✅ | professional | GET /v1/evals/convergence — convergence status across a voice's completed campaign series (--voice-id required; --dataset-id/--metric/--window/--threshold optional) (parity W-B 2026-07-10) |
 | `evals from-url` | POST `/v1/evals/from-url` | ✅ | professional | Gap1 W-003 — wraps POST /v1/evals/from-url + polls /v1/jobs/{id} until terminal |
 
 ## Evals 2.0: Datasets (EV-013)
