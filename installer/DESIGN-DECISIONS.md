@@ -56,15 +56,32 @@ testing only — it is not served as a live manifest.
 
 ---
 
-## §4. cosign verification — optional scaffold (ENS-82)
+## §4. cosign verification — mandatory, fail-closed (ENS-82, superseded ENS-1014)
 
-**Decision:** `install.sh` checks for a `.bundle` file next to the binary URL
-and verifies it with `cosign verify-blob` if cosign is on PATH.  If the bundle
-is absent or cosign is missing, the installer warns but does not fail.
+**Original decision (2026-04-24, superseded):** `install.sh` checked for a
+`.bundle` file next to the binary URL and verified it with `cosign verify-blob`
+if cosign was on PATH. If the bundle was absent or cosign was missing, the
+installer warned but did not fail — expected behavior pre-ENS-82, before any
+release had been signed.
 
-This is expected behavior during beta: ENS-82 (cosign signing workflow) has
-not yet been dispatched against a v0.1.0-beta.1 tag.  Once ENS-82 cuts its
-first signed release, `.bundle` files will be present and cosign verification
-will run automatically for users who have cosign installed.
+**Revised decision (2026-07-13, ENS-1014, security P1):** ENS-82 keyless
+signing (Fulcio/Rekor, no `COSIGN_*` key material) is now live platform-wide —
+every `enscrive-cli` release signs its artifacts and publishes a `.bundle`
+(`.github/workflows/release.yml`, "cosign keyless signing" job). The original
+warn-and-continue behavior became a live gap once signing went live:
+`install.enscrive.io` is a CloudFront distribution with no WAF (dropped
+2026-04-27, open from anywhere on Earth — see `install.sh` header), so cosign
+verification is the only barrier between a tampered/unsigned binary and an
+unattended `curl | sh`.
 
-`--insecure` unconditionally skips cosign verification.
+`install.sh` now fails closed:
+- Missing `cosign` on PATH → hard-fail with remediation instructions
+  (sigstore install docs), non-zero exit, nothing installed.
+- Bundle download failure → hard-fail, non-zero exit, nothing installed.
+- `cosign verify-blob` failure → hard-fail, non-zero exit, nothing installed.
+
+**Escape hatch:** `--insecure` is the sole, pre-existing, documented bypass.
+It unconditionally skips cosign verification and prints a prominent warning
+banner to stderr before doing so. There is no new implicit-insecure default —
+the flag must be passed explicitly on every invocation that wants to skip
+verification (it is not persisted or env-gated).

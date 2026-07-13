@@ -245,7 +245,9 @@ jobs:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # TODO(ENS-81 + ENS-82): verify cosign bundle in install.sh once ENS-81 creates it.
+      # DONE(ENS-81 + ENS-82 + ENS-1014): install.sh verifies the cosign bundle
+      # published below and fails closed if verification fails or the bundle
+      # can't be fetched (installer/install.sh, installer/DESIGN-DECISIONS.md §4).
 
       - name: Sign artifacts and upload bundles to S3
         shell: bash
