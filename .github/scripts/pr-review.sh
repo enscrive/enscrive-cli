@@ -118,6 +118,34 @@ fi
 # escalate to a human (needs-founder) instead of auto-merging. ENS-569 Gap-4
 # refinement: the thing that judges every other PR must not merge its own
 # changes on its own approval.
+#
+# INTENTIONAL IN THIS REPO -- founder-affirmed 2026-07-14. Do NOT "fix" this by
+# porting enscrive-developer's de-gated template.
+#
+# Background: the 2026-06-29 blanket de-gate (developer#140) removed this block
+# as fleet-wide policy, and ENS-857 item 2 lists the repos that never received
+# it as "stale pre-#140 posture". On 2026-07-14 the founder SPLIT that decision.
+# De-gated: enscrive-docs, enscrive-metering-sentinel (no custody/signing role;
+# their branch protection also moved to require_code_owner_reviews=false).
+# Deliberately still gated: enscrive-cli (the public installer),
+# enscrive-secrets-manager (secret custody) and enscrive-bootstrap-authority
+# (the bootstrap-bundle signer) -- these keep BOTH this block and
+# require_code_owner_reviews=true.
+#
+# Why: this is the "thin root-of-trust gate (supply-chain/secrets)" from the
+# 2026-06-27 posture, scoped back on purpose. A poisoned installer / leaked
+# secret / poisoned signing path is a repo+artifact risk that the founder's
+# `provision` gate does NOT catch -- provisioning is the real risk gate for
+# everything else, but not for these.
+#
+# In enscrive-cli the gate pairs with a deliberately NARROW CODEOWNERS
+# (/installer/** + /v1-surface-contract.toml -> @chrisroge): the installer is
+# fetched by unattended `curl | sh` from a CloudFront distribution with no WAF,
+# so it is the one path where an unreviewed auto-merge reaches users directly.
+#
+# So here this gate is CURRENT POSTURE, not un-rolled-out drift. If a sweep
+# flags this file as stale pre-#140, that sweep is wrong for this repo --
+# re-read this comment before removing anything.
 FOUNDER_GATED=0
 if printf '%s' "$FILES" | grep -qE '\.github/workflows/|\.github/scripts/|channels/|src/signature\.rs|src/provision\.rs|src/manifest\.rs|src/fingerprint\.rs'; then
   FOUNDER_GATED=1
