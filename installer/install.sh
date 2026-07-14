@@ -28,7 +28,14 @@
 #   --target=<triple>     Override platform detection (e.g. for cross-machine prep)
 #   --prefix=<dir>        Override install directory (default: ~/.local/bin)
 #   --manifest-url=<url>  Override manifest URL (used by smoke tests and CI)
-#   --insecure            Skip cosign verification even if cosign is on PATH (ENS-82)
+#   --insecure            Skip cosign verification (DANGEROUS — see below, ENS-82/ENS-1014)
+#
+# cosign verification is MANDATORY by default (ENS-82 keyless signing via
+# Fulcio/Rekor is live platform-wide; every release publishes a .bundle).
+# install.enscrive.io has no WAF (see above) — verification is the only
+# thing standing between a tampered/unsigned binary and an unattended
+# `curl | sh`. Missing cosign, a missing bundle, or a failed verification
+# now HARD-FAILS the install. `--insecure` is the sole documented bypass.
 #
 # Supported platforms (Rust target triples):
 #   x86_64-unknown-linux-gnu   Linux  x86_64 (glibc — default for non-musl Linux)
@@ -66,8 +73,13 @@ Options:
   --target=<triple>     Override platform detection
   --prefix=<dir>        Install directory (default: ~/.local/bin)
   --manifest-url=<url>  Override manifest URL (for testing/CI)
-  --insecure            Skip cosign bundle verification (ENS-82)
+  --insecure            Skip cosign bundle verification (DANGEROUS, ENS-82/ENS-1014)
   --help                Show this message
+
+cosign bundle verification is mandatory by default. Missing cosign, a
+missing/undownloadable .bundle, or a failed verification will abort the
+install with a non-zero exit code. Pass --insecure only if you explicitly
+accept the risk of installing an unverified binary.
 USAGE
             exit 0
             ;;
@@ -319,40 +331,102 @@ fi
 echo "SHA256 OK."
 
 # ---------------------------------------------------------------------------
-# cosign bundle verification (optional, ENS-82)
+# cosign bundle verification (MANDATORY, ENS-82 — fail-closed, ENS-1014)
 #
-# ENS-82 (cosign signing workflow) will publish a .bundle file alongside each
-# binary once the signing workflow is dispatched.  We check for the bundle and
-# verify if cosign is on PATH.  If the bundle is absent or cosign is not
-# installed we warn but do not fail — this is expected during beta until ENS-82
-# cuts its first signed release.
+# ENS-82 keyless signing (Fulcio/Rekor, no COSIGN_* key material) is live
+# platform-wide: every release publishes a .bundle alongside its binary
+# (.github/workflows/release.yml, "cosign keyless signing" job). This
+# installer is served from install.enscrive.io, a CloudFront distribution
+# with no WAF (see file header) — cosign verification is the only barrier
+# between a tampered/unsigned binary and an unattended `curl | sh`.
 #
-# Pass --insecure to unconditionally skip cosign verification.
+# Missing cosign, a missing/undownloadable bundle, or a failed verification
+# now HARD-FAILS the install (non-zero exit, nothing is installed). The only
+# bypass is the documented --insecure flag, which prints a loud warning.
+#
+# The identity regexp below is the same pin enscrive-deploy applies when it
+# verifies fleet components (src/signature.rs::identity_regexp) — anchored at
+# `^`, dots escaped, and pinned to the release.yml workflow file rather than
+# the repo alone. All three matter: cosign matches the identity regexp
+# unanchored, so an unanchored pattern can match a substring of some other
+# signer's identity; and a repo-only pin (`.../enscrive-cli/.*`) would accept
+# a certificate minted by ANY workflow in this repo that holds
+# `id-token: write`, not just the release pipeline. Verified against the
+# published v20260710-2039 bundle, whose SAN is
+# `https://github.com/enscrive/enscrive-cli/.github/workflows/release.yml@refs/tags/v20260710-2039`.
+# The trailing `@refs/` (not `@refs/tags/`) is deliberate: release.yml also
+# runs via workflow_dispatch, which signs from `@refs/heads/<branch>`.
 # ---------------------------------------------------------------------------
+COSIGN_IDENTITY_REGEXP='^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/'
+COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 BUNDLE_URL="${BINARY_URL}.bundle"
 BUNDLE_TMP="$TMPDIR_WORK/enscrive.bundle"
 
 if [ "$INSECURE" -eq 1 ]; then
-    echo "cosign: skipped (--insecure)"
-elif ! command -v cosign >/dev/null 2>&1; then
-    echo "cosign: not on PATH — skipping bundle verification (install cosign for supply-chain verification)"
+    echo "" >&2
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
+    echo "!! WARNING: --insecure passed. Skipping cosign signature verification. !!" >&2
+    echo "!! The binary about to be installed has NOT been cryptographically     !!" >&2
+    echo "!! verified against enscrive's release identity (github.com/enscrive/  !!" >&2
+    echo "!! enscrive-cli via Fulcio/Rekor keyless signing). Only proceed if you  !!" >&2
+    echo "!! understand and accept the supply-chain risk.                        !!" >&2
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!" >&2
+    echo "" >&2
 else
-    echo "Fetching cosign bundle ..."
-    if curl -fsSL --max-time 10 "$BUNDLE_URL" -o "$BUNDLE_TMP" 2>/dev/null; then
-        echo "Verifying cosign bundle ..."
-        if cosign verify-blob \
-            --bundle "$BUNDLE_TMP" \
-            --certificate-identity-regexp "https://github.com/enscrive/enscrive-cli/.*" \
-            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            "$BINARY_TMP"; then
-            echo "cosign: bundle verified OK."
-        else
-            echo "error: cosign bundle verification failed" >&2
-            exit 1
-        fi
-    else
-        echo "cosign: bundle not yet published for this release — skipping (expected pre-ENS-82)"
+    if ! command -v cosign >/dev/null 2>&1; then
+        echo "" >&2
+        echo "error: cosign is required to verify this binary's signature but was not found on PATH." >&2
+        echo "" >&2
+        echo "  ENS-82 keyless signing is live for every enscrive-cli release; this" >&2
+        echo "  installer fails closed rather than install an unverified binary from" >&2
+        echo "  a distribution with no WAF (see install.sh header)." >&2
+        echo "" >&2
+        echo "  Install cosign, then re-run this installer:" >&2
+        echo "    https://docs.sigstore.dev/cosign/system_config/installation/" >&2
+        echo "    macOS (Homebrew):  brew install cosign" >&2
+        echo "    Linux:             see the sigstore install docs above for your distro" >&2
+        echo "" >&2
+        echo "  If you explicitly accept the risk of installing an UNVERIFIED binary," >&2
+        echo "  re-run with --insecure. This is NOT recommended." >&2
+        echo "" >&2
+        exit 1
     fi
+
+    echo "Fetching cosign bundle ..."
+    if ! curl -fsSL --max-time 10 "$BUNDLE_URL" -o "$BUNDLE_TMP"; then
+        echo "" >&2
+        echo "error: failed to download cosign bundle: $BUNDLE_URL" >&2
+        echo "" >&2
+        echo "  ENS-82 keyless signing is live; every release is expected to publish a" >&2
+        echo "  .bundle alongside its binary. A missing/unreachable bundle means either" >&2
+        echo "  the release was not signed or the download path is compromised — this" >&2
+        echo "  installer fails closed rather than install an unverified binary." >&2
+        echo "" >&2
+        echo "  If you explicitly accept the risk of installing an UNVERIFIED binary," >&2
+        echo "  re-run with --insecure. This is NOT recommended." >&2
+        echo "" >&2
+        exit 1
+    fi
+
+    echo "Verifying cosign bundle ..."
+    if ! cosign verify-blob \
+        --bundle "$BUNDLE_TMP" \
+        --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+        "$BINARY_TMP"; then
+        echo "" >&2
+        echo "error: cosign bundle verification FAILED." >&2
+        echo "" >&2
+        echo "  The downloaded binary does not match a valid signature from" >&2
+        echo "  github.com/enscrive/enscrive-cli's release workflow. This can mean the" >&2
+        echo "  binary was tampered with in transit or at rest. Refusing to install." >&2
+        echo "" >&2
+        echo "  Do not bypass this with --insecure unless you fully understand and" >&2
+        echo "  accept the risk of installing a binary that failed verification." >&2
+        echo "" >&2
+        exit 1
+    fi
+    echo "cosign: bundle verified OK."
 fi
 
 # ---------------------------------------------------------------------------
