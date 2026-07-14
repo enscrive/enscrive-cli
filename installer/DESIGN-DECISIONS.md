@@ -80,6 +80,28 @@ unattended `curl | sh`.
 - Bundle download failure → hard-fail, non-zero exit, nothing installed.
 - `cosign verify-blob` failure → hard-fail, non-zero exit, nothing installed.
 
+**Identity pin:** verification is only as strong as the identity it pins to, so
+`install.sh` uses the same pin `enscrive-deploy` applies to fleet components
+(`src/signature.rs::identity_regexp`):
+
+```
+^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/
+```
+
+Anchoring and the workflow-file component are both load-bearing. cosign matches
+`--certificate-identity-regexp` unanchored, so an unanchored pattern risks
+matching a substring of another signer's identity. More importantly, a repo-only
+pin (`.../enscrive-cli/.*`) accepts a certificate minted by *any* workflow in
+this repo holding `id-token: write` — not just the release pipeline — which
+matters in a repo where PRs are auto-merged. The trailing `@refs/` rather than
+`@refs/tags/` is deliberate: `release.yml` also runs via `workflow_dispatch`,
+which signs from `@refs/heads/<branch>`.
+
+Verified against the published `v20260710-2039` bundle, whose certificate SAN is
+`https://github.com/enscrive/enscrive-cli/.github/workflows/release.yml@refs/tags/v20260710-2039`:
+the pin verifies the genuine binary, rejects a byte-flipped copy, and rejects a
+wrong-repo identity.
+
 **Escape hatch:** `--insecure` is the sole, pre-existing, documented bypass.
 It unconditionally skips cosign verification and prints a prominent warning
 banner to stderr before doing so. There is no new implicit-insecure default —

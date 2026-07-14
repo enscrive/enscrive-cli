@@ -343,7 +343,22 @@ echo "SHA256 OK."
 # Missing cosign, a missing/undownloadable bundle, or a failed verification
 # now HARD-FAILS the install (non-zero exit, nothing is installed). The only
 # bypass is the documented --insecure flag, which prints a loud warning.
+#
+# The identity regexp below is the same pin enscrive-deploy applies when it
+# verifies fleet components (src/signature.rs::identity_regexp) — anchored at
+# `^`, dots escaped, and pinned to the release.yml workflow file rather than
+# the repo alone. All three matter: cosign matches the identity regexp
+# unanchored, so an unanchored pattern can match a substring of some other
+# signer's identity; and a repo-only pin (`.../enscrive-cli/.*`) would accept
+# a certificate minted by ANY workflow in this repo that holds
+# `id-token: write`, not just the release pipeline. Verified against the
+# published v20260710-2039 bundle, whose SAN is
+# `https://github.com/enscrive/enscrive-cli/.github/workflows/release.yml@refs/tags/v20260710-2039`.
+# The trailing `@refs/` (not `@refs/tags/`) is deliberate: release.yml also
+# runs via workflow_dispatch, which signs from `@refs/heads/<branch>`.
 # ---------------------------------------------------------------------------
+COSIGN_IDENTITY_REGEXP='^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/'
+COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 BUNDLE_URL="${BINARY_URL}.bundle"
 BUNDLE_TMP="$TMPDIR_WORK/enscrive.bundle"
 
@@ -396,8 +411,8 @@ else
     echo "Verifying cosign bundle ..."
     if ! cosign verify-blob \
         --bundle "$BUNDLE_TMP" \
-        --certificate-identity-regexp "https://github.com/enscrive/enscrive-cli/.*" \
-        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
         "$BINARY_TMP"; then
         echo "" >&2
         echo "error: cosign bundle verification FAILED." >&2
