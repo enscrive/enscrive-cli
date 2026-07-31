@@ -161,12 +161,17 @@ jobs:
           # (this binary is outside the enscrive supply chain, so there is
           # no in-repo pin to check it against).
           COMPOSE_VERSION="v2.29.7"
-          curl -fsSL -o /tmp/docker-compose \
+          # Downloaded under its upstream filename (not renamed to
+          # `docker-compose`) because the published .sha256 file's checksum
+          # line references that exact filename — sha256sum -c resolves it
+          # relative to cwd, so a rename here would make verification fail
+          # with a spurious "No such file or directory".
+          curl -fsSL -o /tmp/docker-compose-linux-x86_64 \
             "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64"
-          curl -fsSL -o /tmp/docker-compose.sha256 \
+          curl -fsSL -o /tmp/docker-compose-linux-x86_64.sha256 \
             "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64.sha256"
-          (cd /tmp && sha256sum -c docker-compose.sha256)
-          install -m 0755 /tmp/docker-compose "$HOME/.local/bin/docker-compose"
+          (cd /tmp && sha256sum -c docker-compose-linux-x86_64.sha256)
+          install -m 0755 /tmp/docker-compose-linux-x86_64 "$HOME/.local/bin/docker-compose"
 
           # Written with `printf` rather than a heredoc: a heredoc's closing
           # delimiter must be flush against column 0, which a YAML `run: |`
