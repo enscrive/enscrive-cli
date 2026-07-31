@@ -109,19 +109,17 @@ jobs:
   # hand-edited env files... on both a Docker host and a podman host").
   #
   # INTENTIONALLY INFORMATIONAL / NOT REQUIRED. Do not add this job's checks
-  # to branch protection's required list — that stays founder-only, per the
-  # task brief for this PR. This job is EXPECTED TO GO RED at the
-  # `corpus create` step: D8 (no rate card ever seeded, DEBRIEF §3) and D9
-  # (no wallet ever provisioned, DEBRIEF §3) live in enscrive-developer, are
-  # NOT fixed by this PR, and are unreleased as of this PR. Per the
-  # debrief's own recommendation (§2, §6 Wave 0): "ship the clean-room job
-  # first, then fix the defects against it" — a job that starts green here
-  # would be proving nothing.
+  # to branch protection's required list — that stays founder-only.
   #
-  # TODO(ENS-3054 Wave 2): once enscrive-developer ships D8+D9 and that
-  # release reaches the dev channel this job fetches from, re-run this job
-  # and — once it's actually green — the founder can promote it to a
-  # required branch-protection check. Not done by this PR.
+  # D8 (no rate card ever seeded) and D9 (no wallet ever provisioned) —
+  # enscrive-developer PR #226, `5da221e`, tag v20260731-0144 — are fixed
+  # and released to the dev channel manifest this job fetches from. D1
+  # (native podman detection, this PR) is the last defect blocking a fully
+  # green podman leg; once it lands, both legs are expected to go green.
+  #
+  # TODO(ENS-3054 Wave 4): once this job is consistently green on both
+  # legs, the founder can promote it to a required branch-protection check.
+  # Not done by this PR.
   clean-room-onboard:
     name: clean-room-onboard (${{ matrix.runtime }})
     runs-on: ubuntu-latest
@@ -138,15 +136,19 @@ jobs:
         with:
           key: clean-room-onboard-${{ matrix.runtime }}
 
-      # D1 (podman/compose auto-detection) is Wave 3 — NOT fixed by this PR.
-      # `enscrive start` still hard-requires a binary literally named
-      # `docker` (src/local.rs resolve_compose_binary()). Reproduce the
-      # debrief's own *verified* manual workaround (§3, D1: "a 12-line
-      # ~/.local/bin/docker shim over podman plus the compose v2 plugin...
-      # entirely userland, no sudo... the stack then runs unmodified") so
-      # this leg exercises the D2/D4/D5/D6/D10 fixes on a genuinely
-      # Docker-less host instead of skipping the podman path entirely.
-      - name: install podman + docker-shim (podman leg only, D1 workaround)
+      # ENS-3054 D1: this PR ships native podman detection in the cli
+      # itself (src/local.rs detect_container_runtime / resolve_compose_
+      # binary / compose_cmd) — probes docker then podman, resolves the
+      # first working compose implementation (docker compose -> podman
+      # compose -> podman-compose -> docker-compose), and wires
+      # DOCKER_HOST at the rootless podman socket automatically when
+      # podman is selected. NO docker shim. This step only installs the
+      # runtime + a compose provider and makes sure the rootless socket is
+      # already active — the runner's job, not the cli's, in a
+      # non-interactive session (the cli's own non-interactive path only
+      # ever guides-and-exits if the socket isn't active; it never touches
+      # systemd itself, ENS-3054 D1 requirement 4).
+      - name: install podman + compose (podman leg only)
         if: matrix.runtime == 'podman'
         run: |
           set -euo pipefail
@@ -155,11 +157,16 @@ jobs:
 
           mkdir -p "$HOME/.local/bin"
 
-          # Standalone docker-compose v2 binary — works against any
-          # Docker-API-compatible engine, including podman's compat socket.
-          # Verified against docker/compose's own published checksum file
-          # (this binary is outside the enscrive supply chain, so there is
-          # no in-repo pin to check it against).
+          # Standalone docker-compose v2 binary — podman's default
+          # compose_providers search includes a bare `docker-compose` on
+          # PATH, so this doubles as podman's `podman compose` delegate
+          # AND as the cli's own last-resort `docker-compose` fallback.
+          # Either way it talks to podman's rootless socket via
+          # DOCKER_HOST, which the cli sets itself (compose_cmd) — this
+          # step never sets DOCKER_HOST. Verified against docker/compose's
+          # own published checksum file (this binary is outside the
+          # enscrive supply chain, so there is no in-repo pin to check it
+          # against).
           COMPOSE_VERSION="v2.29.7"
           # Downloaded under its upstream filename (not renamed to
           # `docker-compose`) because the published .sha256 file's checksum
@@ -172,40 +179,14 @@ jobs:
             "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64.sha256"
           (cd /tmp && sha256sum -c docker-compose-linux-x86_64.sha256)
           install -m 0755 /tmp/docker-compose-linux-x86_64 "$HOME/.local/bin/docker-compose"
-
-          # Written with `printf` rather than a heredoc: a heredoc's closing
-          # delimiter must be flush against column 0, which a YAML `run: |`
-          # block (everything here is indented) cannot express without
-          # switching to a tab-indented `<<-` heredoc — printf sidesteps the
-          # whole trap.
-          printf '%s\n' \
-            '#!/bin/sh' \
-            '# ENS-3054 D1 workaround shim (see DEBRIEF.md section 3, D1).' \
-            '# enscrive start shells out to a binary literally named' \
-            '# `docker`; this forwards `docker compose ...` to the real' \
-            '# docker-compose v2 binary (talking to podmans socket via' \
-            '# DOCKER_HOST) and everything else straight to podman.' \
-            'set -eu' \
-            'if [ "${1:-}" = "compose" ]; then' \
-            '    shift' \
-            '    exec "$HOME/.local/bin/docker-compose" "$@"' \
-            'fi' \
-            'exec podman "$@"' \
-            > "$HOME/.local/bin/docker"
-          chmod +x "$HOME/.local/bin/docker"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-          # Rootless podman API socket that docker-compose talks to via
-          # DOCKER_HOST — the userland equivalent of the debrief's
-          # `systemctl --user enable --now podman.socket` one-liner, done
-          # without a lingering user systemd session since Actions runners
-          # don't reliably have one.
-          mkdir -p "/run/user/$(id -u)/podman"
-          nohup podman system service --time=0 \
-            "unix:///run/user/$(id -u)/podman/podman.sock" \
-            > /tmp/podman-service.log 2>&1 &
-          sleep 2
-          echo "DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock" >> "$GITHUB_ENV"
+          # Activate the rootless podman API socket via the real systemd
+          # --user unit podman ships (not a hand-rolled `podman system
+          # service` background process) — the exact command ENS-3054 D1
+          # requirement 4 tells an interactive operator to run by hand.
+          systemctl --user enable --now podman.socket
+          systemctl --user status podman.socket --no-pager
 
       - name: install cosign
         uses: sigstore/cosign-installer@v3
@@ -268,10 +249,11 @@ jobs:
         if: always()
         run: jq '.data // .' /tmp/health.json 2>/dev/null || cat /tmp/health.json || true
 
-      # EXPECTED RED until enscrive-developer's Wave 2 ships D8 (no rate
-      # card is ever seeded -> "internal error: no active rate card
-      # configured" / 500 on every corpus create, DEBRIEF §3).
-      - name: "enscrive corpus create [guards D8 — enscrive-developer, unreleased]"
+      # Guards D8 (no rate card is ever seeded -> "internal error: no
+      # active rate card configured" / 500 on every corpus create, DEBRIEF
+      # §3) — fixed in enscrive-developer PR #226 and released to the dev
+      # channel manifest this job fetches from.
+      - name: "enscrive corpus create [guards D8]"
         id: corpus_create
         run: |
           set -euo pipefail
@@ -283,10 +265,10 @@ jobs:
           corpus_id="$(jq -r '.data.id // .data.corpus_id // empty' /tmp/corpus.json)"
           echo "corpus_id=$corpus_id" >> "$GITHUB_OUTPUT"
 
-      # EXPECTED RED until enscrive-developer's Wave 2 ships D9 (no tenant
-      # wallet is ever provisioned -> 503 wallet_unprovisioned on every
-      # ingest, DEBRIEF §3). Unreachable today until D8 above is fixed.
-      - name: "enscrive ingest documents [guards D9 — enscrive-developer, unreleased]"
+      # Guards D9 (no tenant wallet is ever provisioned -> 503
+      # wallet_unprovisioned on every ingest, DEBRIEF §3) — fixed in the
+      # same enscrive-developer PR #226 as D8, above.
+      - name: "enscrive ingest documents [guards D9]"
         run: |
           set -euo pipefail
           enscrive ingest documents \
@@ -296,7 +278,6 @@ jobs:
 
       # The headline feature D10 was breaking outright (every search 500d
       # because observe couldn't reach developer's metering endpoint).
-      # Unreachable today until D8/D9 above are fixed.
       - name: "enscrive search [guards D10]"
         run: |
           set -euo pipefail

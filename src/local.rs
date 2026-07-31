@@ -19,7 +19,11 @@ const DEFAULT_MANAGED_PROFILE: &str = "managed";
 const DEFAULT_LEPTOS_OUTPUT_NAME: &str = "enscrive-developer";
 const INSTALLED_DEVELOPER_SITE_SUBDIR: &str = "site/enscrive-developer";
 const PROFILE_VERSION: u32 = 1;
-const FEDORA_DOCKER_HINT: &str = "On Fedora: `sudo dnf install -y moby-engine docker-compose && sudo systemctl enable --now docker && sudo usermod -aG docker $USER`, then re-login or run `newgrp docker` before retrying.";
+/// ENS-3054 D1: actionable fix when no container runtime is found at all.
+/// Fedora/RHEL and derivatives ship podman, not Docker — lead with the
+/// zero-sudo, single-runtime path rather than telling a Fedora user to go
+/// install a second engine.
+const NO_CONTAINER_RUNTIME_HINT: &str = "Install a container runtime. On Fedora/RHEL: `sudo dnf install -y podman podman-compose` (self-managed mode runs rootless podman natively — no Docker required, no sudo beyond this package install). On Debian/Ubuntu: `sudo apt-get install -y podman podman-compose`, or install Docker Engine + the compose plugin.";
 const LOCAL_POSTGRES_DATABASES: [&str; 4] = [
     "enscrive_developer",
     "enscrive_keycloak",
@@ -150,7 +154,29 @@ struct LocalProfile {
 #[derive(Debug, Clone, Copy)]
 enum ComposeBinary {
     DockerPlugin,
+    PodmanPlugin,
+    PodmanCompose,
     DockerCompose,
+}
+
+/// ENS-3054 D1: which container runtime `enscrive start`/`enscrive stop`
+/// selected. Determines whether the compose invocation needs rootless
+/// podman socket wiring (`DOCKER_HOST`) and is surfaced back to the
+/// operator so `enscrive start`/`enscrive status` state which runtime they
+/// are actually running on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerRuntime {
+    Docker,
+    Podman,
+}
+
+impl ContainerRuntime {
+    fn label(&self) -> &'static str {
+        match self {
+            ContainerRuntime::Docker => "docker",
+            ContainerRuntime::Podman => "podman (rootless)",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -797,7 +823,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         Some(&leptos_output_name),
     )?;
     prepare_local_data_dirs(&Path::new(&local.runtime_dir).join("data"))?;
-    ensure_docker_available()?;
+    let runtime = ensure_docker_available()?;
     let log_dir = Path::new(&local.log_dir);
     let mut started_services = Vec::new();
     compose_cmd(&local)?
@@ -1019,9 +1045,12 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         "profile": profile_name,
         "mode": profile.mode,
         "endpoint": profile.endpoint,
+        // ENS-3054 D1 requirement 6: state which runtime was selected.
+        "runtime": runtime.label(),
         "infra": {
             "docker_project": local.docker_project,
             "compose_file": local.compose_file,
+            "runtime": runtime.label(),
             "loki_ready": loki_ready,
         },
         "services": {
@@ -1054,6 +1083,7 @@ pub async fn stop(opts: StopOptions) -> Result<Value, String> {
         stop_service("enscrive-embed", Path::new(&local.log_dir))?,
     ];
 
+    let runtime = ensure_docker_available()?;
     let compose_action = if opts.remove_infra { "down" } else { "stop" };
     compose_cmd(&local)?
         .arg(compose_action)
@@ -1069,6 +1099,7 @@ pub async fn stop(opts: StopOptions) -> Result<Value, String> {
         "profile": profile_name,
         "services": stopped,
         "infra_action": compose_action,
+        "runtime": runtime.label(),
     }))
 }
 
@@ -1114,6 +1145,13 @@ pub async fn status(opts: StatusOptions) -> Result<Value, String> {
             },
             "provider_configured": provider_configured_json(&local.providers),
             "api_key_configured": profile.api_key.is_some(),
+            // ENS-3054 D1 requirement 6: state which runtime `enscrive
+            // status` would drive the stack with. Detection-only (no
+            // socket-activation prompt) — never fatal to `status`.
+            "runtime": match detect_container_runtime() {
+                Ok(runtime) => json!({"selected": runtime.label()}),
+                Err(error) => json!({"selected": null, "error": error}),
+            },
         })
     });
 
@@ -2459,19 +2497,150 @@ fn which_in_path(binary_name: &str) -> Option<PathBuf> {
     None
 }
 
-fn ensure_docker_available() -> Result<(), String> {
-    resolve_compose_binary().map(|_| ())
+/// ENS-3054 D1 requirement 1: runtime detection. Probe `docker` first
+/// (existing installs keep working unmodified), then `podman` — accept
+/// whichever is found on PATH. Only errors, with an actionable fix, when
+/// neither is present.
+fn detect_container_runtime() -> Result<ContainerRuntime, String> {
+    detect_container_runtime_with(|bin| which_in_path(bin).is_some())
+}
+
+fn detect_container_runtime_with<F>(exists: F) -> Result<ContainerRuntime, String>
+where
+    F: Fn(&str) -> bool,
+{
+    if exists("docker") {
+        Ok(ContainerRuntime::Docker)
+    } else if exists("podman") {
+        Ok(ContainerRuntime::Podman)
+    } else {
+        Err(format!(
+            "self-managed local mode requires a container runtime and none was found on PATH (checked for `docker` and `podman`). {}",
+            NO_CONTAINER_RUNTIME_HINT
+        ))
+    }
+}
+
+/// ENS-3054 D1: top-level gate called once before compose is driven (from
+/// `start`/`stop`). Resolves which runtime is available and, when it is
+/// podman, makes sure the rootless user socket compose will drive is
+/// actually active — see `ensure_podman_socket_ready`. Userland only, never
+/// touches system-level (`--system`) docker/podman services.
+fn ensure_docker_available() -> Result<ContainerRuntime, String> {
+    let runtime = detect_container_runtime()?;
+    if runtime == ContainerRuntime::Podman {
+        ensure_podman_socket_ready()?;
+    }
+    Ok(runtime)
+}
+
+const PODMAN_SOCKET_ENABLE_CMD: &str = "systemctl --user enable --now podman.socket";
+
+/// ENS-3054 D1 requirement 4 (founder decision: PROMPT-TO-ENABLE). If the
+/// rootless podman socket isn't active: interactive session -> ask, and on
+/// `y` run the enable command (still no sudo — `--user` is a per-user
+/// systemd unit, not the system instance); non-interactive (CI/scripts) ->
+/// never touch systemd, just print the exact fix and fail cleanly.
+fn ensure_podman_socket_ready() -> Result<(), String> {
+    if podman_socket_active() {
+        return Ok(());
+    }
+
+    if !interactive_prompts_available() {
+        return Err(format!(
+            "podman was selected as the container runtime, but its rootless user socket is not active. Run `{}` and re-run `enscrive start`.",
+            PODMAN_SOCKET_ENABLE_CMD
+        ));
+    }
+
+    println!(
+        "podman was selected as the container runtime, but its rootless user socket is not active."
+    );
+    if !prompt_enable_podman_socket()? {
+        return Err(format!(
+            "the rootless podman socket is required to run self-managed local mode on podman. Run `{}` and re-run `enscrive start`.",
+            PODMAN_SOCKET_ENABLE_CMD
+        ));
+    }
+
+    let status = Command::new("systemctl")
+        .args(["--user", "enable", "--now", "podman.socket"])
+        .status()
+        .map_err(|e| format!("run `{}`: {e}", PODMAN_SOCKET_ENABLE_CMD))?;
+    if !status.success() {
+        return Err(format!(
+            "`{}` failed with status {}",
+            PODMAN_SOCKET_ENABLE_CMD, status
+        ));
+    }
+
+    if !podman_socket_active() {
+        let hint_path = podman_socket_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "$XDG_RUNTIME_DIR/podman/podman.sock".to_string());
+        return Err(format!(
+            "ran `{}` but {} is not present yet; wait a moment and re-run `enscrive start`",
+            PODMAN_SOCKET_ENABLE_CMD, hint_path
+        ));
+    }
+
+    Ok(())
+}
+
+fn prompt_enable_podman_socket() -> Result<bool, String> {
+    print!("Enable the rootless podman socket now? [y/N] ");
+    io::stdout()
+        .flush()
+        .map_err(|e| format!("flush stdout: {e}"))?;
+    let mut buf = String::new();
+    io::stdin()
+        .read_line(&mut buf)
+        .map_err(|e| format!("read input: {e}"))?;
+    let answer = buf.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
+/// `$XDG_RUNTIME_DIR/podman/podman.sock` — where `systemctl --user enable
+/// --now podman.socket` binds the rootless API socket.
+fn podman_socket_path() -> Result<PathBuf, String> {
+    let runtime_dir = env::var("XDG_RUNTIME_DIR").map_err(|_| {
+        "XDG_RUNTIME_DIR is not set; rootless podman needs it to locate the user socket. Export it (e.g. `export XDG_RUNTIME_DIR=/run/user/$(id -u)`) and retry.".to_string()
+    })?;
+    Ok(PathBuf::from(runtime_dir).join("podman").join("podman.sock"))
+}
+
+fn podman_socket_active() -> bool {
+    podman_socket_path()
+        .map(|path| path.exists())
+        .unwrap_or(false)
+}
+
+fn podman_docker_host() -> Result<String, String> {
+    Ok(format!("unix://{}", podman_socket_path()?.display()))
 }
 
 fn compose_cmd(local: &LocalProfile) -> Result<Command, String> {
+    let runtime = detect_container_runtime()?;
     let mut cmd = match resolve_compose_binary()? {
         ComposeBinary::DockerPlugin => {
             let mut cmd = Command::new("docker");
             cmd.arg("compose");
             cmd
         }
+        ComposeBinary::PodmanPlugin => {
+            let mut cmd = Command::new("podman");
+            cmd.arg("compose");
+            cmd
+        }
+        ComposeBinary::PodmanCompose => Command::new("podman-compose"),
         ComposeBinary::DockerCompose => Command::new("docker-compose"),
     };
+    if runtime == ContainerRuntime::Podman {
+        // ENS-3054 D1 requirement 3: rootless podman wiring. Whichever
+        // compose flavor got resolved, point it at the user socket so it
+        // drives podman instead of a (likely absent) docker daemon.
+        cmd.env("DOCKER_HOST", podman_docker_host()?);
+    }
     cmd.arg("-p")
         .arg(&local.docker_project)
         .arg("-f")
@@ -2480,17 +2649,37 @@ fn compose_cmd(local: &LocalProfile) -> Result<Command, String> {
 }
 
 fn resolve_compose_binary() -> Result<ComposeBinary, String> {
-    if command_succeeds("docker", &["compose", "version"]) {
+    resolve_compose_binary_with(command_succeeds)
+}
+
+/// ENS-3054 D1 requirement 2: probe in order `docker compose` -> `podman
+/// compose` -> `podman-compose` -> `docker-compose`; use the first that
+/// actually works. Each candidate is verified by actually running it (not
+/// just checking PATH) so a broken/misconfigured install falls through to
+/// the next candidate instead of being selected and failing later.
+fn resolve_compose_binary_with<F>(succeeds: F) -> Result<ComposeBinary, String>
+where
+    F: Fn(&str, &[&str]) -> bool,
+{
+    if succeeds("docker", &["compose", "version"]) {
         return Ok(ComposeBinary::DockerPlugin);
     }
 
-    if command_succeeds("docker-compose", &["version"]) {
+    if succeeds("podman", &["compose", "version"]) {
+        return Ok(ComposeBinary::PodmanPlugin);
+    }
+
+    if succeeds("podman-compose", &["--version"]) {
+        return Ok(ComposeBinary::PodmanCompose);
+    }
+
+    if succeeds("docker-compose", &["version"]) {
         return Ok(ComposeBinary::DockerCompose);
     }
 
     Err(format!(
-        "self-managed local mode requires Docker and Docker Compose. {}",
-        FEDORA_DOCKER_HINT
+        "no working compose implementation found (tried `docker compose`, `podman compose`, `podman-compose`, `docker-compose`). {}",
+        NO_CONTAINER_RUNTIME_HINT
     ))
 }
 
@@ -4115,6 +4304,112 @@ mod tests {
         assert!(rendered.contains("LEPTOS_OUTPUT_NAME=enscrive-developer"));
         assert!(rendered.contains("LEPTOS_SITE_ROOT=/tmp/site"));
         assert!(rendered.contains("LEPTOS_SITE_PKG_DIR=pkg"));
+    }
+
+    // --------------------------------------------------------------------
+    // ENS-3054 D1: native podman support. Dependency-injected variants of
+    // `detect_container_runtime`/`resolve_compose_binary` let these tests
+    // exercise the probing order without shelling out to real binaries.
+    // --------------------------------------------------------------------
+
+    #[test]
+    fn detect_container_runtime_selects_docker_when_present() {
+        let result = detect_container_runtime_with(|bin| bin == "docker");
+        assert!(
+            matches!(result, Ok(ContainerRuntime::Docker)),
+            "expected Docker, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn detect_container_runtime_prefers_docker_when_both_present() {
+        let result = detect_container_runtime_with(|bin| bin == "docker" || bin == "podman");
+        assert!(
+            matches!(result, Ok(ContainerRuntime::Docker)),
+            "docker is probed first; expected Docker even with podman also present, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn detect_container_runtime_falls_back_to_podman_when_docker_absent() {
+        let result = detect_container_runtime_with(|bin| bin == "podman");
+        assert!(
+            matches!(result, Ok(ContainerRuntime::Podman)),
+            "expected Podman when only podman is on PATH, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn detect_container_runtime_errors_and_names_the_podman_fix_when_neither_present() {
+        let result = detect_container_runtime_with(|_| false);
+        let err = result.expect_err("expected an error when neither runtime is present");
+        let lower = err.to_lowercase();
+        assert!(
+            lower.contains("podman"),
+            "error must name podman as the fix (Fedora ships podman, not Docker); got: {err}"
+        );
+        assert!(
+            lower.contains("dnf install") || lower.contains("apt-get install"),
+            "error must include an actionable install command, not a generic failure; got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_compose_binary_prefers_docker_plugin_when_available() {
+        let result = resolve_compose_binary_with(|program, args| {
+            program == "docker" && args == ["compose", "version"]
+        });
+        assert!(matches!(result, Ok(ComposeBinary::DockerPlugin)));
+    }
+
+    #[test]
+    fn resolve_compose_binary_falls_back_to_podman_plugin() {
+        let result = resolve_compose_binary_with(|program, args| {
+            program == "podman" && args == ["compose", "version"]
+        });
+        assert!(matches!(result, Ok(ComposeBinary::PodmanPlugin)));
+    }
+
+    #[test]
+    fn resolve_compose_binary_falls_back_to_podman_compose_standalone() {
+        let result = resolve_compose_binary_with(|program, args| {
+            program == "podman-compose" && args == ["--version"]
+        });
+        assert!(matches!(result, Ok(ComposeBinary::PodmanCompose)));
+    }
+
+    #[test]
+    fn resolve_compose_binary_falls_back_to_docker_compose_standalone() {
+        // Exercises the D1-workaround-shim case too: a standalone
+        // `docker-compose` binary is the last resort, and `compose_cmd`
+        // points it at the rootless podman socket via DOCKER_HOST when
+        // podman is the selected runtime.
+        let result = resolve_compose_binary_with(|program, args| {
+            program == "docker-compose" && args == ["version"]
+        });
+        assert!(matches!(result, Ok(ComposeBinary::DockerCompose)));
+    }
+
+    #[test]
+    fn resolve_compose_binary_respects_probing_order_over_availability_order() {
+        // Both `podman compose` and `podman-compose` "work" here; the
+        // earlier-in-order plugin form must win, not whichever was
+        // constructed first in the closure.
+        let result = resolve_compose_binary_with(|program, args| {
+            (program == "podman" && args == ["compose", "version"])
+                || (program == "podman-compose" && args == ["--version"])
+        });
+        assert!(matches!(result, Ok(ComposeBinary::PodmanPlugin)));
+    }
+
+    #[test]
+    fn resolve_compose_binary_errors_with_actionable_message_when_nothing_works() {
+        let result = resolve_compose_binary_with(|_, _| false);
+        let err = result.expect_err("expected an error when no compose implementation works");
+        assert!(
+            err.to_lowercase().contains("podman"),
+            "error must name podman as part of the fix; got: {err}"
+        );
     }
 
     // --------------------------------------------------------------------
