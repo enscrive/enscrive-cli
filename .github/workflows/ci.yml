@@ -136,6 +136,30 @@ jobs:
         with:
           key: clean-room-onboard-${{ matrix.runtime }}
 
+      # GitHub-hosted runner images ship Docker (moby-*) pre-installed —
+      # `docker` is on PATH regardless of the matrix leg. Without this
+      # step the podman leg would silently pass by using the runner's
+      # stock Docker (detect_container_runtime probes `docker` first, by
+      # design — that's correct behavior on a real host with both
+      # installed) and never touch podman at all, proving nothing about
+      # D1. Remove it so this leg is a genuinely Docker-less host, same as
+      # the debrief's real Fedora machine.
+      - name: remove pre-installed Docker (podman leg only — prove a genuinely Docker-less host)
+        if: matrix.runtime == 'podman'
+        run: |
+          set -euo pipefail
+          sudo systemctl stop docker.socket docker.service 2>/dev/null || true
+          sudo apt-get purge -y \
+            moby-engine moby-cli moby-buildx moby-compose moby-containerd moby-runc \
+            docker-ce docker-ce-cli docker-buildx-plugin docker-compose-plugin containerd.io \
+            2>/dev/null || true
+          sudo rm -f /usr/bin/docker /usr/local/bin/docker /usr/bin/docker-compose
+          if command -v docker >/dev/null 2>&1; then
+            echo "docker is still on PATH at $(command -v docker) — leg is not Docker-less" >&2
+            exit 1
+          fi
+          echo "confirmed: no docker binary on PATH"
+
       # ENS-3054 D1: this PR ships native podman detection in the cli
       # itself (src/local.rs detect_container_runtime / resolve_compose_
       # binary / compose_cmd) — probes docker then podman, resolves the
