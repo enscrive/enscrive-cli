@@ -88,3 +88,239 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets -- -D warnings
+
+  # ENS-3054 Wave 0: the clean-room onboard gate.
+  #
+  # Root cause from the debrief (enscrive-governance
+  # plans/SOLO-DEV-ONBOARD-REMEDIATION-2026-07-31/DEBRIEF.md §2): nothing
+  # ever ran the documented three-command onboard end to end, which is how
+  # ten separate defects (D1-D11) shipped without being caught — you cannot
+  # reach defect #8 without first fixing #1 through #7. This job runs the
+  # real sequence for real, on a clean container:
+  #
+  #   install.sh -> enscrive init --mode self-managed -> enscrive start
+  #   -> enscrive health -> corpus create -> ingest documents -> search
+  #
+  # against THIS PR's own `enscrive` binary (built from source below) and
+  # the latest RELEASED service binaries (enscrive-developer/-observe/
+  # -embed/esm/enscrive-docs, fetched from the dev release manifest by
+  # `enscrive init` itself — the same default a real solo developer gets).
+  # Matrixed across a Docker host and a podman host per DEBRIEF §5 ("zero
+  # hand-edited env files... on both a Docker host and a podman host").
+  #
+  # INTENTIONALLY INFORMATIONAL / NOT REQUIRED. Do not add this job's checks
+  # to branch protection's required list — that stays founder-only, per the
+  # task brief for this PR. This job is EXPECTED TO GO RED at the
+  # `corpus create` step: D8 (no rate card ever seeded, DEBRIEF §3) and D9
+  # (no wallet ever provisioned, DEBRIEF §3) live in enscrive-developer, are
+  # NOT fixed by this PR, and are unreleased as of this PR. Per the
+  # debrief's own recommendation (§2, §6 Wave 0): "ship the clean-room job
+  # first, then fix the defects against it" — a job that starts green here
+  # would be proving nothing.
+  #
+  # TODO(ENS-3054 Wave 2): once enscrive-developer ships D8+D9 and that
+  # release reaches the dev channel this job fetches from, re-run this job
+  # and — once it's actually green — the founder can promote it to a
+  # required branch-protection check. Not done by this PR.
+  clean-room-onboard:
+    name: clean-room-onboard (${{ matrix.runtime }})
+    runs-on: ubuntu-latest
+    needs: [build, test, clippy]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [docker, podman]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: clean-room-onboard-${{ matrix.runtime }}
+
+      # D1 (podman/compose auto-detection) is Wave 3 — NOT fixed by this PR.
+      # `enscrive start` still hard-requires a binary literally named
+      # `docker` (src/local.rs resolve_compose_binary()). Reproduce the
+      # debrief's own *verified* manual workaround (§3, D1: "a 12-line
+      # ~/.local/bin/docker shim over podman plus the compose v2 plugin...
+      # entirely userland, no sudo... the stack then runs unmodified") so
+      # this leg exercises the D2/D4/D5/D6/D10 fixes on a genuinely
+      # Docker-less host instead of skipping the podman path entirely.
+      - name: install podman + docker-shim (podman leg only, D1 workaround)
+        if: matrix.runtime == 'podman'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs
+
+          mkdir -p "$HOME/.local/bin"
+
+          # Standalone docker-compose v2 binary — works against any
+          # Docker-API-compatible engine, including podman's compat socket.
+          # Verified against docker/compose's own published checksum file
+          # (this binary is outside the enscrive supply chain, so there is
+          # no in-repo pin to check it against).
+          COMPOSE_VERSION="v2.29.7"
+          # Downloaded under its upstream filename (not renamed to
+          # `docker-compose`) because the published .sha256 file's checksum
+          # line references that exact filename — sha256sum -c resolves it
+          # relative to cwd, so a rename here would make verification fail
+          # with a spurious "No such file or directory".
+          curl -fsSL -o /tmp/docker-compose-linux-x86_64 \
+            "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64"
+          curl -fsSL -o /tmp/docker-compose-linux-x86_64.sha256 \
+            "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-x86_64.sha256"
+          (cd /tmp && sha256sum -c docker-compose-linux-x86_64.sha256)
+          install -m 0755 /tmp/docker-compose-linux-x86_64 "$HOME/.local/bin/docker-compose"
+
+          # Written with `printf` rather than a heredoc: a heredoc's closing
+          # delimiter must be flush against column 0, which a YAML `run: |`
+          # block (everything here is indented) cannot express without
+          # switching to a tab-indented `<<-` heredoc — printf sidesteps the
+          # whole trap.
+          printf '%s\n' \
+            '#!/bin/sh' \
+            '# ENS-3054 D1 workaround shim (see DEBRIEF.md section 3, D1).' \
+            '# enscrive start shells out to a binary literally named' \
+            '# `docker`; this forwards `docker compose ...` to the real' \
+            '# docker-compose v2 binary (talking to podmans socket via' \
+            '# DOCKER_HOST) and everything else straight to podman.' \
+            'set -eu' \
+            'if [ "${1:-}" = "compose" ]; then' \
+            '    shift' \
+            '    exec "$HOME/.local/bin/docker-compose" "$@"' \
+            'fi' \
+            'exec podman "$@"' \
+            > "$HOME/.local/bin/docker"
+          chmod +x "$HOME/.local/bin/docker"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+          # Rootless podman API socket that docker-compose talks to via
+          # DOCKER_HOST — the userland equivalent of the debrief's
+          # `systemctl --user enable --now podman.socket` one-liner, done
+          # without a lingering user systemd session since Actions runners
+          # don't reliably have one.
+          mkdir -p "/run/user/$(id -u)/podman"
+          nohup podman system service --time=0 \
+            "unix:///run/user/$(id -u)/podman/podman.sock" \
+            > /tmp/podman-service.log 2>&1 &
+          sleep 2
+          echo "DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock" >> "$GITHUB_ENV"
+
+      - name: install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Exercises the actual documented public onboard step 1 for realism
+      # (proves install.enscrive.io + cosign/Fulcio verification still
+      # work end to end). Isolated with continue-on-error: this job's
+      # signal is about the ENS-3054 W0+W1 fixes below, not about
+      # install.enscrive.io's uptime — and the binary it fetches gets
+      # replaced with this PR's own build in the next step regardless.
+      - name: install.sh (documented public onboard step 1)
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          sh installer/install.sh --prefix="$HOME/.local/bin"
+
+      # Build THIS PR's cli binary and install it over whatever install.sh
+      # fetched, so every step from here on tests the PR's actual
+      # src/local.rs changes (D2/D4/D5/D6/D10) — not the last release.
+      - name: build and install this PR's enscrive binary
+        run: |
+          set -euo pipefail
+          cargo build --release --locked
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 target/release/enscrive "$HOME/.local/bin/enscrive"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: enscrive --version
+        run: enscrive --version
+
+      # Guards D2 (CATALOG_DB_URL), D5 (shared metering HMAC generated +
+      # written to both vaults), D6 (absolute ESM_BINARY in every rendered
+      # env) at the moment the env files are written.
+      - name: "enscrive init --mode self-managed"
+        env:
+          ONBOARD_OPENAI_API_KEY: ${{ secrets.ONBOARD_TEST_OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          enscrive init --mode self-managed --set-default \
+            --openai-api-key "$ONBOARD_OPENAI_API_KEY" \
+            --output json
+
+      # Guards D4 (ESM_VAULT_PATH must resolve to a directory, or observe
+      # never execs esm at all) and D10 (DEVELOPER_BASE_URL at the real
+      # developer port, or every /v1/search 500s downstream).
+      - name: "enscrive start"
+        run: |
+          set -euo pipefail
+          enscrive start --output json
+
+      # Confirms the stack Wave 1 unblocked actually serves. Informational
+      # capability dump alongside it — not asserted on, since the exact
+      # `degraded`/`capabilities` shape is enscrive-developer's contract,
+      # not this repo's.
+      - name: "enscrive health"
+        run: |
+          set -euo pipefail
+          enscrive health --output json | tee /tmp/health.json
+      - name: report health capabilities (informational)
+        if: always()
+        run: jq '.data // .' /tmp/health.json 2>/dev/null || cat /tmp/health.json || true
+
+      # EXPECTED RED until enscrive-developer's Wave 2 ships D8 (no rate
+      # card is ever seeded -> "internal error: no active rate card
+      # configured" / 500 on every corpus create, DEBRIEF §3).
+      - name: "enscrive corpus create [guards D8 — enscrive-developer, unreleased]"
+        id: corpus_create
+        run: |
+          set -euo pipefail
+          enscrive corpus create \
+            --name "onboard-smoke-${{ matrix.runtime }}-$(date +%s)" \
+            --embedding-model text-embedding-3-large \
+            --description "ENS-3054 clean-room onboard CI smoke corpus" \
+            --output json | tee /tmp/corpus.json
+          corpus_id="$(jq -r '.data.id // .data.corpus_id // empty' /tmp/corpus.json)"
+          echo "corpus_id=$corpus_id" >> "$GITHUB_OUTPUT"
+
+      # EXPECTED RED until enscrive-developer's Wave 2 ships D9 (no tenant
+      # wallet is ever provisioned -> 503 wallet_unprovisioned on every
+      # ingest, DEBRIEF §3). Unreachable today until D8 above is fixed.
+      - name: "enscrive ingest documents [guards D9 — enscrive-developer, unreleased]"
+        run: |
+          set -euo pipefail
+          enscrive ingest documents \
+            --corpus-id "${{ steps.corpus_create.outputs.corpus_id }}" \
+            --content "Enscrive clean-room onboard smoke test document." \
+            --output json
+
+      # The headline feature D10 was breaking outright (every search 500d
+      # because observe couldn't reach developer's metering endpoint).
+      # Unreachable today until D8/D9 above are fixed.
+      - name: "enscrive search [guards D10]"
+        run: |
+          set -euo pipefail
+          enscrive search \
+            --corpus "${{ steps.corpus_create.outputs.corpus_id }}" \
+            --query "smoke test" \
+            --output json
+
+      # NOTE (DEBRIEF §4.2, §5 step 8): per-document delete does not exist
+      # in the CLI yet (no CorpusSubcommand variant) — it's Wave 4 backlog,
+      # not part of this PR. Left out of this job until it ships; the DoD
+      # in DEBRIEF §5 lists it as a future step, not a current one.
+
+      - name: collect service logs (always, for postmortem)
+        if: always()
+        run: |
+          set -uo pipefail
+          log_dir="$HOME/.local/share/enscrive/runtime/local/logs"
+          if [ ! -d "$log_dir" ]; then
+            echo "no log dir at $log_dir (enscrive start likely never ran)"
+            exit 0
+          fi
+          for f in "$log_dir"/*.log; do
+            echo "===== $f ====="
+            tail -n 120 "$f" 2>/dev/null || true
+            echo
+          done
