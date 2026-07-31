@@ -18,6 +18,8 @@ use std::collections::HashMap;
 use std::fs;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
+use sha2::{Digest, Sha256};
+
 use local::{
     InitMode, ManagedInitOptions, SelfManagedInitOptions, StartOptions, StatusOptions, StopOptions,
 };
@@ -847,7 +849,11 @@ struct IngestDocumentsArgs {
     #[arg(long = "corpus-id")]
     corpus_id: String,
 
-    /// Single document ID (for single-document ingest)
+    /// Single document ID (for single-document ingest). If omitted when
+    /// using --content/--content-file, a deterministic content-hash id
+    /// ("doc-<sha256 prefix>") is generated (ENS-3054) so identical
+    /// content re-ingests as a no-op; pass this explicitly to control
+    /// replace-a-prior-version semantics.
     #[arg(long = "document-id")]
     document_id: Option<String>,
 
@@ -3065,6 +3071,39 @@ fn parse_content_source(args: &SegmentDocumentArgs) -> Result<String, String> {
     parse_text_source(&args.content, &args.content_file)
 }
 
+/// ENS-3054: `ingest documents --content`/`--content-file` is the naive,
+/// documented single-doc ingest path, but the server rejects an empty
+/// `document_id` (400 "document id must not be empty"). Rather than
+/// surface that raw server error for the most natural onboarding command,
+/// derive a deterministic id from a content hash when the caller omits
+/// `--document-id`.
+///
+/// This mirrors the platform's existing content-addressing precedent
+/// (chunk-level `fingerprint = SHA256(content)` dedup, see
+/// `docs/public/ingest.md`): identical content always yields the same id,
+/// so re-running the naive command is idempotent (no duplicate document).
+/// Per `docs/public/ingest.md`, `id` is documented as the caller's stable,
+/// replace-semantics key — editing the content changes the hash and thus
+/// produces a *new* id rather than replacing the prior version, so callers
+/// who need edit-replaces-prior-version semantics should still pass an
+/// explicit `--document-id`. The generated id is echoed to stderr so it
+/// can be captured for later reference/deletion.
+fn resolve_single_doc_id(explicit: &Option<String>, content: &str) -> String {
+    match explicit {
+        Some(id) => id.clone(),
+        None => {
+            let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+            let generated = format!("doc-{}", &hash[..16]);
+            eprintln!(
+                "info: --document-id not provided; using content-hash id '{generated}' \
+                 (deterministic: identical --content re-ingests as a no-op; edited content \
+                 gets a new id — pass --document-id explicitly to replace a prior version)"
+            );
+            generated
+        }
+    }
+}
+
 fn parse_analysis_source(args: &ContentAnalysisArgs) -> Result<String, String> {
     parse_text_source(&args.content, &args.content_file)
 }
@@ -4728,12 +4767,12 @@ async fn main() {
                 },
                 IngestSubcommand::Documents(args) => {
                     let documents = if let Some(ref content) = args.content {
-                        let doc_id = args.document_id.clone().unwrap_or_default();
+                        let doc_id = resolve_single_doc_id(&args.document_id, content);
                         json!([{ "id": doc_id, "content": content, "metadata": {}, "fingerprint": "" }])
                     } else if let Some(ref content_file) = args.content_file {
                         match fs::read_to_string(content_file) {
                             Ok(content) => {
-                                let doc_id = args.document_id.clone().unwrap_or_default();
+                                let doc_id = resolve_single_doc_id(&args.document_id, &content);
                                 json!([{ "id": doc_id, "content": content, "metadata": {}, "fingerprint": "" }])
                             }
                             Err(e) => {
@@ -7504,6 +7543,38 @@ mod tests {
 
         let error = parse_analysis_source(&args).unwrap_err();
         assert_eq!(error, "provide exactly one of --content or --content-file");
+    }
+
+    // ENS-3054: `ingest documents --content "..."` without `--document-id`
+    // must never send an empty document id (the server 400s on that with a
+    // raw, unfriendly error). Instead, a deterministic content-hash id is
+    // generated client-side.
+    #[test]
+    fn resolve_single_doc_id_uses_explicit_id_when_given() {
+        let explicit = Some("doc-1".to_string());
+        let doc_id = resolve_single_doc_id(&explicit, "some text");
+        assert_eq!(doc_id, "doc-1");
+    }
+
+    #[test]
+    fn resolve_single_doc_id_generates_nonempty_id_when_omitted() {
+        let doc_id = resolve_single_doc_id(&None, "some text");
+        assert!(!doc_id.is_empty());
+        assert!(doc_id.starts_with("doc-"));
+    }
+
+    #[test]
+    fn resolve_single_doc_id_is_deterministic_for_identical_content() {
+        let first = resolve_single_doc_id(&None, "some text");
+        let second = resolve_single_doc_id(&None, "some text");
+        assert_eq!(first, second, "identical content must yield the same id (idempotent re-ingest)");
+    }
+
+    #[test]
+    fn resolve_single_doc_id_differs_for_different_content() {
+        let first = resolve_single_doc_id(&None, "some text");
+        let second = resolve_single_doc_id(&None, "different text");
+        assert_ne!(first, second);
     }
 
     #[test]
