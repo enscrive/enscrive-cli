@@ -560,6 +560,16 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
     let lab_secret = read_env_value(&observe_env_path, "LAB_SERVICE_SECRET")
         .or_else(|| read_env_value(&embed_env_path, "LAB_SERVICE_SECRET"))
         .unwrap_or_else(|| generate_secret(48));
+    // ENS-3054 (D5): shared secret between observe and developer, same
+    // pattern as lab_secret above — read back from either vault-adjacent env
+    // file first so re-init is idempotent, otherwise generate once and write
+    // the identical value into both developer.env and observe.env below.
+    let observe_to_developer_metering_hmac =
+        read_env_value(&developer_env_path, "OBSERVE_TO_DEVELOPER_METERING_HMAC")
+            .or_else(|| {
+                read_env_value(&observe_env_path, "OBSERVE_TO_DEVELOPER_METERING_HMAC")
+            })
+            .unwrap_or_else(|| generate_hex_secret(32));
     let local_bootstrap_secret = existing_local
         .as_ref()
         .map(|local| local.bootstrap.secret.clone())
@@ -685,17 +695,23 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
             &lab_secret,
             &hmac_pepper,
             &aes_key,
+            &observe_to_developer_metering_hmac,
             developer_site_root.as_deref(),
             &leptos_output_name,
         ),
     )?;
     write_text(
         &config_dir.join("observe.env"),
-        &render_observe_env(&local, &postgres_password, &lab_secret),
+        &render_observe_env(
+            &local,
+            &postgres_password,
+            &lab_secret,
+            &observe_to_developer_metering_hmac,
+        ),
     )?;
     write_text(
         &config_dir.join("embed.env"),
-        &render_embed_env(&local, &qdrant_api_key, &lab_secret),
+        &render_embed_env(&local, &postgres_password, &qdrant_api_key, &lab_secret),
     )?;
     // ENS-153 (4b): write the enscrive-docs sidecar env and config files.
     // docs.env holds ENSCRIVE_API_KEY (never appears in the toml).
@@ -811,17 +827,22 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
     // never appears in process listings). When services migrate from
     // std::env::var to SecretsManager::get, these env vars are what
     // unlock the vault.
+    //
+    // ENS-3054 (D4): ESM_VAULT_PATH is applied by consumers (e.g.
+    // enscrive-observe/src/secrets.rs) as `cmd.current_dir(..)` — it must be
+    // the vault *directory*, not the vault *file*. Use esm_vault_dir here,
+    // not esm_vault_file.
     let runtime_path = std::path::PathBuf::from(&local.runtime_dir);
     let master_key_path = esm_master_key_path(&runtime_path);
-    let embed_vault_path = esm_service_vault(&runtime_path, "enscrive-embed");
-    let observe_vault_path = esm_service_vault(&runtime_path, "enscrive-observe");
-    let developer_vault_path = esm_service_vault(&runtime_path, "enscrive-developer");
+    let embed_vault_dir = esm_vault_dir(&runtime_path, "enscrive-embed");
+    let observe_vault_dir = esm_vault_dir(&runtime_path, "enscrive-observe");
+    let developer_vault_dir = esm_vault_dir(&runtime_path, "enscrive-developer");
     let esm_binary_path = local.binaries.esm.clone();
     let master_key_str = master_key_path.display().to_string();
 
     let embed_esm_env: Vec<(&str, String)> = vec![
         ("ESM_BINARY", esm_binary_path.clone()),
-        ("ESM_VAULT_PATH", embed_vault_path.display().to_string()),
+        ("ESM_VAULT_PATH", embed_vault_dir.display().to_string()),
         ("ESM_KEY_FILE", master_key_str.clone()),
     ];
     let started_embed = spawn_service_with_extra_env(
@@ -846,7 +867,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
 
     let observe_esm_env: Vec<(&str, String)> = vec![
         ("ESM_BINARY", esm_binary_path.clone()),
-        ("ESM_VAULT_PATH", observe_vault_path.display().to_string()),
+        ("ESM_VAULT_PATH", observe_vault_dir.display().to_string()),
         ("ESM_KEY_FILE", master_key_str.clone()),
     ];
     let started_observe = spawn_service_with_extra_env(
@@ -882,7 +903,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
     // LEPTOS_* vars match what cargo-leptos baked at build time.
     let mut developer_extra_env: Vec<(&str, String)> = vec![
         ("ESM_BINARY", esm_binary_path.clone()),
-        ("ESM_VAULT_PATH", developer_vault_path.display().to_string()),
+        ("ESM_VAULT_PATH", developer_vault_dir.display().to_string()),
         ("ESM_KEY_FILE", master_key_str.clone()),
     ];
     {
@@ -1412,12 +1433,25 @@ fn render_infra_env(local: &LocalProfile, postgres_password: &str, qdrant_api_ke
     )
 }
 
+// ENS-3054 (D5, D6): OBSERVE_TO_DEVELOPER_METERING_HMAC is required by
+// developer at startup to validate observe's metering writes; it must be
+// byte-identical to the copy observe gets (see render_observe_env — both
+// are handed the same generated value by init_self_managed, mirroring how
+// LAB_SERVICE_SECRET is shared across all three services). ESM_BINARY
+// mirrors the D6 fix in render_embed_env.
+//
+// 8 scalar secret/config inputs is a lot, but they're independently sourced
+// (some generated, some read back from disk for idempotence, some plain
+// LocalProfile fields) and bundling them into a struct here would just move
+// the same arity into a builder without adding clarity.
+#[allow(clippy::too_many_arguments)]
 fn render_developer_env(
     local: &LocalProfile,
     postgres_password: &str,
     lab_secret: &str,
     hmac_pepper: &str,
     aes_key: &str,
+    observe_to_developer_metering_hmac: &str,
     leptos_site_root: Option<&Path>,
     leptos_output_name: &str,
 ) -> String {
@@ -1425,7 +1459,7 @@ fn render_developer_env(
         .map(|path| format!("LEPTOS_SITE_ROOT={}\n", path.display()))
         .unwrap_or_default();
     format!(
-        "ENSCRIVE_ENVIRONMENT=development\nDEPLOYMENT_MODE=local\nDATABASE_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_developer\nDEVELOPER_PORT={developer_port}\nKEYCLOAK_ISSUER=http://127.0.0.1:{keycloak_port}/realms/{realm}\nKEYCLOAK_CLIENT_ID={client_id}\nKEYCLOAK_CLIENT_SECRET={client_secret}\nPORTAL_OIDC_REDIRECT_URI=http://127.0.0.1:{developer_port}/auth/callback\nHMAC_PEPPER={hmac_pepper}\nAES_KEY={aes_key}\nOBSERVE_GRPC_ADDR=http://127.0.0.1:{observe_grpc_port}\nLAB_SERVICE_SECRET={lab_secret}\nLOCAL_BOOTSTRAP_SECRET={local_bootstrap_secret}\nOPENAI_API_KEY={openai}\nANTHROPIC_API_KEY={anthropic}\nLEPTOS_OUTPUT_NAME={leptos_output_name}\nLEPTOS_SITE_PKG_DIR=pkg\n{leptos_site_root_line}ALLOW_MULTI_ENVIRONMENT=false\nALLOW_VOICE_PROMOTION=false\nALLOW_PROMOTION_GATES=false\nALLOW_MANAGED_BACKUPS=false\nALLOW_COMPLIANCE_EXPORTS=false\nALLOW_OPERATOR_OBSERVABILITY=false\nALLOW_BYOK_LLM_INFERENCE=true\nALLOW_LLM_CHUNKING_SETS=true\n",
+        "ENSCRIVE_ENVIRONMENT=development\nDEPLOYMENT_MODE=local\nDATABASE_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_developer\nDEVELOPER_PORT={developer_port}\nKEYCLOAK_ISSUER=http://127.0.0.1:{keycloak_port}/realms/{realm}\nKEYCLOAK_CLIENT_ID={client_id}\nKEYCLOAK_CLIENT_SECRET={client_secret}\nPORTAL_OIDC_REDIRECT_URI=http://127.0.0.1:{developer_port}/auth/callback\nHMAC_PEPPER={hmac_pepper}\nAES_KEY={aes_key}\nOBSERVE_GRPC_ADDR=http://127.0.0.1:{observe_grpc_port}\nLAB_SERVICE_SECRET={lab_secret}\nOBSERVE_TO_DEVELOPER_METERING_HMAC={observe_to_developer_metering_hmac}\nLOCAL_BOOTSTRAP_SECRET={local_bootstrap_secret}\nOPENAI_API_KEY={openai}\nANTHROPIC_API_KEY={anthropic}\nESM_BINARY={esm_binary}\nLEPTOS_OUTPUT_NAME={leptos_output_name}\nLEPTOS_SITE_PKG_DIR=pkg\n{leptos_site_root_line}ALLOW_MULTI_ENVIRONMENT=false\nALLOW_VOICE_PROMOTION=false\nALLOW_PROMOTION_GATES=false\nALLOW_MANAGED_BACKUPS=false\nALLOW_COMPLIANCE_EXPORTS=false\nALLOW_OPERATOR_OBSERVABILITY=false\nALLOW_BYOK_LLM_INFERENCE=true\nALLOW_LLM_CHUNKING_SETS=true\n",
         postgres_password = postgres_password,
         postgres_port = local.ports.postgres,
         developer_port = local.ports.developer,
@@ -1437,6 +1471,7 @@ fn render_developer_env(
         aes_key = aes_key,
         observe_grpc_port = local.ports.observe_grpc,
         lab_secret = lab_secret,
+        observe_to_developer_metering_hmac = observe_to_developer_metering_hmac,
         local_bootstrap_secret = local.bootstrap.secret,
         openai = local
             .providers
@@ -1447,6 +1482,7 @@ fn render_developer_env(
             .llm_inference_anthropic_api_key()
             .clone()
             .unwrap_or_default(),
+        esm_binary = local.binaries.esm,
         leptos_output_name = leptos_output_name,
         leptos_site_root_line = leptos_site_root_line,
     )
@@ -1515,27 +1551,61 @@ fn infer_leptos_output_name(site_root: &Path) -> Option<String> {
     js_candidates.into_iter().next()
 }
 
-fn render_observe_env(local: &LocalProfile, postgres_password: &str, lab_secret: &str) -> String {
+// ENS-3054 (D10, D5, D6): observe defaults DEVELOPER_BASE_URL to
+// http://127.0.0.1:13000, but the local developer port is
+// operator-selectable (--developer-port, default 3000) and was never set
+// here — every /v1/search 500s because observe's metering write to
+// developer fails ("developer unreachable: ... 13000 ..."). Set it from
+// local.ports.developer, the same value render_developer_env binds to.
+// observe also requires OBSERVE_TO_DEVELOPER_METERING_HMAC at startup; it
+// is a shared secret and must be byte-identical to the copy in
+// developer.env (see render_developer_env / init_self_managed). ESM_BINARY
+// mirrors the D6 fix in render_embed_env.
+fn render_observe_env(
+    local: &LocalProfile,
+    postgres_password: &str,
+    lab_secret: &str,
+    observe_to_developer_metering_hmac: &str,
+) -> String {
     format!(
-        "LISTEN_ADDR=127.0.0.1:{observe_rest_port}\nLOKI_URL=http://127.0.0.1:{loki_port}\nEMBED_URL=http://127.0.0.1:{embed_grpc_port}\nDATABASE_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_observe\nLAB_SERVICE_SECRET={lab_secret}\nRUST_LOG=info\n",
+        "LISTEN_ADDR=127.0.0.1:{observe_rest_port}\nLOKI_URL=http://127.0.0.1:{loki_port}\nEMBED_URL=http://127.0.0.1:{embed_grpc_port}\nDATABASE_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_observe\nDEVELOPER_BASE_URL=http://127.0.0.1:{developer_port}\nLAB_SERVICE_SECRET={lab_secret}\nOBSERVE_TO_DEVELOPER_METERING_HMAC={hmac}\nESM_BINARY={esm_binary}\nRUST_LOG=info\n",
         observe_rest_port = local.ports.observe_rest,
         loki_port = local.ports.loki,
         embed_grpc_port = local.ports.embed_grpc,
         postgres_password = postgres_password,
         postgres_port = local.ports.postgres,
+        developer_port = local.ports.developer,
         lab_secret = lab_secret,
+        hmac = observe_to_developer_metering_hmac,
+        esm_binary = local.binaries.esm,
     )
 }
 
-fn render_embed_env(local: &LocalProfile, qdrant_api_key: &str, lab_secret: &str) -> String {
+// ENS-3054 (D2, D6): embed needs the *developer*-owned Postgres database to
+// boot ("connecting governor PgPool to developer DB" / "PgDocumentStore
+// (reading developer-owned chunks table)" in its own logs) — CATALOG_DB_URL
+// was never emitted here, so a clean install fails at
+// "SMC-001 Phase 01: voice store requires CATALOG_DB_URL". Mirrors how
+// render_developer_env builds its own DATABASE_URL against the same
+// database. ESM_BINARY is set explicitly (D6) so embed never falls back to
+// the relative `./esm` default, which fails every secret lookup silently
+// and only surfaces as a terse `unhealthy: esm` string.
+fn render_embed_env(
+    local: &LocalProfile,
+    postgres_password: &str,
+    qdrant_api_key: &str,
+    lab_secret: &str,
+) -> String {
     format!(
-        "QDRANT_URL=http://127.0.0.1:{qdrant_http}\nQDRANT_GRPC_URL=http://127.0.0.1:{qdrant_grpc}\nQDRANT_GRPC=127.0.0.1:{qdrant_grpc}\nQDRANT_API_KEY={qdrant_api_key}\nCOLLECTION_NAME=embeddings\nSERVER_ADDR=127.0.0.1:{embed_grpc_port}\nREST_ADDR=127.0.0.1:{embed_rest_port}\nMETRICS_PORT={embed_metrics_port}\nOPENAI_API_KEY={openai}\nNEBIUS_API_KEY={nebius}\nVOYAGE_API_KEY={voyage}\nANTHROPIC_API_KEY={anthropic}\nLAB_SERVICE_SECRET={lab_secret}\nBACKUP_SCHEDULER_ENABLED=false\n",
+        "QDRANT_URL=http://127.0.0.1:{qdrant_http}\nQDRANT_GRPC_URL=http://127.0.0.1:{qdrant_grpc}\nQDRANT_GRPC=127.0.0.1:{qdrant_grpc}\nQDRANT_API_KEY={qdrant_api_key}\nCOLLECTION_NAME=embeddings\nSERVER_ADDR=127.0.0.1:{embed_grpc_port}\nREST_ADDR=127.0.0.1:{embed_rest_port}\nMETRICS_PORT={embed_metrics_port}\nCATALOG_DB_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_developer\nOPENAI_API_KEY={openai}\nNEBIUS_API_KEY={nebius}\nVOYAGE_API_KEY={voyage}\nANTHROPIC_API_KEY={anthropic}\nLAB_SERVICE_SECRET={lab_secret}\nESM_BINARY={esm_binary}\nBACKUP_SCHEDULER_ENABLED=false\n",
         qdrant_http = local.ports.qdrant_http,
         qdrant_grpc = local.ports.qdrant_grpc,
         qdrant_api_key = qdrant_api_key,
         embed_grpc_port = local.ports.embed_grpc,
         embed_rest_port = local.ports.embed_rest,
         embed_metrics_port = local.ports.embed_metrics,
+        postgres_password = postgres_password,
+        postgres_port = local.ports.postgres,
         openai = local
             .providers
             .embedding_openai_api_key()
@@ -1550,6 +1620,7 @@ fn render_embed_env(local: &LocalProfile, qdrant_api_key: &str, lab_secret: &str
             .unwrap_or_default(),
         anthropic = String::new(),
         lab_secret = lab_secret,
+        esm_binary = local.binaries.esm,
     )
 }
 
@@ -1873,12 +1944,24 @@ fn esm_master_key_path(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join(".esm-master-key")
 }
 
-fn esm_service_workdir(runtime_dir: &Path, service: &str) -> PathBuf {
+// ENS-3054 (D4): renamed from esm_service_workdir/esm_service_vault. The old
+// names read as near-synonyms and it cost a clean-room onboard the whole
+// session: `ESM_VAULT_PATH` is applied by consumers as a `chdir` target (a
+// *directory*), so passing the vault *file* path breaks `esm` outright with
+// an opaque "Not a directory" error. `esm_vault_dir` / `esm_vault_file` name
+// what each value actually is so the two are harder to swap by mistake.
+fn esm_vault_dir(runtime_dir: &Path, service: &str) -> PathBuf {
     runtime_dir.join("secrets").join(service)
 }
 
-fn esm_service_vault(runtime_dir: &Path, service: &str) -> PathBuf {
-    esm_service_workdir(runtime_dir, service)
+// No production call site today (ensure_esm_vault below computes the same
+// path inline against its own `workdir` parameter) — kept as the documented
+// counterpart to esm_vault_dir so the D4 directory-vs-file distinction has a
+// single named home, exercised directly by the D4 contract tests, and ready
+// for D7 (surfacing the vault file location in `enscrive status`).
+#[allow(dead_code)]
+fn esm_vault_file(runtime_dir: &Path, service: &str) -> PathBuf {
+    esm_vault_dir(runtime_dir, service)
         .join(".esm")
         .join("secrets.esm")
 }
@@ -2008,7 +2091,7 @@ async fn synthesize_local_esm_vaults(
     ];
 
     for (service_name, env_filename) in services.iter() {
-        let workdir = esm_service_workdir(runtime_dir, service_name);
+        let workdir = esm_vault_dir(runtime_dir, service_name);
         ensure_esm_vault(esm_binary, &workdir, &master_key_path).await?;
         let env_path = config_dir.join(env_filename);
         let envs = parse_env_file(&env_path)?;
@@ -3189,6 +3272,72 @@ mod tests {
         }
     }
 
+    // ENS-3054: shared LocalProfile fixture for render_*_env contract tests
+    // below. `esm` is deliberately an absolute path (`/tmp/esm`) — the whole
+    // point of D6 is that render_*_env must propagate whatever absolute path
+    // the cli resolved, never default/drop to a relative `./esm`.
+    fn sample_local_profile() -> LocalProfile {
+        LocalProfile {
+            deployment_mode: "local".to_string(),
+            runtime_dir: "/tmp/runtime".to_string(),
+            config_dir: "/tmp/config".to_string(),
+            compose_file: "/tmp/docker-compose.yml".to_string(),
+            infra_env_file: "/tmp/infra.env".to_string(),
+            developer_env_file: "/tmp/developer.env".to_string(),
+            observe_env_file: "/tmp/observe.env".to_string(),
+            embed_env_file: "/tmp/embed.env".to_string(),
+            docs_env_file: "/tmp/docs.env".to_string(),
+            log_dir: "/tmp/logs".to_string(),
+            docker_project: "enscrive-local-local".to_string(),
+            binaries: LocalBinaries {
+                developer: "/tmp/enscrive-developer".to_string(),
+                observe: "/tmp/enscrive-observe".to_string(),
+                embed: "/tmp/enscrive-embed".to_string(),
+                esm: "/tmp/esm".to_string(),
+                docs: "/tmp/enscrive-docs".to_string(),
+            },
+            ports: LocalPorts {
+                developer: 3000,
+                observe_rest: 8084,
+                observe_grpc: 9090,
+                embed_rest: 8081,
+                embed_grpc: 50052,
+                embed_metrics: 9000,
+                postgres: 55432,
+                qdrant_http: 6333,
+                qdrant_grpc: 6334,
+                keycloak: 8180,
+                loki: 3100,
+                grafana: None,
+                docs: 8088,
+            },
+            features: LocalFeatures {
+                with_grafana: false,
+            },
+            keycloak: LocalKeycloak {
+                realm: "enscrive".to_string(),
+                client_id: "enscrive-developer".to_string(),
+                client_secret: "secret".to_string(),
+                admin_username: "admin".to_string(),
+                admin_password: "admin-pass".to_string(),
+                developer_username: "developer".to_string(),
+                developer_password: "developer-pass".to_string(),
+            },
+            bootstrap: LocalBootstrap {
+                secret: "bootstrap-secret".to_string(),
+                developer_email: "developer@local.enscrive".to_string(),
+                developer_name: "Local Developer".to_string(),
+                tenant_name: "Local Developer".to_string(),
+                environment_name: "development".to_string(),
+                api_key_label: "local-cli".to_string(),
+                tenant_id: None,
+                environment_id: None,
+                api_key_id: None,
+            },
+            providers: LocalProviders::default(),
+        }
+    }
+
     #[test]
     fn save_and_load_profiles_round_trip() {
         let _guard = crate::test_support::lock_env();
@@ -3354,6 +3503,89 @@ mod tests {
         assert_eq!(local.bootstrap.api_key_label, "local-cli");
     }
 
+    // ENS-3054 (Wave 0): end-to-end contract test over the real
+    // `init_self_managed` flow — not just the render_*_env unit tests above.
+    // Asserts every env-file fix from Wave 1 (D2/D5/D6/D10) is actually
+    // wired together on disk, the way `enscrive start` will read it.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn init_self_managed_wires_cross_service_onboard_contract() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+
+        let result = init_self_managed(SelfManagedInitOptions {
+            profile_name: Some("local".to_string()),
+            with_grafana: false,
+            developer_port: Some(4321),
+            developer_bin: Some("/tmp/enscrive-developer".to_string()),
+            observe_bin: Some("/tmp/enscrive-observe".to_string()),
+            embed_bin: Some("/tmp/enscrive-embed".to_string()),
+            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
+            openai_api_key: Some("sk-test".to_string()),
+            anthropic_api_key: None,
+            voyage_api_key: None,
+            nebius_api_key: None,
+            set_default: true,
+            manifest_url: None,
+            force_refetch: false,
+        })
+        .await
+        .unwrap();
+
+        let config_dir = Path::new(result["config_dir"].as_str().unwrap());
+        let developer_env = std::fs::read_to_string(config_dir.join("developer.env")).unwrap();
+        let observe_env = std::fs::read_to_string(config_dir.join("observe.env")).unwrap();
+        let embed_env = std::fs::read_to_string(config_dir.join("embed.env")).unwrap();
+
+        // D2: embed can find the developer database.
+        assert!(
+            embed_env.contains("CATALOG_DB_URL=postgresql://"),
+            "embed.env must contain CATALOG_DB_URL:\n{embed_env}"
+        );
+        assert!(embed_env.contains("/enscrive_developer"));
+
+        // D10: observe points at the operator-selected developer port, not
+        // the :13000 built-in default.
+        assert!(
+            observe_env.contains("DEVELOPER_BASE_URL=http://127.0.0.1:4321"),
+            "observe.env must contain DEVELOPER_BASE_URL at the configured developer port:\n{observe_env}"
+        );
+
+        // D6: every service env carries an explicit, absolute ESM_BINARY.
+        for (name, env) in [
+            ("developer.env", &developer_env),
+            ("observe.env", &observe_env),
+            ("embed.env", &embed_env),
+        ] {
+            let value = env
+                .lines()
+                .find_map(|line| line.strip_prefix("ESM_BINARY="))
+                .unwrap_or_else(|| panic!("{name} must set ESM_BINARY"));
+            assert!(
+                Path::new(value).is_absolute(),
+                "{name} ESM_BINARY must be absolute, got '{value}'"
+            );
+        }
+
+        // D5: the shared metering HMAC is present and byte-identical in
+        // both vault-adjacent env files.
+        let developer_hmac = developer_env
+            .lines()
+            .find(|line| line.starts_with("OBSERVE_TO_DEVELOPER_METERING_HMAC="))
+            .expect("developer.env must set OBSERVE_TO_DEVELOPER_METERING_HMAC");
+        let observe_hmac = observe_env
+            .lines()
+            .find(|line| line.starts_with("OBSERVE_TO_DEVELOPER_METERING_HMAC="))
+            .expect("observe.env must set OBSERVE_TO_DEVELOPER_METERING_HMAC");
+        assert_eq!(
+            developer_hmac, observe_hmac,
+            "OBSERVE_TO_DEVELOPER_METERING_HMAC must be byte-identical across developer.env and observe.env"
+        );
+        assert!(!developer_hmac.trim_end_matches(|c| c != '=').is_empty());
+    }
+
     // See allow rationale above: serializes env-var mutation across tests.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
@@ -3395,6 +3627,17 @@ mod tests {
         let original_hmac_pepper = read_env_value(&developer_env, "HMAC_PEPPER").unwrap();
         let original_aes_key = read_env_value(&developer_env, "AES_KEY").unwrap();
         let original_lab_secret = read_env_value(&observe_env, "LAB_SERVICE_SECRET").unwrap();
+        // ENS-3054 (D5): the shared metering HMAC must survive re-init just
+        // like the other secrets above — regenerating it on every
+        // `enscrive init` would desync developer and observe until the next
+        // full re-init of both.
+        let original_metering_hmac =
+            read_env_value(&developer_env, "OBSERVE_TO_DEVELOPER_METERING_HMAC").unwrap();
+        assert_eq!(
+            read_env_value(&observe_env, "OBSERVE_TO_DEVELOPER_METERING_HMAC").unwrap(),
+            original_metering_hmac,
+            "HMAC must already be byte-identical across developer.env and observe.env on first init"
+        );
         let original_client_secret = load_profiles()
             .unwrap()
             .profiles
@@ -3438,6 +3681,16 @@ mod tests {
         assert_eq!(
             read_env_value(&observe_env, "LAB_SERVICE_SECRET").unwrap(),
             original_lab_secret
+        );
+        assert_eq!(
+            read_env_value(&developer_env, "OBSERVE_TO_DEVELOPER_METERING_HMAC").unwrap(),
+            original_metering_hmac,
+            "OBSERVE_TO_DEVELOPER_METERING_HMAC must be preserved across re-init"
+        );
+        assert_eq!(
+            read_env_value(&observe_env, "OBSERVE_TO_DEVELOPER_METERING_HMAC").unwrap(),
+            original_metering_hmac,
+            "OBSERVE_TO_DEVELOPER_METERING_HMAC must remain byte-identical across both env files after re-init"
         );
 
         let profiles = load_profiles().unwrap();
@@ -3815,65 +4068,7 @@ mod tests {
 
     #[test]
     fn render_developer_env_writes_leptos_site_configuration() {
-        let local = LocalProfile {
-            deployment_mode: "local".to_string(),
-            runtime_dir: "/tmp/runtime".to_string(),
-            config_dir: "/tmp/config".to_string(),
-            compose_file: "/tmp/docker-compose.yml".to_string(),
-            infra_env_file: "/tmp/infra.env".to_string(),
-            developer_env_file: "/tmp/developer.env".to_string(),
-            observe_env_file: "/tmp/observe.env".to_string(),
-            embed_env_file: "/tmp/embed.env".to_string(),
-            docs_env_file: "/tmp/docs.env".to_string(),
-            log_dir: "/tmp/logs".to_string(),
-            docker_project: "enscrive-local-local".to_string(),
-            binaries: LocalBinaries {
-                developer: "/tmp/enscrive-developer".to_string(),
-                observe: "/tmp/enscrive-observe".to_string(),
-                embed: "/tmp/enscrive-embed".to_string(),
-                esm: "/tmp/esm".to_string(),
-                docs: "/tmp/enscrive-docs".to_string(),
-            },
-            ports: LocalPorts {
-                developer: 3000,
-                observe_rest: 8084,
-                observe_grpc: 9090,
-                embed_rest: 8081,
-                embed_grpc: 50052,
-                embed_metrics: 9000,
-                postgres: 55432,
-                qdrant_http: 6333,
-                qdrant_grpc: 6334,
-                keycloak: 8180,
-                loki: 3100,
-                grafana: None,
-                docs: 8088,
-            },
-            features: LocalFeatures {
-                with_grafana: false,
-            },
-            keycloak: LocalKeycloak {
-                realm: "enscrive".to_string(),
-                client_id: "enscrive-developer".to_string(),
-                client_secret: "secret".to_string(),
-                admin_username: "admin".to_string(),
-                admin_password: "admin-pass".to_string(),
-                developer_username: "developer".to_string(),
-                developer_password: "developer-pass".to_string(),
-            },
-            bootstrap: LocalBootstrap {
-                secret: "bootstrap-secret".to_string(),
-                developer_email: "developer@local.enscrive".to_string(),
-                developer_name: "Local Developer".to_string(),
-                tenant_name: "Local Developer".to_string(),
-                environment_name: "development".to_string(),
-                api_key_label: "local-cli".to_string(),
-                tenant_id: None,
-                environment_id: None,
-                api_key_id: None,
-            },
-            providers: LocalProviders::default(),
-        };
+        let local = sample_local_profile();
 
         let rendered = render_developer_env(
             &local,
@@ -3881,6 +4076,7 @@ mod tests {
             "lab-secret",
             "pepper",
             &generate_hex_secret(32),
+            "shared-hmac",
             Some(Path::new("/tmp/site")),
             "enscrive-developer",
         );
@@ -3888,6 +4084,223 @@ mod tests {
         assert!(rendered.contains("LEPTOS_OUTPUT_NAME=enscrive-developer"));
         assert!(rendered.contains("LEPTOS_SITE_ROOT=/tmp/site"));
         assert!(rendered.contains("LEPTOS_SITE_PKG_DIR=pkg"));
+    }
+
+    // --------------------------------------------------------------------
+    // ENS-3054 Wave 0: contract tests for render_*_env. These encode what
+    // each downstream service actually requires to boot, per the
+    // clean-seat-onboard debrief (SOLO-DEV-ONBOARD-REMEDIATION-2026-07-31).
+    // A test here failing means a real clean install will fail the same
+    // way — these are what should have existed before D2/D5/D6/D10 shipped.
+    // --------------------------------------------------------------------
+
+    #[test]
+    fn render_embed_env_contains_catalog_db_url_for_developer_database() {
+        // D2: embed boots against the *developer*-owned Postgres database
+        // (its own logs: "connecting governor PgPool to developer DB").
+        // Without CATALOG_DB_URL, embed fails at
+        // "SMC-001 Phase 01: voice store requires CATALOG_DB_URL".
+        let local = sample_local_profile();
+        let rendered = render_embed_env(&local, "postgres-pass", "qdrant-key", "lab-secret");
+
+        assert!(
+            rendered.contains(&format!(
+                "CATALOG_DB_URL=postgresql://enscrive:postgres-pass@127.0.0.1:{}/enscrive_developer",
+                local.ports.postgres
+            )),
+            "embed env must contain CATALOG_DB_URL pointed at the developer database; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn render_embed_env_contains_absolute_esm_binary() {
+        // D6: services default ESM_BINARY to a relative `./esm` when unset,
+        // which fails every secret lookup silently (the service keeps
+        // running and only reports `unhealthy: esm` through a *different*
+        // service's health payload). The cli knows the resolved, absolute
+        // esm path — it must be set explicitly so the relative default is
+        // never reached.
+        let local = sample_local_profile();
+        let rendered = render_embed_env(&local, "postgres-pass", "qdrant-key", "lab-secret");
+
+        let esm_binary_line = rendered
+            .lines()
+            .find(|line| line.starts_with("ESM_BINARY="))
+            .expect("embed env must set ESM_BINARY");
+        let value = esm_binary_line.strip_prefix("ESM_BINARY=").unwrap();
+        assert!(
+            Path::new(value).is_absolute(),
+            "ESM_BINARY must be an absolute path, got '{value}'"
+        );
+        assert_eq!(value, local.binaries.esm);
+    }
+
+    #[test]
+    fn render_observe_env_contains_developer_base_url_from_configured_port() {
+        // D10: observe defaults DEVELOPER_BASE_URL to :13000; the local
+        // developer port is operator-selectable (--developer-port, default
+        // 3000). Every /v1/search performs a metering write to developer —
+        // when the URL is wrong, the write fails and the read 500s. Assert
+        // against a non-default developer port so this test cannot pass by
+        // coincidentally matching :13000 or the struct-literal default.
+        let mut local = sample_local_profile();
+        local.ports.developer = 4321;
+        let rendered = render_observe_env(&local, "postgres-pass", "lab-secret", "shared-hmac");
+
+        assert!(
+            rendered.contains("DEVELOPER_BASE_URL=http://127.0.0.1:4321"),
+            "observe env must set DEVELOPER_BASE_URL from local.ports.developer; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(":13000"),
+            "observe env must not fall back to the :13000 default"
+        );
+    }
+
+    #[test]
+    fn render_observe_env_contains_absolute_esm_binary() {
+        let local = sample_local_profile();
+        let rendered = render_observe_env(&local, "postgres-pass", "lab-secret", "shared-hmac");
+
+        let esm_binary_line = rendered
+            .lines()
+            .find(|line| line.starts_with("ESM_BINARY="))
+            .expect("observe env must set ESM_BINARY");
+        let value = esm_binary_line.strip_prefix("ESM_BINARY=").unwrap();
+        assert!(Path::new(value).is_absolute());
+        assert_eq!(value, local.binaries.esm);
+    }
+
+    #[test]
+    fn render_developer_env_contains_absolute_esm_binary() {
+        let local = sample_local_profile();
+        let rendered = render_developer_env(
+            &local,
+            "postgres-pass",
+            "lab-secret",
+            "pepper",
+            &generate_hex_secret(32),
+            "shared-hmac",
+            None,
+            "enscrive-developer",
+        );
+
+        let esm_binary_line = rendered
+            .lines()
+            .find(|line| line.starts_with("ESM_BINARY="))
+            .expect("developer env must set ESM_BINARY");
+        let value = esm_binary_line.strip_prefix("ESM_BINARY=").unwrap();
+        assert!(Path::new(value).is_absolute());
+        assert_eq!(value, local.binaries.esm);
+    }
+
+    #[test]
+    fn observe_and_developer_env_share_byte_identical_metering_hmac() {
+        // D5: OBSERVE_TO_DEVELOPER_METERING_HMAC is a shared secret — observe
+        // signs with it, developer verifies with it. If the two vaults ever
+        // diverge (even by whitespace), every metering write developer
+        // receives from observe fails signature verification. Assert the
+        // rendered lines are byte-identical, not just "both present".
+        let local = sample_local_profile();
+        let hmac = generate_hex_secret(32);
+
+        let observe_rendered =
+            render_observe_env(&local, "postgres-pass", "lab-secret", &hmac);
+        let developer_rendered = render_developer_env(
+            &local,
+            "postgres-pass",
+            "lab-secret",
+            "pepper",
+            &generate_hex_secret(32),
+            &hmac,
+            None,
+            "enscrive-developer",
+        );
+
+        let observe_line = observe_rendered
+            .lines()
+            .find(|line| line.starts_with("OBSERVE_TO_DEVELOPER_METERING_HMAC="))
+            .expect("observe env must set OBSERVE_TO_DEVELOPER_METERING_HMAC");
+        let developer_line = developer_rendered
+            .lines()
+            .find(|line| line.starts_with("OBSERVE_TO_DEVELOPER_METERING_HMAC="))
+            .expect("developer env must set OBSERVE_TO_DEVELOPER_METERING_HMAC");
+
+        assert_eq!(
+            observe_line, developer_line,
+            "OBSERVE_TO_DEVELOPER_METERING_HMAC must be byte-identical across observe and developer envs"
+        );
+        assert_eq!(
+            observe_line,
+            format!("OBSERVE_TO_DEVELOPER_METERING_HMAC={hmac}")
+        );
+    }
+
+    #[test]
+    fn esm_vault_path_resolves_to_a_directory_distinct_from_the_vault_file() {
+        // D4: ESM_VAULT_PATH is applied by consumers as `cmd.current_dir(..)`
+        // — it must name a directory. esm_vault_file lives *inside*
+        // esm_vault_dir, never equal to it, and the value wired into
+        // ESM_VAULT_PATH (see the `enscrive start` call sites) must come
+        // from esm_vault_dir, not esm_vault_file.
+        let runtime_dir = Path::new("/tmp/runtime");
+        let dir = esm_vault_dir(runtime_dir, "enscrive-observe");
+        let file = esm_vault_file(runtime_dir, "enscrive-observe");
+
+        assert_ne!(
+            dir, file,
+            "esm_vault_dir and esm_vault_file must never resolve to the same path"
+        );
+        assert_eq!(file, dir.join(".esm").join("secrets.esm"));
+        assert_eq!(
+            file.extension(),
+            Some(std::ffi::OsStr::new("esm")),
+            "vault file should carry the .esm extension"
+        );
+        assert_eq!(
+            dir.extension(),
+            None,
+            "vault dir must not look like a file (no extension)"
+        );
+    }
+
+    // Verifies the directory ensure_esm_vault hands to `esm init` (i.e. what
+    // ESM_VAULT_PATH is ultimately set to) exists as a real directory after
+    // synthesis — using a stub `esm` script so the test has no dependency on
+    // the real esm binary. This is the literal "ESM_VAULT_PATH resolves to
+    // an existing directory" contract from the D4 fix.
+    #[tokio::test]
+    async fn ensure_esm_vault_creates_workdir_as_a_real_directory() {
+        let temp = TempDir::new().unwrap();
+        let stub_esm = temp.path().join("esm");
+        std::fs::write(
+            &stub_esm,
+            "#!/bin/sh\nmkdir -p .esm\ntouch .esm/secrets.esm\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&stub_esm).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&stub_esm, perms).unwrap();
+        }
+
+        let runtime_dir = temp.path().join("runtime");
+        let master_key_path = runtime_dir.join(".esm-master-key");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::write(&master_key_path, "test-key\n").unwrap();
+
+        let workdir = esm_vault_dir(&runtime_dir, "enscrive-observe");
+        ensure_esm_vault(&stub_esm.display().to_string(), &workdir, &master_key_path)
+            .await
+            .unwrap();
+
+        assert!(
+            workdir.is_dir(),
+            "ESM_VAULT_PATH target must exist as a directory after synthesis"
+        );
+        assert!(esm_vault_file(&runtime_dir, "enscrive-observe").is_file());
     }
 
     #[test]
