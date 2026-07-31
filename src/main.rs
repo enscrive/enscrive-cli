@@ -2661,6 +2661,14 @@ fn print_local_login_block(data: &Value) {
 fn local_runtime_failure(command: &str, error: String) -> CliResponse {
     let lower = error.to_lowercase();
     if lower.contains("self-managed local mode requires docker")
+        // ENS-3054 D1: no container runtime found at all, no working
+        // compose implementation, or the rootless podman socket isn't
+        // ready — all environment/config faults, not cli bugs.
+        || lower.contains("self-managed local mode requires a container runtime")
+        || lower.contains("no working compose implementation found")
+        || lower.contains("rootless podman socket")
+        || lower.contains("podman.socket")
+        || lower.contains("xdg_runtime_dir is not set")
         || lower.contains("docker compose unavailable")
         || lower.contains("cannot connect to the docker daemon")
         || lower.contains("permission denied while trying to connect to the docker daemon")
