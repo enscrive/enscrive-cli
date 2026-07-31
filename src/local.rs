@@ -1590,14 +1590,35 @@ fn render_observe_env(
 // database. ESM_BINARY is set explicitly (D6) so embed never falls back to
 // the relative `./esm` default, which fails every secret lookup silently
 // and only surfaces as a terse `unhealthy: esm` string.
+//
+// ENS-3054 (D3): embed's metering outbox (embed-svc/src/main.rs) defaults
+// METERING_OUTBOX_PATH to "{BATCH_WORK_DIR}/metering-outbox.db", and
+// BATCH_WORK_DIR itself defaults to the system path
+// `/var/lib/enscrive/batches` (embed-svc/src/embedding/batch_state.rs
+// BATCH_WORK_DIR_DEFAULT). Self-managed mode spawns embed as the invoking
+// unprivileged user (see spawn_service_with_extra_env call sites below) —
+// that path is root-owned and uncreatable, so embed dies at startup with
+// "failed to create outbox parent dir /var/lib/enscrive/batches: Permission
+// denied". BATCH_WORK_DIR is also what embed's batch-job-state persistence
+// reads directly (embed-svc/src/api/grpc.rs, "Failed to persist batch state
+// to disk (non-fatal)"), independent of METERING_OUTBOX_PATH — so setting
+// only METERING_OUTBOX_PATH leaves that (non-fatal) write still targeting
+// /var/lib/enscrive. Set both, rooted under the profile runtime dir (same
+// root prepare_local_data_dirs uses for postgres/qdrant/loki), so embed
+// never touches a system path. METERING_OUTBOX_PATH must be the outbox
+// *file* itself (embed opens it as a SQLite file and derives the parent
+// dir to create from it) — not a bare directory; do not repeat the D4
+// dir/file trap in the other direction.
 fn render_embed_env(
     local: &LocalProfile,
     postgres_password: &str,
     qdrant_api_key: &str,
     lab_secret: &str,
 ) -> String {
+    let batch_work_dir = Path::new(&local.runtime_dir).join("data").join("batches");
+    let metering_outbox_path = batch_work_dir.join("metering-outbox.db");
     format!(
-        "QDRANT_URL=http://127.0.0.1:{qdrant_http}\nQDRANT_GRPC_URL=http://127.0.0.1:{qdrant_grpc}\nQDRANT_GRPC=127.0.0.1:{qdrant_grpc}\nQDRANT_API_KEY={qdrant_api_key}\nCOLLECTION_NAME=embeddings\nSERVER_ADDR=127.0.0.1:{embed_grpc_port}\nREST_ADDR=127.0.0.1:{embed_rest_port}\nMETRICS_PORT={embed_metrics_port}\nCATALOG_DB_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_developer\nOPENAI_API_KEY={openai}\nNEBIUS_API_KEY={nebius}\nVOYAGE_API_KEY={voyage}\nANTHROPIC_API_KEY={anthropic}\nLAB_SERVICE_SECRET={lab_secret}\nESM_BINARY={esm_binary}\nBACKUP_SCHEDULER_ENABLED=false\n",
+        "QDRANT_URL=http://127.0.0.1:{qdrant_http}\nQDRANT_GRPC_URL=http://127.0.0.1:{qdrant_grpc}\nQDRANT_GRPC=127.0.0.1:{qdrant_grpc}\nQDRANT_API_KEY={qdrant_api_key}\nCOLLECTION_NAME=embeddings\nSERVER_ADDR=127.0.0.1:{embed_grpc_port}\nREST_ADDR=127.0.0.1:{embed_rest_port}\nMETRICS_PORT={embed_metrics_port}\nCATALOG_DB_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_developer\nOPENAI_API_KEY={openai}\nNEBIUS_API_KEY={nebius}\nVOYAGE_API_KEY={voyage}\nANTHROPIC_API_KEY={anthropic}\nLAB_SERVICE_SECRET={lab_secret}\nESM_BINARY={esm_binary}\nBATCH_WORK_DIR={batch_work_dir}\nMETERING_OUTBOX_PATH={metering_outbox_path}\nBACKUP_SCHEDULER_ENABLED=false\n",
         qdrant_http = local.ports.qdrant_http,
         qdrant_grpc = local.ports.qdrant_grpc,
         qdrant_api_key = qdrant_api_key,
@@ -1621,6 +1642,8 @@ fn render_embed_env(
         anthropic = String::new(),
         lab_secret = lab_secret,
         esm_binary = local.binaries.esm,
+        batch_work_dir = batch_work_dir.display(),
+        metering_outbox_path = metering_outbox_path.display(),
     )
 }
 
@@ -2896,6 +2919,14 @@ fn prepare_local_data_dirs(data_dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("create postgres data dir '{}': {e}", data_dir.display()))?;
     fs::create_dir_all(data_dir.join("qdrant"))
         .map_err(|e| format!("create qdrant data dir '{}': {e}", data_dir.display()))?;
+    // ENS-3054 (D3): pre-create the writable BATCH_WORK_DIR / metering
+    // outbox parent that render_embed_env now points embed at, so it never
+    // falls back to (and fails to create) the root-owned
+    // /var/lib/enscrive/batches default. embed also creates this lazily on
+    // first write, but pre-creating it here matches the postgres/qdrant/
+    // loki pattern and guarantees it exists before embed's first boot.
+    fs::create_dir_all(data_dir.join("batches"))
+        .map_err(|e| format!("create batches data dir '{}': {e}", data_dir.display()))?;
     let loki_dir = data_dir.join("loki");
     fs::create_dir_all(&loki_dir)
         .map_err(|e| format!("create loki data dir '{}': {e}", loki_dir.display()))?;
@@ -4109,6 +4140,65 @@ mod tests {
                 local.ports.postgres
             )),
             "embed env must contain CATALOG_DB_URL pointed at the developer database; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn render_embed_env_contains_metering_outbox_path_under_runtime_dir() {
+        // D3: embed's metering outbox defaults METERING_OUTBOX_PATH to
+        // "{BATCH_WORK_DIR}/metering-outbox.db", and BATCH_WORK_DIR itself
+        // defaults to the root-owned system path
+        // "/var/lib/enscrive/batches" — uncreatable by the unprivileged
+        // user self-managed mode spawns embed as. Without an explicit
+        // override, a clean install fails at "failed to create outbox
+        // parent dir /var/lib/enscrive/batches: Permission denied (os
+        // error 13)". Both BATCH_WORK_DIR and METERING_OUTBOX_PATH must be
+        // set explicitly, rooted under the profile runtime dir, and must
+        // never point at /var/lib.
+        let local = sample_local_profile();
+        let rendered = render_embed_env(&local, "postgres-pass", "qdrant-key", "lab-secret");
+
+        let outbox_line = rendered
+            .lines()
+            .find(|line| line.starts_with("METERING_OUTBOX_PATH="))
+            .expect("embed env must set METERING_OUTBOX_PATH");
+        let outbox_value = outbox_line.strip_prefix("METERING_OUTBOX_PATH=").unwrap();
+        assert!(
+            outbox_value.starts_with(&local.runtime_dir),
+            "METERING_OUTBOX_PATH must live under the profile runtime dir '{}'; got '{outbox_value}'",
+            local.runtime_dir
+        );
+        assert!(
+            !outbox_value.starts_with("/var/lib"),
+            "METERING_OUTBOX_PATH must not point at the root-owned system default; got '{outbox_value}'"
+        );
+        // Must be the outbox *file* (embed opens it as a SQLite file and
+        // derives its parent dir to create) — a bare directory here would
+        // repeat the D4 dir/file trap in the other direction.
+        assert!(
+            outbox_value.ends_with(".db"),
+            "METERING_OUTBOX_PATH must be a file path (embed opens it directly as SQLite), not a bare directory; got '{outbox_value}'"
+        );
+
+        let batch_work_dir_line = rendered
+            .lines()
+            .find(|line| line.starts_with("BATCH_WORK_DIR="))
+            .expect("embed env must set BATCH_WORK_DIR");
+        let batch_work_dir_value = batch_work_dir_line.strip_prefix("BATCH_WORK_DIR=").unwrap();
+        assert!(
+            batch_work_dir_value.starts_with(&local.runtime_dir),
+            "BATCH_WORK_DIR must live under the profile runtime dir '{}'; got '{batch_work_dir_value}'",
+            local.runtime_dir
+        );
+        assert!(
+            !batch_work_dir_value.starts_with("/var/lib"),
+            "BATCH_WORK_DIR must not point at the root-owned system default; got '{batch_work_dir_value}'"
+        );
+        // METERING_OUTBOX_PATH must live under BATCH_WORK_DIR so both
+        // settings agree on a single writable root.
+        assert!(
+            outbox_value.starts_with(batch_work_dir_value),
+            "METERING_OUTBOX_PATH ('{outbox_value}') must be rooted under BATCH_WORK_DIR ('{batch_work_dir_value}')"
         );
     }
 
