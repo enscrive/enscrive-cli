@@ -1004,6 +1004,11 @@ enum CorpusSubcommand {
     /// Delete a specific pending staged change
     PendingDelete(CorpusPendingDeleteArgs),
 
+    /// Document-scoped operations — app-memory epic P3 (ADR
+    /// ENSCRIVE-CLI-APP-MEMORY-2026-07-31 §3/§6-P3).
+    #[command(subcommand)]
+    Document(CorpusDocumentSubcommand),
+
     /// Materialize a purpose-built corpus from a dataset's selected
     /// corpus subset (ENS-104). Closes the rapid-voice-iteration gap in
     /// the 5-step E2E evals vision: an 83-doc stratified sample re-embeds
@@ -1094,6 +1099,26 @@ struct CorpusPendingDeleteArgs {
     #[arg(long)]
     id: String,
 
+    #[arg(long = "document-id")]
+    document_id: String,
+}
+
+/// App-memory epic P3 (ADR ENSCRIVE-CLI-APP-MEMORY-2026-07-31 §3/§6-P3):
+/// `enscrive corpus document <verb>`.
+#[derive(Subcommand)]
+enum CorpusDocumentSubcommand {
+    /// Retire a single memory: delete one document (all its chunks, all
+    /// layers) from a corpus. Synchronous — no stage/commit round-trip.
+    Delete(CorpusDocumentDeleteArgs),
+}
+
+#[derive(Args)]
+struct CorpusDocumentDeleteArgs {
+    /// Corpus UUID the document belongs to.
+    #[arg(long = "corpus-id")]
+    corpus_id: String,
+
+    /// Document id to delete.
     #[arg(long = "document-id")]
     document_id: String,
 }
@@ -3975,6 +4000,9 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
             CorpusSubcommand::Pending(_) => "corpus pending",
             CorpusSubcommand::PendingDelete(_) => "corpus pending-delete",
             CorpusSubcommand::Promote { .. } => "corpus promote",
+            CorpusSubcommand::Document(doc_sub) => match doc_sub {
+                CorpusDocumentSubcommand::Delete(_) => "corpus document delete",
+            },
             // Local-only / skip-list commands:
             CorpusSubcommand::Get { .. }
             | CorpusSubcommand::Revert { .. }
@@ -5121,6 +5149,23 @@ async fn main() {
                         Err(e) => request_failure("corpus pending delete", e).emit(fmt),
                     }
                 }
+                // App-memory epic P3 (ADR ENSCRIVE-CLI-APP-MEMORY-2026-07-31
+                // §3/§6-P3): retire a single memory — synchronous
+                // per-document delete, no stage/commit round-trip.
+                CorpusSubcommand::Document(doc_sub) => match doc_sub {
+                    CorpusDocumentSubcommand::Delete(args) => {
+                        let path = format!(
+                            "/v1/corpora/{}/documents/{}",
+                            args.corpus_id, args.document_id
+                        );
+                        match client.delete_json(&path).await {
+                            Ok(data) => {
+                                CliResponse::success("corpus document delete", data).emit(fmt)
+                            }
+                            Err(e) => request_failure("corpus document delete", e).emit(fmt),
+                        }
+                    }
+                },
                 // ENS-104: materialize a purpose-built corpus from a dataset.
                 CorpusSubcommand::MaterializeFromDataset(args) => {
                     let mut body = serde_json::Map::new();
@@ -9307,6 +9352,39 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
                 assert_eq!(confirm_token, None);
             }
             _ => panic!("expected corpus delete"),
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // App-memory epic P3 (ADR ENSCRIVE-CLI-APP-MEMORY-2026-07-31 §3/§6-P3):
+    // `enscrive corpus document delete`
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn parse_corpus_document_delete_command() {
+        let args = Cli::parse_from([
+            "enscrive",
+            "corpus",
+            "document",
+            "delete",
+            "--corpus-id",
+            "col-1",
+            "--document-id",
+            "doc-1",
+        ]);
+        match args.command {
+            Commands::Corpus {
+                sub: CorpusSubcommand::Document(CorpusDocumentSubcommand::Delete(
+                    CorpusDocumentDeleteArgs {
+                        corpus_id,
+                        document_id,
+                    },
+                )),
+            } => {
+                assert_eq!(corpus_id, "col-1");
+                assert_eq!(document_id, "doc-1");
+            }
+            _ => panic!("expected corpus document delete"),
         }
     }
 

@@ -98,6 +98,15 @@ status = "implemented"
 deployment_tier = "any-mode"
 required_plan = "free"
 
+[[endpoint]]
+method = "DELETE"
+path = "/v1/corpora/{id}/documents/{doc_id}"
+cli_command = "corpus document delete"
+status = "implemented"
+note = "app-memory epic P3 (ADR ENSCRIVE-CLI-APP-MEMORY-2026-07-31 §3/§6-P3) — retire a memory"
+deployment_tier = "any-mode"
+required_plan = "free"
+
 # ── Corpus Staging ──────────────────────────────────────
 
 [[endpoint]]
