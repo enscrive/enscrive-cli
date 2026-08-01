@@ -478,10 +478,12 @@ struct SearchArgs {
 
     /// Minimum similarity score a result must reach. Leave unset for most
     /// retrieval — you get the top --limit matches ranked by score.
-    /// Relevant matches usually score near the MIDDLE of the range, not
-    /// near 1.0, so a guessed 0.8-0.9 filters out good results and looks
-    /// like "search is broken". Calibrate against your own corpus: search
-    /// unfiltered first, read the scores you get, then set this just below
+    /// Relevant matches land nowhere near 1.0: on a measured corpus, true
+    /// matches scored 0.57-0.70 and noise sat at <=0.39, so ~0.50 is a
+    /// reasonable starting threshold and a guessed 0.8-0.9 filters out
+    /// good results and looks like "search is broken". That band shifts
+    /// with model and chunk size — calibrate against your own corpus:
+    /// search unfiltered, read the scores you get, set this just below
     /// where relevance stops. See "Search score calibration" in the README.
     #[arg(long)]
     score_threshold: Option<f32>,

@@ -212,9 +212,11 @@ To rotate a key, re-run `enscrive init` for that profile (or `enscrive project i
 enscrive search --query "how are auth tokens minted" --score-threshold 0.9
 ```
 
-Scores are cosine similarity over embedding vectors, and **genuinely relevant matches usually land near the middle of the range, not near 1.0.** A threshold of `0.8`–`0.9` filters out results you would have considered correct. There is no universal cutoff: the useful range shifts with the embedding model, your chunk sizes, and how the query is phrased.
+Scores are cosine similarity over embedding vectors, and **genuinely relevant matches land nowhere near 1.0.** A threshold of `0.8`–`0.9` filters out results you would have considered correct.
 
-Calibrate against your own corpus instead of guessing:
+Measured on a real corpus (51 documents of engineering notes), six differently-worded queries for the same defect matched at **0.57–0.70**, while unrelated content sat at **≤0.39**. The separation is clean and wide, but the whole useful band lives below 0.75. **`~0.50` is a reasonable starting threshold** — comfortably under the true matches, comfortably over the noise.
+
+Treat that as a starting point, not a constant: the band shifts with the embedding model, your chunk sizes, and how queries are phrased. Calibrate against your own corpus:
 
 ```bash
 # 1. Search with NO threshold and read the scores you actually get back.
@@ -223,7 +225,7 @@ enscrive search --query "how are auth tokens minted" --limit 10 --output json \
 
 # 2. Find where genuinely relevant results stop and noise starts.
 # 3. Set the threshold just below that, then re-check as the corpus grows.
-enscrive search --query "how are auth tokens minted" --score-threshold 0.45
+enscrive search --query "how are auth tokens minted" --score-threshold 0.50
 ```
 
 Leaving `--score-threshold` unset returns the top `--limit` matches ranked by score, which is the right default for most retrieval — including agent memory, where a weak-but-relevant hit still beats no context at all. Reach for a threshold when you specifically need "return nothing rather than something marginal".

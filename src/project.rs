@@ -340,6 +340,27 @@ one corpus:
 enscrive search --query "why did we drop the fragment gate" --output json
 ```
 
+### Reading the scores
+
+Results carry a `score` — cosine similarity, **not** a percentage. Relevant
+matches land nowhere near 1.0. On a measured corpus, six differently-worded
+queries for the same fact matched at **0.57–0.70** while unrelated content
+sat at **≤0.39**. The separation is clean, but the whole useful band is
+below 0.75.
+
+So: **do not dismiss a 0.6 result as weak** — that is what a good hit looks
+like. Judge by the gap between the top results and the rest, not by absolute
+value.
+
+Prefer no threshold at all, which is the default: you get the top `--limit`
+matches ranked by score, and a weak-but-relevant memory still beats having
+no context. Reach for `--score-threshold` only when you specifically need
+"return nothing rather than something marginal", and start around `0.50`:
+
+```sh
+enscrive search --query "how are auth tokens minted" --score-threshold 0.50 --output json
+```
+
 ## Retire
 
 A memory that is no longer true is worse than no memory. Delete it by id —
