@@ -266,18 +266,24 @@ per-user key store. You never need to pass `--api-key`, `--profile`, or
 
 ## Remember
 
-Memories live in a **corpus**. Create one the first time (both flags are
-required; use the embedding model this stack is configured for):
+Memories live in a **corpus**. Run this at the start of a session — it is
+idempotent, so it returns the existing corpus if there is one and creates
+it otherwise. You never have to check first:
 
 ```sh
-enscrive corpus create \
+enscrive corpus ensure \
   --name "{name}-memory" \
   --embedding-model text-embedding-3-large \
   --description "Durable memory for {name}" \
   --output json
 ```
 
-That prints the corpus id. List them again any time:
+That prints the corpus id, plus `"created": true` on the run that made it.
+A corpus's embedding model is fixed at creation, so if a corpus with this
+name already exists on a *different* model the command fails rather than
+quietly handing you the wrong vector space.
+
+List them any time:
 
 ```sh
 enscrive corpus list --output json

@@ -986,6 +986,14 @@ enum CorpusSubcommand {
     /// Create a corpus
     Create(CreateCorpusArgs),
 
+    /// Idempotently get-or-create a corpus by name — safe to run every
+    /// session. Returns the existing corpus when one already has this
+    /// name, creates it otherwise, and refuses when a same-named corpus is
+    /// bound to a DIFFERENT embedding model (ingesting into an unexpected
+    /// vector space silently degrades every later search). This is the verb
+    /// an agent should reach for; `create` always attempts creation.
+    Ensure(EnsureCorpusArgs),
+
     /// Update a corpus
     Update(UpdateCorpusArgs),
 
@@ -1264,6 +1272,28 @@ struct CreateCorpusArgs {
     #[arg(long)]
     embedding_model: String,
 
+    #[arg(long)]
+    description: Option<String>,
+
+    #[arg(long)]
+    dimensions: Option<u32>,
+}
+
+#[derive(Args)]
+struct EnsureCorpusArgs {
+    /// Corpus name to get-or-create. Matched exactly.
+    #[arg(long)]
+    name: String,
+
+    /// Embedding model the corpus must be bound to. Required for the
+    /// create path, and checked against an existing corpus so a name
+    /// collision on a different model fails loudly instead of silently
+    /// returning the wrong vector space.
+    #[arg(long)]
+    embedding_model: String,
+
+    /// Description applied only when this call creates the corpus. An
+    /// existing corpus is returned untouched — `ensure` never mutates.
     #[arg(long)]
     description: Option<String>,
 
@@ -4001,6 +4031,74 @@ mod tier_annotation_tests {
 // ENS-61 CLI-TIER-006: map a parsed Commands value to its COMMAND_TIERS key.
 // Returns None for commands that are not in COMMAND_TIERS (local / operator).
 // ---------------------------------------------------------------------------
+/// What `corpus ensure` should do after reading the tenant's corpus list.
+#[derive(Debug, PartialEq)]
+enum EnsureOutcome {
+    /// A corpus with this name already exists on the requested model.
+    Existing(Value),
+    /// No corpus has this name — create it.
+    Create,
+}
+
+/// Extract the corpus array from a `GET /v1/corpora` body.
+///
+/// `list_corpora` returns a bare JSON array today. The envelope keys are
+/// accepted too so a future response wrapper does not turn this into a
+/// silent "no corpora exist" — which would make `ensure` create a
+/// duplicate every run.
+fn corpus_list_entries(body: &Value) -> Result<&Vec<Value>, String> {
+    body.as_array()
+        .or_else(|| body.get("corpora").and_then(Value::as_array))
+        .or_else(|| body.get("data").and_then(Value::as_array))
+        .or_else(|| body.get("items").and_then(Value::as_array))
+        .ok_or_else(|| {
+            "unexpected /v1/corpora response: expected a JSON array of corpora".to_string()
+        })
+}
+
+/// Decide `corpus ensure`'s action from the current corpus list.
+///
+/// Refuses rather than guesses in the two ambiguous cases, because both
+/// resolve into an agent writing memories somewhere it did not intend:
+///
+/// - **Same name, different embedding model.** Returning it would bind the
+///   caller's ingests to a vector space they did not ask for; retrieval
+///   quality degrades silently and the cause is invisible at the call site.
+/// - **Two corpora with the same name.** Corpus names carry no uniqueness
+///   constraint, so picking one arbitrarily would be a coin flip that
+///   differs between runs.
+fn decide_corpus_ensure(
+    body: &Value,
+    name: &str,
+    embedding_model: &str,
+) -> Result<EnsureOutcome, String> {
+    let matches: Vec<&Value> = corpus_list_entries(body)?
+        .iter()
+        .filter(|entry| entry.get("name").and_then(Value::as_str) == Some(name))
+        .collect();
+
+    match matches.as_slice() {
+        [] => Ok(EnsureOutcome::Create),
+        [existing] => {
+            let model = existing.get("model").and_then(Value::as_str).unwrap_or("");
+            if !model.is_empty() && model != embedding_model {
+                return Err(format!(
+                    "a corpus named '{name}' already exists but is bound to embedding model \
+                     '{model}', not '{embedding_model}'. A corpus's embedding model is fixed at \
+                     creation, so this one cannot serve '{embedding_model}'. Use a different \
+                     --name, or pass --embedding-model {model} to use the existing corpus."
+                ));
+            }
+            Ok(EnsureOutcome::Existing((*existing).clone()))
+        }
+        _ => Err(format!(
+            "{} corpora are named '{name}' — cannot tell which one you mean. Corpus names are not \
+             unique; pick one by id with `enscrive corpus list`, or use a distinct --name.",
+            matches.len()
+        )),
+    }
+}
+
 fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
     use evals2::{Datasets2Subcommand, EvalDefsSubcommand, EvalRunsSubcommand, VoiceDiff2Subcommand};
     let key: &str = match cmd {
@@ -4052,6 +4150,11 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
         Commands::Corpus { sub } => match sub {
             CorpusSubcommand::List => "corpus list",
             CorpusSubcommand::Create(_) => "corpus create",
+            // skip-list: `ensure` is a composite of `corpus list` +
+            // `corpus create`, not its own /v1 endpoint, so it has no
+            // contract row. Both underlying calls are any-mode/free and
+            // the server gates each on its own.
+            CorpusSubcommand::Ensure(_) => return None,
             CorpusSubcommand::Update(_) => "corpus update",
             CorpusSubcommand::Delete(_) => "corpus delete",
             CorpusSubcommand::Stats { .. } => "corpus stats",
@@ -5117,6 +5220,46 @@ async fn main() {
                     match client.post_json("/v1/corpora", body).await {
                         Ok(data) => CliResponse::success("corpus create", data).emit(fmt),
                         Err(e) => request_failure("corpus create", e).emit(fmt),
+                    }
+                }
+                CorpusSubcommand::Ensure(args) => {
+                    // Read the tenant's corpora, then create only if this
+                    // name is genuinely absent. Two calls rather than one
+                    // because /v1 has no upsert; the read is what makes
+                    // re-running this every session a no-op.
+                    let listed = match client.get_json("/v1/corpora").await {
+                        Ok(data) => data,
+                        Err(e) => request_failure("corpus ensure", e).emit(fmt),
+                    };
+                    match decide_corpus_ensure(&listed, &args.name, &args.embedding_model) {
+                        Ok(EnsureOutcome::Existing(corpus)) => {
+                            let mut data = corpus;
+                            if let Some(obj) = data.as_object_mut() {
+                                obj.insert("created".to_string(), json!(false));
+                            }
+                            CliResponse::success("corpus ensure", data).emit(fmt)
+                        }
+                        Ok(EnsureOutcome::Create) => {
+                            let body = json!({
+                                "name": args.name,
+                                "embedding_model": args.embedding_model,
+                                "description": args.description,
+                                "dimensions": args.dimensions,
+                            });
+                            match client.post_json("/v1/corpora", body).await {
+                                Ok(mut data) => {
+                                    if let Some(obj) = data.as_object_mut() {
+                                        obj.insert("created".to_string(), json!(true));
+                                    }
+                                    CliResponse::success("corpus ensure", data).emit(fmt)
+                                }
+                                Err(e) => request_failure("corpus ensure", e).emit(fmt),
+                            }
+                        }
+                        Err(e) => {
+                            CliResponse::fail("corpus ensure", e, FailureClass::Bug, EXIT_CONFIG)
+                                .emit(fmt)
+                        }
                     }
                 }
                 CorpusSubcommand::Update(args) => {
@@ -7791,6 +7934,123 @@ mod tests {
         assert_eq!(value["template_id"], "tmpl-1");
     }
 
+    // ── `corpus ensure` idempotence (ENS-3054 W4 §4.3) ──────────────────
+
+    fn corpus_entry(id: &str, name: &str, model: &str) -> Value {
+        json!({ "id": id, "name": name, "model": model, "document_count": 0 })
+    }
+
+    /// The idempotent path: a corpus with this name and model already
+    /// exists, so re-running `ensure` returns it instead of creating a
+    /// second one. This is what makes it safe for an agent to call at the
+    /// top of every session.
+    #[test]
+    fn corpus_ensure_returns_the_existing_corpus() {
+        let listed = json!([
+            corpus_entry("c-1", "other", "text-embedding-3-large"),
+            corpus_entry("c-2", "my-app-memory", "text-embedding-3-large"),
+        ]);
+        let outcome =
+            decide_corpus_ensure(&listed, "my-app-memory", "text-embedding-3-large").unwrap();
+        match outcome {
+            EnsureOutcome::Existing(corpus) => assert_eq!(corpus["id"], "c-2"),
+            other => panic!("expected the existing corpus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn corpus_ensure_creates_when_absent() {
+        let listed = json!([corpus_entry("c-1", "other", "text-embedding-3-large")]);
+        assert_eq!(
+            decide_corpus_ensure(&listed, "my-app-memory", "text-embedding-3-large").unwrap(),
+            EnsureOutcome::Create
+        );
+    }
+
+    #[test]
+    fn corpus_ensure_creates_when_tenant_has_no_corpora() {
+        assert_eq!(
+            decide_corpus_ensure(&json!([]), "my-app-memory", "text-embedding-3-large").unwrap(),
+            EnsureOutcome::Create
+        );
+    }
+
+    /// A corpus's embedding model is fixed at creation. Silently returning
+    /// a same-named corpus on a different model would bind the caller's
+    /// ingests to a vector space they never asked for — retrieval quality
+    /// degrades with nothing at the call site to explain why.
+    #[test]
+    fn corpus_ensure_refuses_a_model_mismatch() {
+        let listed = json!([corpus_entry("c-1", "my-app-memory", "text-embedding-3-small")]);
+        let err =
+            decide_corpus_ensure(&listed, "my-app-memory", "text-embedding-3-large").unwrap_err();
+        assert!(
+            err.contains("text-embedding-3-small") && err.contains("text-embedding-3-large"),
+            "error must name BOTH models so the caller can choose: {err}"
+        );
+        assert!(
+            err.contains("--name") && err.contains("--embedding-model"),
+            "error must offer both remedies: {err}"
+        );
+    }
+
+    /// Corpus names carry no uniqueness constraint, so picking one of two
+    /// arbitrarily would differ between runs.
+    #[test]
+    fn corpus_ensure_refuses_an_ambiguous_name() {
+        let listed = json!([
+            corpus_entry("c-1", "dupe", "text-embedding-3-large"),
+            corpus_entry("c-2", "dupe", "text-embedding-3-large"),
+        ]);
+        let err = decide_corpus_ensure(&listed, "dupe", "text-embedding-3-large").unwrap_err();
+        assert!(
+            err.contains("2 corpora") && err.contains("corpus list"),
+            "error must state the ambiguity and how to resolve it: {err}"
+        );
+    }
+
+    /// A response shape this code cannot read must be an error, never an
+    /// empty list — "no corpora exist" would make `ensure` create a
+    /// duplicate on every single run.
+    #[test]
+    fn corpus_ensure_rejects_an_unreadable_list_rather_than_assuming_empty() {
+        let err = decide_corpus_ensure(&json!({"unexpected": true}), "x", "m").unwrap_err();
+        assert!(err.contains("expected a JSON array"), "unexpected: {err}");
+    }
+
+    /// Tolerate a future envelope rather than silently reading it as empty.
+    #[test]
+    fn corpus_ensure_reads_an_enveloped_list() {
+        let listed = json!({ "data": [corpus_entry("c-1", "mem", "m1")] });
+        match decide_corpus_ensure(&listed, "mem", "m1").unwrap() {
+            EnsureOutcome::Existing(corpus) => assert_eq!(corpus["id"], "c-1"),
+            other => panic!("expected the existing corpus, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn corpus_ensure_parses() {
+        let cli = Cli::try_parse_from([
+            "enscrive",
+            "corpus",
+            "ensure",
+            "--name",
+            "my-app-memory",
+            "--embedding-model",
+            "text-embedding-3-large",
+        ])
+        .expect("corpus ensure must parse");
+        match cli.command {
+            Commands::Corpus {
+                sub: CorpusSubcommand::Ensure(args),
+            } => {
+                assert_eq!(args.name, "my-app-memory");
+                assert_eq!(args.embedding_model, "text-embedding-3-large");
+            }
+            _ => panic!("expected corpus ensure"),
+        }
+    }
+
     #[test]
     fn build_search_body_includes_filters() {
         let body = build_search_body(&SearchArgs {
@@ -9344,6 +9604,9 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         "deploy verify",
         "deploy apply",
         "deploy bootstrap",
+        // Composite of `corpus list` + `corpus create` (both any-mode /
+        // free), not its own /v1 endpoint — no contract row to gate on.
+        "corpus ensure",
         // J-004c: corpus detail / history / revert — contract row pending.
         "corpus get",
         "corpus revert",
