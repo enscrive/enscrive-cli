@@ -399,6 +399,118 @@ jobs:
           echo "All artifacts signed and bundles uploaded."
 
   # ---------------------------------------------------------------------------
+  # Publish the installer itself — ONE object, one alias, no drift.
+  #
+  # install.sh was previously published by hand (`aws s3 cp`, per a comment in
+  # its own header), separately to the `install.sh` key and the extensionless
+  # `install` alias. Two hand-uploaded copies of a security-critical
+  # `curl | sh` target drift, and they did: live probes on 2026-08-01 found
+  # install.enscrive.io/install.sh and /install both 200 but serving DIFFERENT
+  # objects (15,582 vs 15,496 bytes).
+  #
+  # This job makes that structurally impossible. It uploads `install.sh` once,
+  # then produces `install` by a server-side S3 copy of that exact object — a
+  # copy, never a second upload — and refuses to finish unless both keys report
+  # the same ETag. Both CloudFront paths are then invalidated together.
+  # Governance: installer/DESIGN-DECISIONS.md §2.
+  # ---------------------------------------------------------------------------
+  publish-installer:
+    name: publish installer (install.sh + /install alias)
+    needs: aggregate
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC role assumption
+      contents: read
+    env:
+      # Small max-age: the installer is a pointer document, not an immutable
+      # artifact, and a bad one should be correctable in minutes.
+      INSTALLER_CONTENT_TYPE: "text/x-shellscript; charset=utf-8"
+      INSTALLER_CACHE_CONTROL: "public, max-age=300"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload install.sh (the one canonical object)
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws s3 cp \
+            installer/install.sh \
+            "s3://${S3_BUCKET}/install.sh" \
+            --content-type "${INSTALLER_CONTENT_TYPE}" \
+            --cache-control "${INSTALLER_CACHE_CONTROL}"
+
+      - name: Copy that object to the /install alias key (server-side, never a second upload)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # S3 CopyObject: the alias body is the canonical object's body by
+          # construction. --metadata-directive REPLACE is required to keep the
+          # shellscript content-type on a key with no extension, which the CLI
+          # would otherwise guess as binary/octet-stream.
+          aws s3 cp \
+            "s3://${S3_BUCKET}/install.sh" \
+            "s3://${S3_BUCKET}/install" \
+            --metadata-directive REPLACE \
+            --content-type "${INSTALLER_CONTENT_TYPE}" \
+            --cache-control "${INSTALLER_CACHE_CONTROL}"
+
+      - name: Assert both keys are byte-identical
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Both objects are single-part uploads of the same small file, so
+          # ETag is the MD5 of the body and comparing them proves byte
+          # identity. Sizes are printed too, because size is the symptom the
+          # drift was originally caught by.
+          #
+          # Each head-object goes into its own assignment rather than inline
+          # into `read`: a command substitution that dies inside a here-string
+          # leaves `read` exiting 0 with empty fields, and two empty strings
+          # compare equal — an assertion that passes precisely when it cannot
+          # see anything. `VAR=$(...)` under `set -e` aborts on failure, and
+          # the emptiness guard below covers the rest.
+          CANON=$(aws s3api head-object \
+            --bucket "${S3_BUCKET}" --key "install.sh" \
+            --query '[ETag,ContentLength]' --output text)
+          ALIAS=$(aws s3api head-object \
+            --bucket "${S3_BUCKET}" --key "install" \
+            --query '[ETag,ContentLength]' --output text)
+
+          read -r CANON_ETAG CANON_SIZE <<<"${CANON}"
+          read -r ALIAS_ETAG ALIAS_SIZE <<<"${ALIAS}"
+
+          echo "install.sh  etag=${CANON_ETAG:-<none>} size=${CANON_SIZE:-<none>}"
+          echo "install     etag=${ALIAS_ETAG:-<none>} size=${ALIAS_SIZE:-<none>}"
+
+          if [ -z "${CANON_ETAG:-}" ] || [ -z "${ALIAS_ETAG:-}" ]; then
+            echo "::error::could not read an ETag for one or both installer keys — refusing to report identity we did not verify." >&2
+            exit 1
+          fi
+
+          if [ "${CANON_ETAG}" != "${ALIAS_ETAG}" ]; then
+            echo "::error::install.sh and its /install alias are NOT byte-identical. The alias must be a copy of the canonical object, never a separate upload." >&2
+            exit 1
+          fi
+          echo "Both keys serve one identical object."
+
+      - name: Invalidate both CloudFront paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Invalidated together — a partial invalidation is exactly the state
+          # where the two URLs disagree for a cache lifetime.
+          aws cloudfront create-invalidation \
+            --distribution-id "${CF_DISTRIBUTION_ID}" \
+            --paths "/install.sh" "/install"
+
+  # ---------------------------------------------------------------------------
   # ENS-538 — notify the release orchestrator that this tag has finished
   # publishing. The orchestrator (release-orchestrator.yml) auto-bumps the
   # enscrive-deploy channels/dev.toml [overrides] entry for this repo and
@@ -454,7 +566,7 @@ jobs:
   # ---------------------------------------------------------------------------
   notify-on-failure:
     name: alert on release failure (ENS-1177)
-    needs: [build, aggregate, sign, notify-orchestrator]
+    needs: [build, aggregate, sign, publish-installer, notify-orchestrator]
     if: failure()
     runs-on: ubuntu-latest
     permissions:

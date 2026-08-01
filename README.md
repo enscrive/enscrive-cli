@@ -23,28 +23,35 @@ One binary. Same commands either way.
 ### One-liner (beta channel)
 
 ```sh
-curl -fsSL https://install.enscrive.io/install | sh
+curl -fsSL https://install.enscrive.io/install.sh | sh
 ```
 
 Installs the `enscrive` CLI binary to `~/.local/bin/enscrive`. No sudo required.
 
-Supported platforms: `x86_64`/`aarch64` Linux (glibc and musl), `x86_64`/`arm64` macOS.
+**Platforms published today: `x86_64-unknown-linux-gnu` only.** The installer detects
+`aarch64` Linux, musl, and both macOS architectures, and will install them as soon as
+they are released — but the release pipeline currently builds the one Linux target, so
+on any other platform the one-liner will tell you no binary is available. Build from
+source (below) works everywhere Rust does.
 
-> **Dev channel note.** The install URL above serves the `dev` channel while production
-> CloudFront (`enscrive.io/install`) is being provisioned. The production one-liner
-> `curl -fsSL https://enscrive.io/install | sh` will replace this pre-GA (tracked in ENS-81).
+> **Dev channel note.** `https://install.enscrive.io/install.sh` is the canonical install
+> URL and serves the `dev` channel. A shorter GA one-liner at `https://enscrive.io/install`
+> is planned but **not provisioned — that URL does not resolve today** (tracked in ENS-81).
+> Use the canonical URL above until this note says otherwise.
 
 **Options:**
 
 ```sh
 # Override install directory (default: ~/.local/bin)
-curl -fsSL https://install.enscrive.io/install | sh -s -- --prefix=/usr/local/bin
+curl -fsSL https://install.enscrive.io/install.sh | sh -s -- --prefix=/usr/local/bin
 
-# Cross-machine install (override platform detection)
-curl -fsSL https://install.enscrive.io/install | sh -s -- --target=aarch64-apple-darwin
+# Override platform detection. Only resolves for a target the manifest
+# actually publishes — today that is x86_64-unknown-linux-gnu alone, so
+# this flag is here for cross-machine prep once more targets ship.
+curl -fsSL https://install.enscrive.io/install.sh | sh -s -- --target=x86_64-unknown-linux-gnu
 
 # Skip cosign bundle verification (debug only)
-curl -fsSL https://install.enscrive.io/install | sh -s -- --insecure
+curl -fsSL https://install.enscrive.io/install.sh | sh -s -- --insecure
 ```
 
 If `~/.local/bin` is not on your `PATH`, the installer will remind you how to add it.
@@ -80,19 +87,25 @@ API keys will be available at [enscrive.io/pricing](https://enscrive.io/pricing)
 
 ### Self-hosted local stack
 
-You run the full stack on your machine: `enscrive-developer` + `enscrive-observe` + `enscrive-embed` + Postgres, Keycloak, Qdrant, and Loki via Docker Compose.
+You run the full stack on your machine: `enscrive-developer` + `enscrive-observe` + `enscrive-embed` + Postgres, Keycloak, Qdrant, and Loki, under Docker or Podman.
 
-**Prerequisites.** Docker Engine + Docker Compose. Provider API key(s) for at least one embedding backend.
+**Prerequisites.** A container runtime — **Docker or rootless Podman, both supported natively** — plus its compose implementation, and provider API key(s) for at least one embedding backend. The CLI probes `docker` first, then `podman`, and resolves the first compose implementation it finds (`docker compose` → `podman compose` → `podman-compose` → `docker-compose`). Podman needs no Docker shim and no `DOCKER_HOST` of your own: when Podman is selected the CLI wires the rootless socket itself. Both runtimes are exercised on every pull request by the clean-room onboard gate.
 
-On Fedora:
+On Fedora (Podman is preinstalled on most Fedora/RHEL systems):
 
 ```bash
-sudo dnf install -y moby-engine docker-compose
-sudo systemctl enable --now docker
-sudo usermod -aG docker $USER  # log out/in or `newgrp docker` to take effect
+sudo dnf install -y podman podman-compose
+systemctl --user enable --now podman.socket   # enscrive start offers to do this for you
 ```
 
-On Debian/Ubuntu, follow [docs.docker.com/engine/install](https://docs.docker.com/engine/install/).
+On Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y podman podman-compose
+systemctl --user enable --now podman.socket
+```
+
+To use Docker instead, install Docker Engine + the Compose plugin — [docs.docker.com/engine/install](https://docs.docker.com/engine/install/) — and add yourself to the `docker` group (`sudo usermod -aG docker $USER`, then log out/in or run `newgrp docker`). Rootless Podman needs no group membership.
 
 Then:
 
@@ -126,7 +139,8 @@ Local stack and project setup:
 enscrive init            Configure a managed or self-hosted profile
 enscrive start           Start the local self-hosted stack
 enscrive stop            Stop the local self-hosted stack
-enscrive status          Resolved profile, stack health, active project
+enscrive status          Resolved profile and local stack status
+enscrive health          Check stack health through /health
 enscrive bootstrap       Re-run tenant/key bootstrap on a running stack
 enscrive project init    Give this directory its own isolated memory
 ```
@@ -134,17 +148,39 @@ enscrive project init    Give this directory its own isolated memory
 Working with memory:
 
 ```
-enscrive search          Search a corpus
-enscrive embeddings      Embedding primitives
-enscrive ingest          Add documents to a corpus
-enscrive segment         Chunk a document
-enscrive analyze         Inspect content
-enscrive models          List available models
-enscrive corpus          Manage corpora
+enscrive search                  Search corpora through /v1/search
+enscrive ingest                  Add documents to a corpus
+enscrive corpus                  Manage corpora
+enscrive corpus ensure           Idempotently get-or-create a corpus by name
+enscrive segment                 Chunk a document
+enscrive preview-chunking        Preview how content chunks, without ingesting it
+enscrive preview-with-template   Preview template-driven segmentation      [Pro]
+enscrive segmentation-templates  Manage segmentation templates
+enscrive embeddings              Embedding primitives
+enscrive analyze                 Inspect content
+enscrive models                  List available models
+enscrive records                 Bounded structural store (/v1/records)
+```
+
+Reasoning over your memory:
+
+```
+enscrive complete        Open-ended completion through /v1/complete
+enscrive agents          Persistent, corpus-bound agents (/v1/agents)
+```
+
+Voices and evaluation:
+
+```
 enscrive voices          Author and compare voices
 enscrive evals           Run eval campaigns                    [Pro]
 enscrive datasets        Manage datasets                       [Pro]
 enscrive eval-defs       Define and run eval suites            [Pro]
+```
+
+Operations and account:
+
+```
 enscrive jobs            Inspect background jobs
 enscrive batch-sets      Inspect batch staging
 enscrive logs            Stream and search logs
@@ -153,6 +189,10 @@ enscrive restore         Restore tenant data to a revision
 enscrive backup          Operator backup surface (admin)       [Pro]
 enscrive export          Data portability                      [Pro]
 enscrive usage           Usage + metering
+enscrive wallet          Wallet balance + debit history
+enscrive ratecard        Published rate card (public, no auth required)
+enscrive license         Activate/check a self-managed license
+enscrive admin           Operator admin surface (requires Admin capability)
 ```
 
 `enscrive <command> --help` shows the full flag set for any command. All commands support `--output json` for scripting.

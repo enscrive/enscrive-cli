@@ -220,22 +220,44 @@ Misleading to a reader looking for channel resolution.
 never constructed (lookups fail via `PlatformMissing`). Minor dead variant.
 `ApiError::Http4xx.code` is extracted but read only by tests.
 
-### F19 — 🟡 Install URL documented three different ways
+### F19 — ✅ RESOLVED (2026-08-01) — Install URL documented three different ways
 *(Hostnames unified on `install.enscrive.io` in DNS refactor P2.)*
-README advertises `https://install.enscrive.io/install` (`README.md:26`),
-`install.sh` documents `https://install.enscrive.io/install.sh`
-(`install.sh:5`) and defaults the manifest to `install.enscrive.io/…`
-(`install.sh:45`), and `installer/DESIGN-DECISIONS.md` says
+README advertised `https://install.enscrive.io/install`, `install.sh`
+documented `https://install.enscrive.io/install.sh` and defaulted the manifest
+to `install.enscrive.io/…`, and `installer/DESIGN-DECISIONS.md` said
 `install.enscrive.io/install`. `manifest.yml` notes the distro aliases
 (`install.enscrive.io`, `developer.enscrive.io`) front one CloudFront
-distribution — the residual `/install` vs `/install.sh` path split is
-still a minor foot-gun.
+distribution — the residual `/install` vs `/install.sh` path split was
+called a minor foot-gun here.
 
-### F20 — 🟡 Release ships one platform; README claims five
+It was worse than documented. The two paths were not one object served two
+ways: live probes on 2026-08-01 found them serving **different objects**
+(15,582 vs 15,496 bytes), the `/install` alias being an older revision of the
+script whose default manifest URL still pointed at `dev.enscrive.io` — the
+hostname DESIGN-DECISIONS §2 records as retired. The cause was that nothing
+published `install.sh` automatically; a comment in its own header told an
+operator to `aws s3 cp` each key by hand.
+
+Resolved by canonicalizing on the `.sh` form everywhere and adding the
+`publish-installer` job to `release.yml`, which uploads one object and derives
+the alias by server-side copy, asserting ETag equality before invalidating both
+CloudFront paths. See `installer/DESIGN-DECISIONS.md` §2.
+
+### F20 — 🟠 PARTIALLY RESOLVED (2026-08-01) — Release ships one platform; README claimed five
 `release.yml` builds a **single** target (`x86_64-unknown-linux-gnu`,
 Fedora-only Phase 0, `release.yml:33-39`); mac/arm64/musl are deferred.
-`README.md:31` advertises five platforms. Anyone on macOS/musl following the
+`README.md` advertised five platforms. Anyone on macOS/musl following the
 README install today gets nothing for those targets.
+
+Re-verified 2026-08-01 against the live dev manifest
+(`install.enscrive.io/releases/dev/latest.json`, `v20260801-2103`):
+`binaries.enscrive.platforms` contains exactly one key,
+`x86_64-unknown-linux-gnu`. The README's claim was false, not merely stale.
+
+The **documentation half** is fixed — the README now states the one published
+target plainly and points other platforms at build-from-source. The
+**pipeline half** is untouched: the release matrix still builds one target,
+and closing that is a separate ticket.
 
 ### F21 — ⚪ Founder-gate greps for files that don't exist
 `.github/scripts/pr-review.sh` escalates on changes to
