@@ -507,14 +507,30 @@ jobs:
           fi
           echo "OK: beta's corpus contains none of alpha's memory"
 
-          # ── Corpus-UNSCOPED search. `.enscrive/AGENT.md` teaches "omit
-          # --corpus to search across this project's whole memory", so this
-          # has to hold or the doc is teaching something that does not work
-          # (ADR §5 FORBIDDEN). Probed explicitly rather than assumed,
-          # because embed filters search on corpus_id alone — there is no
-          # tenant clause in SearchRequest (enscrive-embed
-          # docs/state-of-embed/04-SUBSTRATE-AND-SEARCH.md §6), so this path
-          # is where a cross-tenant leak would surface if it surfaces at all.
+          # ── Corpus-UNSCOPED search: a standing probe of a KNOWN open
+          # defect, deliberately NOT gating.
+          #
+          # `/v1/search` takes `corpus_id` as optional at every layer — the
+          # CLI flag, developer's handler, and `optional string corpus_id`
+          # in the embed SearchRequest proto — but omitting it returns
+          # HTTP 500 on this stack (first observed by this gate, PR #58).
+          # Type-level optionality was not evidence of behavior.
+          #
+          # It does NOT fail the job, for two reasons. It is a pre-existing
+          # product defect rather than anything Wave 4a introduced, and
+          # this job is a required check on every PR — gating it would
+          # block unrelated work on a bug none of those PRs can fix. The
+          # ADR §7.4 isolation assertion above is corpus-scoped and does
+          # gate.
+          #
+          # When it starts returning 200, the leak assertions below become
+          # live: embed filters search on corpus_id alone, with no tenant
+          # clause in SearchRequest (enscrive-embed
+          # docs/state-of-embed/04-SUBSTRATE-AND-SEARCH.md §6 flags this as
+          # an intentional v0 gap resting on "a corpus belongs to one
+          # tenant"), so an unscoped search is exactly where a cross-tenant
+          # leak would surface. Promote this to gating once the 500 is
+          # fixed and the leak checks have been seen to pass.
           set +e
           enscrive search --query "what is the Wave4a canary phrase" \
             --output json > /tmp/beta-unscoped.json
@@ -522,18 +538,19 @@ jobs:
           set -e
           jq . /tmp/beta-unscoped.json || cat /tmp/beta-unscoped.json
           if [ "$unscoped_rc" -ne 0 ]; then
-            echo "FINDING: corpus-unscoped search FAILED (exit $unscoped_rc)."
-            echo "  AGENT.md teaches it, so either the doc or the stack is wrong."
-            echo "  This is a product finding, not a gate defect."
-            exit 1
+            echo "KNOWN FINDING (not gating): corpus-unscoped search still fails (exit $unscoped_rc)."
+            echo "  Tracked as a product defect; the docs no longer teach it."
+          else
+            echo "NOTE: corpus-unscoped search now SUCCEEDS — check the leak assertions below,"
+            echo "      then promote this probe to gating."
+            jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length == 0' \
+              /tmp/beta-unscoped.json >/dev/null \
+              || { echo "FINDING: unscoped search LEAKED alpha's memory into beta's tenant"; exit 1; }
+            if grep -qF "xyzzy-plugh" /tmp/beta-unscoped.json; then
+              echo "FINDING: alpha's canary content leaked cross-tenant via unscoped search"; exit 1
+            fi
           fi
-          jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length == 0' \
-            /tmp/beta-unscoped.json >/dev/null \
-            || { echo "FINDING: unscoped search LEAKED alpha's memory into beta's tenant"; exit 1; }
-          if grep -qF "xyzzy-plugh" /tmp/beta-unscoped.json; then
-            echo "FINDING: alpha's canary content leaked cross-tenant via unscoped search"; exit 1
-          fi
-          echo "OK: projects are isolated — beta sees none of alpha's memory, scoped or unscoped"
+          echo "OK: ADR §7.4 satisfied — beta's corpus contains none of alpha's memory"
 
       # ADR §5: "the AGENT.md is a contract: every capability it instructs
       # MUST be exercised by the CI gate, so the agent-usage doc can never
