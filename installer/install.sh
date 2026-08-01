@@ -461,9 +461,5 @@ echo "Next steps:"
 echo "  enscrive init --mode managed      # connect to api.enscrive.io"
 echo "  enscrive init --mode self-managed # fetch service stack + run locally"
 echo ""
-# Interim docs pointer. docs.enscrive.io currently serves a splash page for the
-# enscrive-docs generator product and 404s on every documentation path, so
-# sending a user who just succeeded to a dead end is worse than sending them to
-# the README. Point this at enscrive.io/docs once that ships (PUBLIC-CLI-DOCS
-# proposal §4, venue B).
-echo "Docs: https://github.com/enscrive/enscrive-cli#readme"
+# Docs home for the public CLI (PUBLIC-CLI-DOCS proposal §4, venue B).
+echo "Docs: https://enscrive.io/docs"
