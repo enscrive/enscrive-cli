@@ -24,21 +24,51 @@ cross-repo manifest published by the Factory Squad (ENS-91).
 
 ## §2. Dev channel URL for the install one-liner
 
-**Decision:** The install one-liner uses `https://install.enscrive.io/install`
-during beta. (`install.enscrive.io` is the canonical installer host; the
-former `dev.enscrive.io` alias was retired in the DNS refactor —
-`developer.enscrive.io` now fronts the same distribution for
-manifest-fetch internals.)
+**Original decision (2026-04-24, superseded):** the one-liner used the
+extensionless `https://install.enscrive.io/install`.
 
-Production CloudFront at `enscrive.io/install` is not yet provisioned
-(pending CLI-REL-010 / ENS-81 GA sub-ticket).  The dev distribution
-(`EWE9BH1POOS0A`, bucket `enscrive-install-artifacts-dev`) is live and
-operational.
+**Revised decision (2026-08-01, PUBLIC-CLI-DOCS proposal §3):** the canonical
+install command is
+
+```
+curl -fsSL https://install.enscrive.io/install.sh | sh
+```
+
+`install.sh` — with the extension — is the canonical key, because it is
+already the form used by the enscrive.io homepage, the S3 publish target, the
+CloudFront invalidation path, and the amplify.yml install gate. The
+extensionless `/install` remains only as a **byte-identical alias** for
+one-liners already in the wild.
+
+**One object, not two.** Both keys are produced by a single publish step: the
+`publish-installer` job in `.github/workflows/release.yml` uploads
+`installer/install.sh` to the `install.sh` key, then server-side-copies that
+S3 object to the `install` key and asserts the two ETags match before
+invalidating `/install.sh` and `/install` on CloudFront. Nobody uploads the
+installer by hand.
+
+This exists because the two keys *had* drifted. Under the previous
+hand-run `aws s3 cp` flow, live probes on 2026-08-01 found
+`install.enscrive.io/install` and `/install.sh` both returning 200 with
+**different objects** (15,496 vs 15,582 bytes) — two independently
+mutable copies of the security-critical installer. Parallel uploads to the
+two keys are forbidden; the alias is a copy by construction.
+
+(`install.enscrive.io` is the canonical installer host; the former
+`dev.enscrive.io` alias was retired in the DNS refactor —
+`developer.enscrive.io` now fronts the same distribution for manifest-fetch
+internals.)
+
+**Not yet provisioned:** `enscrive.io/install`. It does not resolve today and
+must not be advertised as if it does (pending CLI-REL-010 / ENS-81 GA
+sub-ticket). The dev distribution (`EWE9BH1POOS0A`, bucket
+`enscrive-install-artifacts-dev`) is the live one.
 
 **Production follow-up:** once `enscrive.io/install` is provisioned, update:
 1. `installer/install.sh` default manifest URL from dev to prod pointer.
-2. `README.md` install snippet.
-3. S3 publish target in the team-lead TODO comment.
+2. `README.md` install snippet + the "not provisioned" note.
+3. The `publish-installer` job's bucket/distribution targets in
+   `.github/workflows/release.yml`.
 
 ---
 

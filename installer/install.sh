@@ -1,18 +1,19 @@
 #!/bin/sh
 # ENS-81 CLI-REL-010: enscrive CLI installer
 #
-# Public install command:
+# Canonical public install command:
 #   curl -fsSL https://install.enscrive.io/install.sh | sh
 #
 # install.enscrive.io is a public alias on CloudFront distribution
 # EWE9BH1POOS0A fronting s3://enscrive-install-artifacts-dev. WAF was
 # dropped 2026-04-27; the path is open from anywhere on Earth.
 #
-# Re-publish after edits:
-#   aws s3 cp installer/install.sh s3://enscrive-install-artifacts-dev/install.sh \
-#     --content-type 'text/x-shellscript; charset=utf-8' \
-#     --cache-control 'public, max-age=300'
-#   aws cloudfront create-invalidation --distribution-id EWE9BH1POOS0A --paths '/install.sh'
+# Publishing is automated — do NOT hand-upload this file. The `publish-installer`
+# job in .github/workflows/release.yml writes ONE object to the `install.sh` key
+# and server-side-copies it to the extensionless `install` alias key, so the two
+# cannot drift. (They had drifted, to different byte counts, under the previous
+# manual `aws s3 cp` flow.) `install.sh` is the canonical key; `install` is an
+# alias retained only for one-liners already in the wild.
 #
 # Design decision — CLI-only install (ENS-81 resolved):
 #   install.sh fetches ONLY the `enscrive` CLI binary.  The three service binaries
@@ -460,4 +461,9 @@ echo "Next steps:"
 echo "  enscrive init --mode managed      # connect to api.enscrive.io"
 echo "  enscrive init --mode self-managed # fetch service stack + run locally"
 echo ""
-echo "Docs: https://docs.enscrive.io"
+# Interim docs pointer. docs.enscrive.io currently serves a splash page for the
+# enscrive-docs generator product and 404s on every documentation path, so
+# sending a user who just succeeded to a dead end is worse than sending them to
+# the README. Point this at enscrive.io/docs once that ships (PUBLIC-CLI-DOCS
+# proposal §4, venue B).
+echo "Docs: https://github.com/enscrive/enscrive-cli#readme"
