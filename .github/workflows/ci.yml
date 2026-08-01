@@ -302,6 +302,13 @@ jobs:
 
       # The headline feature D10 was breaking outright (every search 500d
       # because observe couldn't reach developer's metering endpoint).
+      #
+      # The only search in this job that does NOT go through
+      # .github/scripts/es-search.sh, and safely so: it does not redirect,
+      # so the response — success or failure envelope — lands on the
+      # console and `set -e` catches a non-zero exit. If you ever add a
+      # `> file` here, route it through the helper instead; that is exactly
+      # the shape that swallows the error (see the helper's header).
       - name: "enscrive search [guards D10]"
         run: |
           set -euo pipefail
@@ -425,10 +432,10 @@ jobs:
           # index visibility can trail it by a beat. Bounded so a genuine
           # failure still fails rather than hanging.
           for attempt in 1 2 3 4 5 6; do
-            enscrive search --query "what is the Wave4a canary phrase" \
-              --corpus "${{ steps.remember.outputs.corpus_id }}" \
-              --output json > /tmp/recall.json || true
-            if jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length > 0' \
+            "$GITHUB_WORKSPACE/.github/scripts/es-search.sh" /tmp/recall.json \
+              --query "what is the Wave4a canary phrase" \
+              --corpus "${{ steps.remember.outputs.corpus_id }}"
+            if jq -e '.ok == true and ([.data.results[] | select(.document_id == "wave4a-memory")] | length > 0)' \
                  /tmp/recall.json >/dev/null 2>&1; then
               break
             fi
@@ -475,9 +482,8 @@ jobs:
           # `|| true` then dump: in --output json the failure envelope goes
           # to STDOUT, so a bare redirect swallows the error into the file
           # and `set -e` kills the step with nothing on the console.
-          enscrive search --query "what is the Wave4a canary phrase" \
-            --corpus "$beta_corpus" --output json > /tmp/beta-scoped.json || true
-          jq . /tmp/beta-scoped.json || cat /tmp/beta-scoped.json
+          "$GITHUB_WORKSPACE/.github/scripts/es-search.sh" /tmp/beta-scoped.json \
+            --query "what is the Wave4a canary phrase" --corpus "$beta_corpus"
           # Liveness first, for the same reason as the retire step: the
           # assertions below are negatives, and a negative is free if the
           # search never ran. Beta's OWN document must come back.
@@ -526,14 +532,10 @@ jobs:
           # tenant"), so an unscoped search is exactly where a cross-tenant
           # leak would surface. Promote this to gating once the 500 is
           # fixed and the leak checks have been seen to pass.
-          set +e
-          enscrive search --query "what is the Wave4a canary phrase" \
-            --output json > /tmp/beta-unscoped.json
-          unscoped_rc=$?
-          set -e
-          jq . /tmp/beta-unscoped.json || cat /tmp/beta-unscoped.json
-          if [ "$unscoped_rc" -ne 0 ]; then
-            echo "KNOWN FINDING (not gating): corpus-unscoped search still fails (exit $unscoped_rc)."
+          "$GITHUB_WORKSPACE/.github/scripts/es-search.sh" /tmp/beta-unscoped.json \
+            --query "what is the Wave4a canary phrase"
+          if ! jq -e '.ok == true' /tmp/beta-unscoped.json >/dev/null 2>&1; then
+            echo "KNOWN FINDING (not gating): corpus-unscoped search still fails."
             echo "  Tracked as a product defect; the docs no longer teach it."
           else
             echo "NOTE: corpus-unscoped search now SUCCEEDS — check the leak assertions below,"
@@ -573,9 +575,9 @@ jobs:
           # a live search over a non-empty corpus does the target's absence
           # mean the delete worked.
           for attempt in 1 2 3 4 5 6; do
-            enscrive search --query "what is the Wave4a canary phrase" \
-              --corpus "${{ steps.remember.outputs.corpus_id }}" \
-              --output json > /tmp/after-delete.json || true
+            "$GITHUB_WORKSPACE/.github/scripts/es-search.sh" /tmp/after-delete.json \
+              --query "what is the Wave4a canary phrase" \
+              --corpus "${{ steps.remember.outputs.corpus_id }}"
 
             if jq -e '.ok == true and (.data.results | type == "array")' \
                  /tmp/after-delete.json >/dev/null 2>&1 \
