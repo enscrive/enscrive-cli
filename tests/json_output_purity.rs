@@ -31,7 +31,12 @@ fn spawn_mock() -> u16 {
             let Ok(mut stream) = stream else { continue };
             let mut buf = [0u8; 8192];
             let _ = stream.read(&mut buf);
-            let body = br#"{"ok":true,"items":[],"results":[],"data":{},"corpora":[]}"#;
+            // `status: "completed"` matters: it makes the job-polling path
+            // (`ingest documents`, eval runs) reach a terminal state on its
+            // first tick instead of looping to its deadline. Those commands
+            // render per-tick progress, which is exactly the output that
+            // must land on stderr rather than stdout.
+            let body = br#"{"ok":true,"status":"completed","items":[],"results":[],"data":{},"corpora":[],"job_id":"j-1","id":"x-1"}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
@@ -67,13 +72,49 @@ fn json_commands() -> Vec<Vec<&'static str>> {
         ],
         vec!["corpus", "stats", "--id", "c-1"],
         vec!["corpus", "documents", "--id", "c-1"],
+        vec!["corpus", "get", "--id", "c-1"],
+        vec!["corpus", "commits", "--id", "c-1"],
+        vec!["corpus", "pending", "--id", "c-1"],
+        vec![
+            "corpus",
+            "document",
+            "delete",
+            "--corpus-id",
+            "c-1",
+            "--document-id",
+            "d-1",
+        ],
         vec!["wallet", "balance"],
         vec!["jobs", "list"],
+        vec!["jobs", "get", "--id", "j-1"],
         vec!["voices", "list"],
+        vec!["voices", "get", "--id", "v-1"],
         vec!["agents", "list"],
+        vec!["agents", "get", "--id", "a-1"],
         vec!["ratecard", "show"],
         vec!["license", "status"],
         vec!["models", "list"],
+        vec!["records", "query", "--collection", "c-1"],
+        // The polling path: these render per-tick progress, which must go
+        // to stderr. The mock answers `status: "completed"` so they reach a
+        // terminal state rather than looping to their deadline.
+        vec![
+            "ingest",
+            "documents",
+            "--corpus-id",
+            "c-1",
+            "--content",
+            "a memory",
+        ],
+        vec![
+            "ingest",
+            "documents",
+            "--corpus-id",
+            "c-1",
+            "--content",
+            "a memory",
+            "--async",
+        ],
     ]
 }
 
