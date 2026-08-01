@@ -310,10 +310,354 @@ jobs:
             --query "smoke test" \
             --output json
 
-      # NOTE (DEBRIEF §4.2, §5 step 8): per-document delete does not exist
-      # in the CLI yet (no CorpusSubcommand variant) — it's Wave 4 backlog,
-      # not part of this PR. Left out of this job until it ships; the DoD
-      # in DEBRIEF §5 lists it as a future step, not a current one.
+      # ────────────────────────────────────────────────────────────────
+      # Wave 4a — the per-project memory loop (app-memory ADR §7,
+      # acceptance items 1-4). Everything below runs against the stack
+      # ALREADY started above: a project gets its own TENANT on one shared
+      # local stack, which is the whole architecture (ADR §3.1). Booting a
+      # second stack here would test the opposite of the design.
+      # ────────────────────────────────────────────────────────────────
+
+      # ADR §7 item 1. Also ADR §5 FORBIDDEN ("a committed API key"):
+      # proven against the REAL issued key, not a fixture — the key is read
+      # from the profile store and searched for under .enscrive/, and is
+      # never echoed.
+      - name: "project init [ADR §7.1 — marker, no key material, celebratory output]"
+        id: project_init
+        run: |
+          set -euo pipefail
+          project="alpha-${{ matrix.runtime }}-$(date +%s)"
+          root="$HOME/projects/$project"
+          mkdir -p "$root"
+          cd "$root"
+
+          # Human output on purpose: the celebration is what a developer
+          # sees, and ADR §4 requires it to name the tenant and the portal.
+          enscrive project init --name "$project" | tee /tmp/project-init.txt
+
+          test -f .enscrive/config.toml || { echo "FAIL: .enscrive/config.toml missing"; exit 1; }
+          test -f .enscrive/AGENT.md   || { echo "FAIL: .enscrive/AGENT.md missing"; exit 1; }
+
+          grep -q "$project" /tmp/project-init.txt \
+            || { echo "FAIL: init output does not name the tenant"; exit 1; }
+          grep -q "127.0.0.1:3000" /tmp/project-init.txt \
+            || { echo "FAIL: init output does not name the portal"; exit 1; }
+
+          tenant_id="$(sed -n 's/^tenant_id *= *"\(.*\)"$/\1/p' .enscrive/config.toml)"
+          profile="$(sed -n 's/^profile *= *"\(.*\)"$/\1/p' .enscrive/config.toml)"
+          test -n "$tenant_id" || { echo "FAIL: marker carries no tenant_id"; exit 1; }
+          test -n "$profile"   || { echo "FAIL: marker carries no profile reference"; exit 1; }
+
+          # The real key for this project, straight out of the key store.
+          # Never printed — only tested for absence under .enscrive/.
+          key="$(python3 -c 'import os,sys,tomllib; print(tomllib.load(open(os.path.expanduser("~/.config/enscrive/profiles.toml"),"rb"))["profiles"][sys.argv[1]].get("api_key",""))' "$profile")"
+          test -n "$key" || { echo "FAIL: no API key stored for profile $profile"; exit 1; }
+          if grep -rqF -- "$key" .enscrive/; then
+            echo "FAIL: ADR §5 violation — key material found under .enscrive/"; exit 1
+          fi
+          echo "OK: marker present, references profile by name, carries no key material"
+
+          echo "project=$project"     >> "$GITHUB_OUTPUT"
+          echo "root=$root"           >> "$GITHUB_OUTPUT"
+          echo "tenant_id=$tenant_id" >> "$GITHUB_OUTPUT"
+
+      # ADR §7 item 2 (remember). Run from INSIDE the project with zero
+      # global config — no --api-key, no --profile, no --endpoint. If cwd
+      # resolution regresses, this targets the wrong tenant and the recall
+      # step below fails.
+      - name: "remember [ADR §7.2 — corpus ensure + ingest, zero global config]"
+        id: remember
+        run: |
+          set -euo pipefail
+          cd "${{ steps.project_init.outputs.root }}"
+
+          enscrive corpus ensure \
+            --name "${{ steps.project_init.outputs.project }}-memory" \
+            --embedding-model text-embedding-3-large \
+            --description "Wave 4a clean-room memory loop" \
+            --output json | tee /tmp/ensure.json
+          corpus_id="$(jq -r '.data.id // .data.corpus_id' /tmp/ensure.json)"
+          test -n "$corpus_id" && test "$corpus_id" != "null" \
+            || { echo "FAIL: corpus ensure returned no id"; exit 1; }
+          jq -e '.data.created == true' /tmp/ensure.json >/dev/null \
+            || { echo "FAIL: first ensure in a fresh tenant must CREATE"; exit 1; }
+
+          # Idempotence (ENS-3054 W4 §4.3): the second call must return the
+          # same corpus and say so, which is what makes it safe for an agent
+          # to run at the top of every session.
+          enscrive corpus ensure \
+            --name "${{ steps.project_init.outputs.project }}-memory" \
+            --embedding-model text-embedding-3-large \
+            --output json | tee /tmp/ensure2.json
+          jq -e '.data.created == false' /tmp/ensure2.json >/dev/null \
+            || { echo "FAIL: repeat ensure must not create a second corpus"; exit 1; }
+          test "$(jq -r '.data.id // .data.corpus_id' /tmp/ensure2.json)" = "$corpus_id" \
+            || { echo "FAIL: repeat ensure returned a DIFFERENT corpus"; exit 1; }
+
+          enscrive ingest documents \
+            --corpus-id "$corpus_id" \
+            --document-id "wave4a-memory" \
+            --content "The Wave4a canary phrase is xyzzy-plugh-${{ matrix.runtime }}; auth tokens are minted in session.rs." \
+            --output json
+
+          # Control document, never deleted, matching the SAME query. It is
+          # what makes the retire assertion sound: "the target is absent" is
+          # a negative, and a negative passes trivially when search is
+          # broken, returns an error envelope, or the corpus is empty. The
+          # control still being returned proves search was alive and the
+          # corpus non-empty at the moment we concluded the delete worked.
+          enscrive ingest documents \
+            --corpus-id "$corpus_id" \
+            --document-id "wave4a-control" \
+            --content "The Wave4a canary phrase also appears in this control document, which is never deleted." \
+            --output json
+
+          echo "corpus_id=$corpus_id" >> "$GITHUB_OUTPUT"
+
+      # ADR §7 item 2 (recall). Asserts the document comes back with a real
+      # score, not merely that the call returned 200.
+      - name: "recall [ADR §7.2 — search finds the memory with a real score]"
+        run: |
+          set -euo pipefail
+          cd "${{ steps.project_init.outputs.root }}"
+
+          # Bounded retry: ingest is awaited to terminal status above, but
+          # index visibility can trail it by a beat. Bounded so a genuine
+          # failure still fails rather than hanging.
+          for attempt in 1 2 3 4 5 6; do
+            enscrive search --query "what is the Wave4a canary phrase" \
+              --corpus "${{ steps.remember.outputs.corpus_id }}" \
+              --output json > /tmp/recall.json || true
+            if jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length > 0' \
+                 /tmp/recall.json >/dev/null 2>&1; then
+              break
+            fi
+            echo "attempt $attempt: not indexed yet, retrying"; sleep 5
+          done
+
+          jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length > 0' \
+            /tmp/recall.json >/dev/null \
+            || { echo "FAIL: search did not return the ingested memory"; jq . /tmp/recall.json; exit 1; }
+          jq -e '[.data.results[] | select(.document_id == "wave4a-memory") | .score
+                  | select(type == "number" and . > 0)] | length > 0' /tmp/recall.json >/dev/null \
+            || { echo "FAIL: hit carries no positive numeric score"; jq . /tmp/recall.json; exit 1; }
+          echo "OK: recalled with score $(jq -r '[.data.results[] | select(.document_id == "wave4a-memory") | .score][0]' /tmp/recall.json)"
+
+      # ADR §7 item 4 / §5 FORBIDDEN ("a project silently sharing another
+      # project's tenant"). A second project on the SAME stack must not see
+      # the first one's memory.
+      - name: "isolation [ADR §7.4 — a second project cannot see the first's memory]"
+        run: |
+          set -euo pipefail
+          project="beta-${{ matrix.runtime }}-$(date +%s)"
+          root="$HOME/projects/$project"
+          mkdir -p "$root"
+          cd "$root"
+
+          enscrive project init --name "$project" --output json | tee /tmp/beta-init.json
+          beta_tenant="$(jq -r '.data.tenant_id' /tmp/beta-init.json)"
+          test "$beta_tenant" != "${{ steps.project_init.outputs.tenant_id }}" \
+            || { echo "FAIL: second project reused the first project's tenant"; exit 1; }
+
+          enscrive corpus ensure --name "$project-memory" \
+            --embedding-model text-embedding-3-large --output json | tee /tmp/beta-ensure.json
+          beta_corpus="$(jq -r '.data.id // .data.corpus_id' /tmp/beta-ensure.json)"
+
+          enscrive ingest documents --corpus-id "$beta_corpus" \
+            --document-id "beta-memory" \
+            --content "Beta project memory: unrelated content about deployment runbooks." \
+            --output json
+
+          # ── The ADR §7.4 assertion: beta's own corpus must not contain
+          # alpha's memory. Corpus-scoped, matching how every other search
+          # in this job runs.
+          #
+          # `|| true` then dump: in --output json the failure envelope goes
+          # to STDOUT, so a bare redirect swallows the error into the file
+          # and `set -e` kills the step with nothing on the console.
+          enscrive search --query "what is the Wave4a canary phrase" \
+            --corpus "$beta_corpus" --output json > /tmp/beta-scoped.json || true
+          jq . /tmp/beta-scoped.json || cat /tmp/beta-scoped.json
+          # Liveness first, for the same reason as the retire step: the
+          # assertions below are negatives, and a negative is free if the
+          # search never ran. Beta's OWN document must come back.
+          jq -e '.ok == true and (.data.results | type == "array")' /tmp/beta-scoped.json >/dev/null \
+            || { echo "FAIL: beta's own scoped search errored"; exit 1; }
+          jq -e '[.data.results[] | select(.document_id == "beta-memory")] | length > 0' \
+            /tmp/beta-scoped.json >/dev/null \
+            || { echo "FAIL: beta cannot even see its OWN memory — search is not live here"; exit 1; }
+
+          # Both of alpha's documents still EXIST at this point: this step
+          # deliberately runs BEFORE retire. Ordered the other way the
+          # assertion is vacuous — alpha's document would already be
+          # deleted, so beta could never return it and this would pass with
+          # zero tenant isolation.
+          for doc in wave4a-memory wave4a-control; do
+            jq -e --arg d "$doc" '[.data.results[] | select(.document_id == $d)] | length == 0' \
+              /tmp/beta-scoped.json >/dev/null \
+              || { echo "FAIL: project beta can see project alpha's document $doc"; exit 1; }
+          done
+          if grep -qF "xyzzy-plugh" /tmp/beta-scoped.json; then
+            echo "FAIL: alpha's canary content leaked into beta's search results"; exit 1
+          fi
+          echo "OK: beta sees its own memory and none of alpha's (both alpha docs still exist)"
+
+          # ── Corpus-UNSCOPED search: a standing probe of a KNOWN open
+          # defect, deliberately NOT gating.
+          #
+          # `/v1/search` takes `corpus_id` as optional at every layer — the
+          # CLI flag, developer's handler, and `optional string corpus_id`
+          # in the embed SearchRequest proto — but omitting it returns
+          # HTTP 500 on this stack (first observed by this gate, PR #58).
+          # Type-level optionality was not evidence of behavior.
+          #
+          # It does NOT fail the job, for two reasons. It is a pre-existing
+          # product defect rather than anything Wave 4a introduced, and
+          # this job is a required check on every PR — gating it would
+          # block unrelated work on a bug none of those PRs can fix. The
+          # ADR §7.4 isolation assertion above is corpus-scoped and does
+          # gate.
+          #
+          # When it starts returning 200, the leak assertions below become
+          # live: embed filters search on corpus_id alone, with no tenant
+          # clause in SearchRequest (enscrive-embed
+          # docs/state-of-embed/04-SUBSTRATE-AND-SEARCH.md §6 flags this as
+          # an intentional v0 gap resting on "a corpus belongs to one
+          # tenant"), so an unscoped search is exactly where a cross-tenant
+          # leak would surface. Promote this to gating once the 500 is
+          # fixed and the leak checks have been seen to pass.
+          set +e
+          enscrive search --query "what is the Wave4a canary phrase" \
+            --output json > /tmp/beta-unscoped.json
+          unscoped_rc=$?
+          set -e
+          jq . /tmp/beta-unscoped.json || cat /tmp/beta-unscoped.json
+          if [ "$unscoped_rc" -ne 0 ]; then
+            echo "KNOWN FINDING (not gating): corpus-unscoped search still fails (exit $unscoped_rc)."
+            echo "  Tracked as a product defect; the docs no longer teach it."
+          else
+            echo "NOTE: corpus-unscoped search now SUCCEEDS — check the leak assertions below,"
+            echo "      then promote this probe to gating."
+            jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length == 0' \
+              /tmp/beta-unscoped.json >/dev/null \
+              || { echo "FINDING: unscoped search LEAKED alpha's memory into beta's tenant"; exit 1; }
+            if grep -qF "xyzzy-plugh" /tmp/beta-unscoped.json; then
+              echo "FINDING: alpha's canary content leaked cross-tenant via unscoped search"; exit 1
+            fi
+          fi
+          echo "OK: ADR §7.4 satisfied — beta's corpus contains none of alpha's memory"
+
+      # ADR §7 item 2 (retire) — the FIRST live end-to-end exercise of the
+      # P3 per-document delete path (cli #52 -> developer #229 -> observe
+      # #45 -> embed #93) against released binaries. A failure here is a
+      # product finding, not a gate defect.
+      - name: "retire [ADR §7.2 — delete removes it from search]"
+        run: |
+          set -euo pipefail
+          cd "${{ steps.project_init.outputs.root }}"
+
+          enscrive corpus document delete \
+            --corpus-id "${{ steps.remember.outputs.corpus_id }}" \
+            --document-id "wave4a-memory" \
+            --output json | tee /tmp/delete.json
+
+          # "The target is absent" is a NEGATIVE assertion, and a negative
+          # passes trivially when the search never really ran — an error
+          # envelope has no `.data.results`, and `[.data.results[]?]` on it
+          # is `[]`, which satisfies `length == 0`. Verified: feeding this
+          # jq an `{"ok":false,...}` payload returns true.
+          #
+          # So each attempt must first establish that the search WORKED:
+          # `.ok == true`, `.data.results` is genuinely an array, and the
+          # never-deleted control document is still returned. Only against
+          # a live search over a non-empty corpus does the target's absence
+          # mean the delete worked.
+          for attempt in 1 2 3 4 5 6; do
+            enscrive search --query "what is the Wave4a canary phrase" \
+              --corpus "${{ steps.remember.outputs.corpus_id }}" \
+              --output json > /tmp/after-delete.json || true
+
+            if jq -e '.ok == true and (.data.results | type == "array")' \
+                 /tmp/after-delete.json >/dev/null 2>&1 \
+               && jq -e '[.data.results[] | select(.document_id == "wave4a-control")] | length > 0' \
+                 /tmp/after-delete.json >/dev/null 2>&1 \
+               && jq -e '[.data.results[] | select(.document_id == "wave4a-memory")] | length == 0' \
+                 /tmp/after-delete.json >/dev/null 2>&1; then
+              echo "OK: retired memory gone, control document still returned (search proven live)"
+              exit 0
+            fi
+            echo "attempt $attempt: not yet in the expected state, retrying"; sleep 5
+          done
+
+          echo "FAIL: delete did not take effect, or search stopped working."
+          echo "      Expected: ok=true, control document present, target absent."
+          jq . /tmp/after-delete.json || cat /tmp/after-delete.json
+          if jq -e '.ok == true' /tmp/after-delete.json >/dev/null 2>&1; then
+            echo "      Search succeeded, so this is a P3 delete-path finding, NOT a gate defect."
+          else
+            echo "      Search itself failed — check the service logs collected below."
+          fi
+          exit 1
+
+      # ADR §5: "the AGENT.md is a contract: every capability it instructs
+      # MUST be exercised by the CI gate, so the agent-usage doc can never
+      # drift from what the CLI actually does."
+      #
+      # The unit test (project::tests::agent_doc_only_teaches_real_commands)
+      # proves every invocation PARSES. This proves every command the doc
+      # teaches is actually RUN here against a live stack. Adding a verb to
+      # AGENT.md without covering it above fails this step by construction.
+      - name: "AGENT.md contract [ADR §5 — the gate exercises everything the doc teaches]"
+        run: |
+          set -euo pipefail
+          cd "${{ steps.project_init.outputs.root }}"
+
+          # Command paths this job exercises above, plus the read-only
+          # inspection verbs run just below.
+          printf '%s\n' \
+            'corpus ensure' \
+            'corpus list' \
+            'ingest documents' \
+            'search' \
+            'corpus document delete' \
+            'status' \
+            'corpus documents' \
+            'corpus stats' > /tmp/exercised.txt
+
+          # Every `enscrive …` line the generated doc teaches, reduced to
+          # its command path. Each word must START with a letter, so the
+          # match stops at the first `--flag` while still allowing
+          # hyphenated verbs like `pending-delete`.
+          grep -oE '^[[:space:]]*enscrive [a-z][a-z0-9-]*([[:space:]]+[a-z][a-z0-9-]*)*' .enscrive/AGENT.md \
+            | sed -E 's/^[[:space:]]*enscrive[[:space:]]+//; s/[[:space:]]+$//' \
+            | sort -u > /tmp/taught.txt
+          echo "AGENT.md teaches:"; cat /tmp/taught.txt
+
+          missing=0
+          while read -r cmd; do
+            [ -z "$cmd" ] && continue
+            grep -qxF "$cmd" /tmp/exercised.txt || {
+              echo "FAIL: AGENT.md teaches \`enscrive $cmd\` but this gate never runs it"
+              missing=1
+            }
+          done < /tmp/taught.txt
+          [ "$missing" -eq 0 ] || {
+            echo "ADR §5: cover it in this job, or stop teaching it in render_agent_doc."
+            exit 1
+          }
+
+          # Run the inspection verbs the doc teaches, so the claim above is
+          # true rather than asserted.
+          enscrive corpus list --output json > /dev/null
+          enscrive status --output json > /tmp/project-status.json
+          enscrive corpus documents --id "${{ steps.remember.outputs.corpus_id }}" --output json > /dev/null
+          enscrive corpus stats --id "${{ steps.remember.outputs.corpus_id }}" --output json > /dev/null
+
+          # `enscrive status` inside a project must name that project.
+          jq -e --arg p "${{ steps.project_init.outputs.project }}" \
+            '.data.project.name == $p' /tmp/project-status.json >/dev/null \
+            || { echo "FAIL: status does not report the active project"; jq '.data.project' /tmp/project-status.json; exit 1; }
+          echo "OK: every capability AGENT.md teaches is exercised by this gate"
 
       - name: collect service logs (always, for postmortem)
         if: always()

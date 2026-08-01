@@ -333,11 +333,11 @@ enscrive search \
   --output json
 ```
 
-Omit `--corpus` to search across this project's whole memory rather than
-one corpus:
+Always pass `--corpus`. You have the id from `corpus ensure` above, and a
+search must be scoped to a corpus:
 
 ```sh
-enscrive search --query "why did we drop the fragment gate" --output json
+enscrive search --query "why did we drop the fragment gate" --corpus <CORPUS_ID> --output json
 ```
 
 ### Reading the scores

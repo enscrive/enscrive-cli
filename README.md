@@ -209,7 +209,7 @@ To rotate a key, re-run `enscrive init` for that profile (or `enscrive project i
 
 ```bash
 # Looks reasonable. Returns nothing.
-enscrive search --query "how are auth tokens minted" --score-threshold 0.9
+enscrive search --query "how are auth tokens minted" --corpus <CORPUS_ID> --score-threshold 0.9
 ```
 
 Scores are cosine similarity over embedding vectors, and **genuinely relevant matches land nowhere near 1.0.** A threshold of `0.8`–`0.9` filters out results you would have considered correct.
@@ -220,12 +220,12 @@ Treat that as a starting point, not a constant: the band shifts with the embeddi
 
 ```bash
 # 1. Search with NO threshold and read the scores you actually get back.
-enscrive search --query "how are auth tokens minted" --limit 10 --output json \
+enscrive search --query "how are auth tokens minted" --corpus <CORPUS_ID> --limit 10 --output json \
   | jq '.data.results[] | {score, document_id}'
 
 # 2. Find where genuinely relevant results stop and noise starts.
 # 3. Set the threshold just below that, then re-check as the corpus grows.
-enscrive search --query "how are auth tokens minted" --score-threshold 0.50
+enscrive search --query "how are auth tokens minted" --corpus <CORPUS_ID> --score-threshold 0.50
 ```
 
 Leaving `--score-threshold` unset returns the top `--limit` matches ranked by score, which is the right default for most retrieval — including agent memory, where a weak-but-relevant hit still beats no context at all. Reach for a threshold when you specifically need "return nothing rather than something marginal".
