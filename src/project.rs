@@ -327,7 +327,8 @@ enscrive search \
   --output json
 ```
 
-Omit `--corpus` to search every corpus in this project:
+Omit `--corpus` to search across this project's whole memory rather than
+one corpus:
 
 ```sh
 enscrive search --query "why did we drop the fragment gate" --output json
@@ -371,6 +372,208 @@ a human can browse the same memory.
   you want is not here, run `enscrive <command> --help` — do not guess.
 "#
     )
+}
+
+/// Options for `enscrive project init`.
+#[derive(Debug, Clone)]
+pub struct InitOptions {
+    /// Project/tenant name. Defaults to the sanitized directory name.
+    pub name: Option<String>,
+    /// Directory to initialize. Defaults to the working directory.
+    pub dir: Option<PathBuf>,
+    /// Which self-managed stack profile to create the tenant on.
+    pub profile: Option<String>,
+    /// Deliberately share a tenant that already exists under this name.
+    pub adopt_existing: bool,
+}
+
+/// `enscrive project init` — make Enscrive live in this project.
+///
+/// Creates (or loads) this project's own tenant on the running local
+/// stack, stores its API key in the per-user key store, and drops the
+/// committable `.enscrive/` marker: `config.toml` + `AGENT.md`.
+///
+/// ADR §7 acceptance: "in a fresh dir → isolated tenant + `.enscrive/`
+/// marker (committable config + AGENT.md, key not committed) + celebratory
+/// output naming tenant + portal."
+pub async fn init(opts: InitOptions) -> Result<serde_json::Value, String> {
+    let root = match opts.dir {
+        Some(dir) => dir,
+        None => std::env::current_dir().map_err(|e| format!("resolve working directory: {e}"))?,
+    };
+    if !root.is_dir() {
+        return Err(format!("'{}' is not a directory", root.display()));
+    }
+
+    let existing = read_existing_marker(&root)?;
+
+    // The name is fixed by an existing marker: re-running init in an
+    // initialized project must re-target the SAME tenant, never silently
+    // create a second one under a different derived name.
+    let name = match (&opts.name, &existing) {
+        (Some(explicit), Some(marker)) if sanitize_project_name(explicit)? != marker.project.name => {
+            return Err(format!(
+                "this directory is already initialized as project '{}' (tenant '{}'). \
+                 Renaming a project's tenant is not supported — remove {}/{} and re-run \
+                 `enscrive project init --name {explicit}` to bind it to a different tenant.",
+                marker.project.name,
+                marker.project.tenant_name,
+                MARKER_DIR,
+                MARKER_FILE,
+            ));
+        }
+        (Some(explicit), _) => sanitize_project_name(explicit)?,
+        (None, Some(marker)) => marker.project.name.clone(),
+        (None, None) => {
+            let dir_name = root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    format!(
+                        "cannot derive a project name from '{}' — pass one with \
+                         `enscrive project init --name <name>`",
+                        root.display()
+                    )
+                })?;
+            sanitize_project_name(dir_name)?
+        }
+    };
+
+    let profile_name = profile_name_for(&name);
+    // Re-running init in an already-initialized project is idempotent, so
+    // it must not trip the shared-tenant guard against its own tenant.
+    let adopt_existing = opts.adopt_existing || existing.is_some();
+
+    let tenant = crate::local::bootstrap_project_tenant(
+        opts.profile.as_deref(),
+        &name,
+        &profile_name,
+        adopt_existing,
+    )
+    .await?;
+
+    if let Some(marker) = &existing
+        && marker.project.tenant_id != tenant.tenant_id
+    {
+        return Err(format!(
+            "this directory is bound to tenant {} but the stack resolved '{}' to tenant {}. \
+             The stack was likely reset. Remove {}/{} and re-run `enscrive project init` to \
+             rebind this project.",
+            marker.project.tenant_id,
+            name,
+            tenant.tenant_id,
+            MARKER_DIR,
+            MARKER_FILE,
+        ));
+    }
+
+    let marker = ProjectMarker {
+        version: MARKER_VERSION,
+        project: ProjectSection {
+            name: name.clone(),
+            tenant_id: tenant.tenant_id.clone(),
+            tenant_name: tenant.tenant_name.clone(),
+            endpoint: tenant.endpoint.clone(),
+            profile: tenant.profile_name.clone(),
+        },
+    };
+    let (config_path, agent_path) = write_marker(&root, &marker)?;
+
+    Ok(serde_json::json!({
+        "project": name,
+        "project_root": root.display().to_string(),
+        "tenant_id": tenant.tenant_id,
+        "tenant_name": tenant.tenant_name,
+        "environment_id": tenant.environment_id,
+        "environment_name": tenant.environment_name,
+        "endpoint": tenant.endpoint,
+        "portal": tenant.portal_url,
+        "created_tenant": tenant.created_tenant,
+        "already_initialized": existing.is_some(),
+        "stack_profile": tenant.stack_profile_name,
+        // The NAME of the key store entry. The key itself is never
+        // returned, printed, or written to the marker (ADR §5).
+        "api_key_profile": tenant.profile_name,
+        "marker": {
+            "config": config_path.display().to_string(),
+            "agent_doc": agent_path.display().to_string(),
+            "committable": true,
+            "contains_api_key": false,
+        },
+        "agent_commands": {
+            "remember": "enscrive ingest documents --corpus-id <CORPUS_ID> --content \"...\"",
+            "recall": "enscrive search --query \"...\"",
+            "retire": "enscrive corpus document delete --corpus-id <CORPUS_ID> --document-id <DOCUMENT_ID>",
+        },
+    }))
+}
+
+/// Read this directory's own marker, if it has one. Deliberately does NOT
+/// walk up: `enscrive project init` in a subdirectory of an existing
+/// project initializes *that subdirectory* as its own project.
+fn read_existing_marker(root: &Path) -> Result<Option<ProjectMarker>, String> {
+    let path = marker_path(root);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    read_marker(&path).map(Some)
+}
+
+/// The celebratory summary, speaking to both audiences (ADR §4): "For your
+/// agents" (remember / recall / retire + the dropped `AGENT.md`) and "For
+/// you" (the portal). Names the tenant and the portal so the developer sees
+/// that their project now has a memory.
+pub fn print_init_summary(data: &serde_json::Value) {
+    let field = |key: &str| data.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    let name = field("project");
+    let reinitialized = data
+        .get("already_initialized")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let adopted = !data
+        .get("created_tenant")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    println!();
+    if reinitialized {
+        println!("  Enscrive is live in {name} — marker refreshed.");
+    } else if adopted {
+        println!("  Enscrive is live in {name}, sharing the existing '{}' memory.", field("tenant_name"));
+    } else {
+        println!("  Enscrive is live in {name}. This project now has a memory.");
+    }
+    println!();
+    println!("  Tenant   {} ({})", field("tenant_name"), field("tenant_id"));
+    println!("  Endpoint {}", field("endpoint"));
+    println!();
+    println!("  For your agents");
+    println!(
+        "    They will find the usage contract at {}/{}.",
+        MARKER_DIR, AGENT_FILE
+    );
+    println!("    Any enscrive command run in this tree targets this project automatically —");
+    println!("    no API key, no --profile, no --endpoint.");
+    println!();
+    println!("      remember   enscrive ingest documents --corpus-id <CORPUS_ID> --content \"...\"");
+    println!("      recall     enscrive search --query \"...\"");
+    println!(
+        "      retire     enscrive corpus document delete --corpus-id <CORPUS_ID> --document-id <DOCUMENT_ID>"
+    );
+    println!();
+    println!("  For you");
+    println!("    Portal   {}", field("portal"));
+    println!("    Browse and search the same memory your agents are writing.");
+    println!();
+    println!(
+        "  Commit {}/ — it holds no secrets. Your API key stays in your",
+        MARKER_DIR
+    );
+    println!(
+        "  per-user key store as profile '{}'.",
+        field("api_key_profile")
+    );
+    println!();
 }
 
 #[cfg(test)]
