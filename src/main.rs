@@ -461,7 +461,13 @@ struct SearchArgs {
     #[arg(long, default_value_t = false)]
     include_vectors: bool,
 
-    /// Optional score threshold
+    /// Minimum similarity score a result must reach. Leave unset for most
+    /// retrieval — you get the top --limit matches ranked by score.
+    /// Relevant matches usually score near the MIDDLE of the range, not
+    /// near 1.0, so a guessed 0.8-0.9 filters out good results and looks
+    /// like "search is broken". Calibrate against your own corpus: search
+    /// unfiltered first, read the scores you get, then set this just below
+    /// where relevance stops. See "Search score calibration" in the README.
     #[arg(long)]
     score_threshold: Option<f32>,
 
