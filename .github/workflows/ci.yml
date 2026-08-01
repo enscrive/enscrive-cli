@@ -477,11 +477,8 @@ jobs:
 
           # ── The ADR §7.4 assertion: beta's own corpus must not contain
           # alpha's memory. Corpus-scoped, matching how every other search
-          # in this job runs.
-          #
-          # `|| true` then dump: in --output json the failure envelope goes
-          # to STDOUT, so a bare redirect swallows the error into the file
-          # and `set -e` kills the step with nothing on the console.
+          # in this job runs. Via the shared wrapper, which dumps the
+          # response and leaves the envelope for us to assert on.
           "$GITHUB_WORKSPACE/.github/scripts/es-search.sh" /tmp/beta-scoped.json \
             --query "what is the Wave4a canary phrase" --corpus "$beta_corpus"
           # Liveness first, for the same reason as the retire step: the
