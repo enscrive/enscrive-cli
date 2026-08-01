@@ -45,8 +45,10 @@ source (below) works everywhere Rust does.
 # Override install directory (default: ~/.local/bin)
 curl -fsSL https://install.enscrive.io/install.sh | sh -s -- --prefix=/usr/local/bin
 
-# Cross-machine install (override platform detection)
-curl -fsSL https://install.enscrive.io/install.sh | sh -s -- --target=aarch64-apple-darwin
+# Override platform detection. Only resolves for a target the manifest
+# actually publishes — today that is x86_64-unknown-linux-gnu alone, so
+# this flag is here for cross-machine prep once more targets ship.
+curl -fsSL https://install.enscrive.io/install.sh | sh -s -- --target=x86_64-unknown-linux-gnu
 
 # Skip cosign bundle verification (debug only)
 curl -fsSL https://install.enscrive.io/install.sh | sh -s -- --insecure
