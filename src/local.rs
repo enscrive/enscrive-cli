@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 
+use crate::project;
+
 const DEFAULT_LOCAL_PROFILE: &str = "local";
 const DEFAULT_MANAGED_PROFILE: &str = "managed";
 const DEFAULT_LEPTOS_OUTPUT_NAME: &str = "enscrive-developer";
@@ -459,18 +461,86 @@ struct LocalBootstrapResponse {
     issued_api_key: bool,
 }
 
+/// Resolve the endpoint + API key every `/v1` command runs against.
+///
+/// app-memory epic (ADR §3.2): a `.enscrive/` project marker found by
+/// walking up from the working directory selects *that project's* tenant,
+/// so an agent working inside a project needs zero global config. The
+/// precedence, highest first:
+///
+/// 1. `--api-key` / `ENSCRIVE_API_KEY`, `--endpoint` / `ENSCRIVE_BASE_URL`
+///    — per-value overrides, always win.
+/// 2. `--profile` / `ENSCRIVE_PROFILE` — an explicit profile outranks the
+///    marker, so a developer standing in a project can still aim a command
+///    at their managed tenant.
+/// 3. The `.enscrive/` marker.
+/// 4. The default profile.
+///
+/// With no marker present this is byte-for-byte the pre-app-memory
+/// behavior: step 3 drops out and the function is steps 1, 2, 4.
 pub fn resolve_api_context(
     profile_name: Option<&str>,
     endpoint_override: Option<String>,
     api_key_override: Option<String>,
 ) -> Result<ResolvedApiContext, String> {
     let profiles = load_profiles()?;
-    let selected_name = selected_profile_name(profile_name, &profiles);
+    let project = project::discover()?;
+    resolve_api_context_with(
+        &profiles,
+        profile_name,
+        endpoint_override,
+        api_key_override,
+        project.as_ref().map(|found| &found.marker),
+    )
+}
+
+/// The precedence rules of [`resolve_api_context`], with the profile store
+/// and the discovered marker passed in.
+///
+/// Split out so the precedence tests are pure: they neither mutate the
+/// process-global working directory (racy under `cargo test`'s thread pool)
+/// nor touch `$XDG_CONFIG_HOME`.
+fn resolve_api_context_with(
+    profiles: &ProfilesFile,
+    profile_name: Option<&str>,
+    endpoint_override: Option<String>,
+    api_key_override: Option<String>,
+    marker: Option<&project::ProjectMarker>,
+) -> Result<ResolvedApiContext, String> {
+    let explicit_profile = profile_name
+        .map(ToOwned::to_owned)
+        .or_else(|| env::var("ENSCRIVE_PROFILE").ok())
+        .filter(|name| !name.trim().is_empty());
+
+    // An explicit profile outranks the marker; the marker outranks the
+    // default profile.
+    let (selected_name, marker_in_effect) = match (explicit_profile, marker) {
+        (Some(name), _) => (Some(name), None),
+        (None, Some(marker)) => (Some(marker.project.profile.clone()), Some(marker)),
+        (None, None) => (profiles.default_profile.clone(), None),
+    };
+
     let selected_profile = selected_name
         .as_ref()
         .and_then(|name| profiles.profiles.get(name).cloned());
 
+    // A marker naming a profile the key store does not have is a broken
+    // project, not a reason to silently fall back to the default profile —
+    // that would write this project's memories into another tenant.
+    if let (Some(marker), None) = (marker_in_effect, selected_profile.as_ref()) {
+        return Err(format!(
+            "project '{}' references CLI profile '{}', which is not in {}. \
+             Re-run `enscrive project init` in this project to re-issue its API key.",
+            marker.project.name,
+            marker.project.profile,
+            profiles_path_for_display()
+        ));
+    }
+
     let endpoint = endpoint_override
+        .or_else(|| {
+            marker_in_effect.map(|marker| marker.project.endpoint.clone())
+        })
         .or_else(|| {
             selected_profile
                 .as_ref()
@@ -486,6 +556,285 @@ pub fn resolve_api_context(
         profile_name: selected_name,
         profile_mode: selected_profile.map(|profile| profile.mode),
     })
+}
+
+/// `~/.config/enscrive/profiles.toml`, for error messages. Falls back to
+/// the literal path when `$HOME` is unset — the message is advisory.
+fn profiles_path_for_display() -> String {
+    cli_home()
+        .map(|home| home.config_root.join("profiles.toml").display().to_string())
+        .unwrap_or_else(|_| "~/.config/enscrive/profiles.toml".to_string())
+}
+
+/// What `enscrive project init` needs back from the local stack after
+/// creating (or loading) this project's tenant.
+#[derive(Debug, Clone)]
+pub struct ProjectTenant {
+    pub tenant_id: String,
+    pub tenant_name: String,
+    pub environment_id: String,
+    pub environment_name: String,
+    /// Base URL of the enscrive-developer serving this tenant.
+    pub endpoint: String,
+    /// The `profiles.toml` entry the issued API key was stored under.
+    pub profile_name: String,
+    /// The self-managed profile whose stack this tenant lives on.
+    pub stack_profile_name: String,
+    /// Local portal URL for a human to browse this memory.
+    pub portal_url: String,
+    /// False when `/local/bootstrap` loaded a tenant that already existed
+    /// under this name rather than creating a new one.
+    pub created_tenant: bool,
+}
+
+/// Create (or load) a named tenant for a project on the running local
+/// stack, issue it its own API key, and store that key in the per-user key
+/// store under `project_profile_name`.
+///
+/// app-memory epic — ADR §3.1 (per-project tenancy on ONE shared local
+/// stack) and §3.3 (the key lives in the per-user key store, never in the
+/// project marker). Key custody stays in this module, which already owns
+/// `profiles.toml`; the caller only ever sees the profile *name*.
+///
+/// `adopt_existing` decides what happens when the tenant name is already
+/// taken. `/local/bootstrap` is a load-or-create keyed on
+/// `(developer_subject, tenant_name)` (enscrive-developer #228), so a
+/// second project that happens to share a directory name would silently
+/// land in the first project's memory — ADR §5 FORBIDDEN. Default is to
+/// refuse; the caller opts in explicitly.
+pub async fn bootstrap_project_tenant(
+    stack_profile_name: Option<&str>,
+    tenant_name: &str,
+    project_profile_name: &str,
+    adopt_existing: bool,
+) -> Result<ProjectTenant, String> {
+    let mut profiles = load_profiles()?;
+    // Each cause gets its own message and its own next command; do not
+    // reuse `load_local_profile`'s generic phrasing here.
+    let (stack_profile_name, stack_profile) = match selected_profile_name(
+        stack_profile_name,
+        &profiles,
+    ) {
+        None => {
+            return Err(
+                "no Enscrive stack is configured yet. Run `enscrive init --mode self-managed`, \
+                 then `enscrive start`, then re-run `enscrive project init`."
+                    .to_string(),
+            );
+        }
+        Some(name) => match profiles.profiles.get(&name).cloned() {
+            Some(profile) => (name, profile),
+            None => {
+                return Err(format!(
+                    "profile '{name}' is not in {}. Create it with \
+                     `enscrive init --mode self-managed --profile-name {name}`, or select an \
+                     existing profile with --profile.",
+                    profiles_path_for_display()
+                ));
+            }
+        },
+    };
+    let local = stack_profile.local.clone().ok_or_else(|| {
+        format!(
+            "profile '{stack_profile_name}' is a managed profile — per-project tenants are a \
+             self-managed local-stack feature. Run `enscrive init --mode self-managed` first, \
+             or select the local profile with --profile <name>."
+        )
+    })?;
+
+    // Preflight BEFORE any long-timeout call: a stopped stack must produce
+    // "run `enscrive start`", not a 90s Keycloak wait followed by a raw
+    // connection error.
+    ensure_local_stack_running(&stack_profile.endpoint, &local, &stack_profile_name).await?;
+
+    // The same Keycloak developer this stack's `enscrive start` bootstraps.
+    // Reusing that path is what makes every project tenant owned by ONE
+    // developer subject, so they all show up in the portal's tenant
+    // switcher (ADR tenancy model B).
+    let keycloak_user = bootstrap_keycloak(&local).await.map_err(|e| {
+        format!(
+            "could not reach the local identity service to resolve your developer account: {e}. \
+             Is the stack still starting? Check `enscrive status`."
+        )
+    })?;
+
+    let response = bootstrap_local_stack_named(
+        &stack_profile.endpoint,
+        &local,
+        &keycloak_user,
+        tenant_name,
+        &format!("{project_profile_name}-cli"),
+    )
+    .await?;
+
+    let api_key = validate_project_bootstrap(tenant_name, &response, adopt_existing)?;
+
+    // Key custody: the issued key goes into the per-user key store only.
+    profiles.version = PROFILE_VERSION;
+    profiles.profiles.insert(
+        project_profile_name.to_string(),
+        StoredProfile {
+            mode: "local".to_string(),
+            endpoint: stack_profile.endpoint.clone(),
+            api_key: Some(api_key),
+            local: None,
+        },
+    );
+    // Deliberately NOT touching `default_profile`: initializing a project
+    // must not silently re-aim every command run outside it.
+    save_profiles(&profiles)?;
+
+    Ok(ProjectTenant {
+        tenant_id: response.tenant_id,
+        tenant_name: response.tenant_name,
+        environment_id: response.environment_id,
+        environment_name: response.environment_name,
+        endpoint: stack_profile.endpoint.clone(),
+        profile_name: project_profile_name.to_string(),
+        stack_profile_name,
+        portal_url: format!("http://127.0.0.1:{}", local.ports.developer),
+        created_tenant: response.created_tenant,
+    })
+}
+
+/// Decide whether a `/local/bootstrap` response is a usable project
+/// tenant, returning the issued API key.
+///
+/// Three ways this legitimately fails, each with its own remedy:
+///
+/// - **The stack predates enscrive-developer #228.** Before that PR,
+///   `/local/bootstrap` looked a tenant up by `user_id` alone and returned
+///   the FIRST tenant the developer ever created, ignoring `tenant_name`.
+///   Against such a stack every project would silently share one memory.
+///   Detected by the name the response echoes, not by a version string.
+/// - **The name is already taken.** `/local/bootstrap` is a load-or-create
+///   on `(user_id, tenant_name)`, so two projects whose directories happen
+///   to share a name would land in one tenant — ADR §5 FORBIDDEN ("a
+///   project silently sharing another project's tenant"). Refused unless
+///   the caller asked for it.
+/// - **No key was issued**, leaving a tenant the CLI cannot authenticate to.
+fn validate_project_bootstrap(
+    tenant_name: &str,
+    response: &LocalBootstrapResponse,
+    adopt_existing: bool,
+) -> Result<String, String> {
+    if response.tenant_name != tenant_name {
+        return Err(format!(
+            "this local stack does not support per-project tenants: asked for tenant \
+             '{tenant_name}' and it returned '{}'. Update the stack \
+             (`enscrive stop`, then `enscrive init --mode self-managed --force-refetch`, then \
+             `enscrive start`) to pick up a build with multi-tenant local bootstrap.",
+            response.tenant_name
+        ));
+    }
+
+    if !response.created_tenant && !adopt_existing {
+        return Err(format!(
+            "a tenant named '{tenant_name}' already exists on this stack, so this project would \
+             share another project's memory. Give this project its own name with \
+             `enscrive project init --name <name>`, or pass --adopt-existing to deliberately \
+             share the '{tenant_name}' tenant."
+        ));
+    }
+
+    response.api_key.clone().ok_or_else(|| {
+        format!(
+            "the local stack resolved tenant '{tenant_name}' but issued no API key for it. \
+             Check the enscrive-developer log via `enscrive status`."
+        )
+    })
+}
+
+/// Fail with an actionable message when the local stack is not up.
+///
+/// ADR §6-P4 / dispatch requirement 4: `project init` against a stopped
+/// stack must say "run `enscrive start` first", never surface a raw
+/// connection error.
+async fn ensure_local_stack_running(
+    endpoint: &str,
+    local: &LocalProfile,
+    stack_profile_name: &str,
+) -> Result<(), String> {
+    let not_running = format!(
+        "the local Enscrive stack for profile '{stack_profile_name}' is not running. \
+         Run `enscrive start` first, then re-run `enscrive project init`."
+    );
+
+    if !tcp_is_open("127.0.0.1", local.ports.developer) {
+        return Err(not_running);
+    }
+    if !tcp_is_open("127.0.0.1", local.ports.keycloak) {
+        return Err(format!(
+            "the local Enscrive stack for profile '{stack_profile_name}' is only partly up \
+             (the identity service on port {} is not answering). Run `enscrive start`, \
+             then check `enscrive status`.",
+            local.ports.keycloak
+        ));
+    }
+
+    let health_url = format!("{}/health", endpoint.trim_end_matches('/'));
+    wait_for_http(&health_url, Duration::from_secs(15))
+        .await
+        .map_err(|_| not_running)
+}
+
+/// `/local/bootstrap` for a **named** project tenant.
+///
+/// Distinct from [`bootstrap_local_stack`], which bootstraps the profile's
+/// own default tenant from `local.bootstrap`: this one overrides
+/// `tenant_name` and `api_key_label` per project and always asks for a key,
+/// since a new project has none.
+async fn bootstrap_local_stack_named(
+    endpoint: &str,
+    local: &LocalProfile,
+    keycloak_user: &LocalKeycloakUser,
+    tenant_name: &str,
+    api_key_label: &str,
+) -> Result<LocalBootstrapResponse, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("build local bootstrap client: {e}"))?;
+
+    let response = client
+        .post(format!(
+            "{}/local/bootstrap",
+            endpoint.trim_end_matches('/')
+        ))
+        .json(&LocalBootstrapRequest {
+            secret: local.bootstrap.secret.clone(),
+            developer_subject: keycloak_user.subject.clone(),
+            developer_email: keycloak_user.email.clone(),
+            developer_name: local.bootstrap.developer_name.clone(),
+            tenant_name: tenant_name.to_string(),
+            environment_name: local.bootstrap.environment_name.clone(),
+            api_key_label: api_key_label.to_string(),
+            issue_api_key: true,
+        })
+        .send()
+        .await
+        .map_err(|e| {
+            format!(
+                "could not reach the local stack at {endpoint} to create the project tenant: {e}. \
+                 Run `enscrive start` and check `enscrive status`."
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unable to read error body".to_string());
+        return Err(format!(
+            "the local stack refused to create tenant '{tenant_name}' (HTTP {status}): {body}"
+        ));
+    }
+
+    response
+        .json::<LocalBootstrapResponse>()
+        .await
+        .map_err(|e| format!("parse local bootstrap response: {e}"))
 }
 
 pub async fn init_managed(opts: ManagedInitOptions) -> Result<Value, String> {
@@ -3614,6 +3963,371 @@ mod tests {
         assert_eq!(resolved.endpoint, "https://api.enscrive.io");
         assert_eq!(resolved.api_key.as_deref(), Some("secret"));
         assert_eq!(resolved.profile_name.as_deref(), Some("managed"));
+    }
+
+    // ── app-memory: `.enscrive/` marker precedence (ADR §3.2) ───────────
+    //
+    // These drive `resolve_api_context_with` rather than the cwd-reading
+    // `resolve_api_context`, so they never mutate the process-global
+    // working directory. Walk-up discovery itself is covered by
+    // `project::tests::discover_walks_up_parent_directories`.
+
+    fn precedence_profiles() -> ProfilesFile {
+        let mut profiles = ProfilesFile {
+            version: PROFILE_VERSION,
+            default_profile: Some("local".to_string()),
+            profiles: BTreeMap::new(),
+        };
+        profiles.profiles.insert(
+            "local".to_string(),
+            StoredProfile {
+                mode: "local".to_string(),
+                endpoint: "http://127.0.0.1:3000".to_string(),
+                api_key: Some("default-profile-key".to_string()),
+                local: None,
+            },
+        );
+        profiles.profiles.insert(
+            "managed".to_string(),
+            StoredProfile {
+                mode: "managed".to_string(),
+                endpoint: "https://api.enscrive.io".to_string(),
+                api_key: Some("managed-key".to_string()),
+                local: None,
+            },
+        );
+        profiles.profiles.insert(
+            "project-my-app".to_string(),
+            StoredProfile {
+                mode: "local".to_string(),
+                endpoint: "http://127.0.0.1:3000".to_string(),
+                api_key: Some("project-key".to_string()),
+                local: None,
+            },
+        );
+        profiles
+    }
+
+    fn precedence_marker() -> project::ProjectMarker {
+        project::ProjectMarker {
+            version: project::MARKER_VERSION,
+            project: project::ProjectSection {
+                name: "my-app".to_string(),
+                tenant_id: "11111111-2222-3333-4444-555555555555".to_string(),
+                tenant_name: "my-app".to_string(),
+                endpoint: "http://127.0.0.1:3000".to_string(),
+                profile: "project-my-app".to_string(),
+            },
+        }
+    }
+
+    /// No marker → unchanged behavior: the default profile.
+    #[test]
+    fn resolver_without_marker_uses_default_profile() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let resolved =
+            resolve_api_context_with(&precedence_profiles(), None, None, None, None).unwrap();
+        assert_eq!(resolved.profile_name.as_deref(), Some("local"));
+        assert_eq!(resolved.api_key.as_deref(), Some("default-profile-key"));
+    }
+
+    /// Marker beats the default profile — the whole point of the epic.
+    #[test]
+    fn resolver_marker_beats_default_profile() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let marker = precedence_marker();
+        let resolved =
+            resolve_api_context_with(&precedence_profiles(), None, None, None, Some(&marker))
+                .unwrap();
+        assert_eq!(resolved.profile_name.as_deref(), Some("project-my-app"));
+        assert_eq!(resolved.api_key.as_deref(), Some("project-key"));
+        assert_eq!(resolved.endpoint, "http://127.0.0.1:3000");
+    }
+
+    /// An explicit `--profile` outranks the marker.
+    #[test]
+    fn resolver_explicit_profile_beats_marker() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let marker = precedence_marker();
+        let resolved = resolve_api_context_with(
+            &precedence_profiles(),
+            Some("managed"),
+            None,
+            None,
+            Some(&marker),
+        )
+        .unwrap();
+        assert_eq!(resolved.profile_name.as_deref(), Some("managed"));
+        assert_eq!(resolved.api_key.as_deref(), Some("managed-key"));
+        assert_eq!(resolved.endpoint, "https://api.enscrive.io");
+    }
+
+    /// `ENSCRIVE_PROFILE` outranks the marker the same way `--profile`
+    /// does. (In the binary clap already folds the env var into
+    /// `profile_name`; this covers the bare-env path.)
+    #[test]
+    fn resolver_env_profile_beats_marker() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::set_var("ENSCRIVE_PROFILE", "managed") };
+
+        let marker = precedence_marker();
+        let resolved =
+            resolve_api_context_with(&precedence_profiles(), None, None, None, Some(&marker));
+
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+        let resolved = resolved.unwrap();
+        assert_eq!(resolved.profile_name.as_deref(), Some("managed"));
+        assert_eq!(resolved.api_key.as_deref(), Some("managed-key"));
+    }
+
+    /// `--api-key` / `ENSCRIVE_API_KEY` is the top of the precedence
+    /// ladder: it wins even inside a project.
+    #[test]
+    fn resolver_explicit_key_beats_marker() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let marker = precedence_marker();
+        let resolved = resolve_api_context_with(
+            &precedence_profiles(),
+            None,
+            Some("https://elsewhere.example".to_string()),
+            Some("flag-key".to_string()),
+            Some(&marker),
+        )
+        .unwrap();
+        assert_eq!(resolved.api_key.as_deref(), Some("flag-key"));
+        assert_eq!(resolved.endpoint, "https://elsewhere.example");
+        // The marker still selected which profile is "active" — only the
+        // overridden values changed.
+        assert_eq!(resolved.profile_name.as_deref(), Some("project-my-app"));
+    }
+
+    // ── app-memory: project tenant bootstrap (ADR §3.1, §5) ─────────────
+
+    fn bootstrap_response(tenant_name: &str, created: bool) -> LocalBootstrapResponse {
+        LocalBootstrapResponse {
+            user_id: "user-1".to_string(),
+            tenant_id: "tenant-1".to_string(),
+            tenant_name: tenant_name.to_string(),
+            environment_id: "env-1".to_string(),
+            environment_name: "development".to_string(),
+            api_key_id: Some("key-1".to_string()),
+            api_key: Some("issued-project-key".to_string()),
+            created_tenant: created,
+            created_environment: true,
+            issued_api_key: true,
+        }
+    }
+
+    #[test]
+    fn project_bootstrap_accepts_a_freshly_created_tenant() {
+        let response = bootstrap_response("my-app", true);
+        assert_eq!(
+            validate_project_bootstrap("my-app", &response, false).unwrap(),
+            "issued-project-key"
+        );
+    }
+
+    /// A stack predating enscrive-developer #228 keys the lookup on
+    /// `user_id` alone and hands back whatever tenant already existed. Left
+    /// undetected, every project on that stack shares one memory.
+    #[test]
+    fn project_bootstrap_detects_a_pre_multitenant_stack() {
+        let response = bootstrap_response("Local Developer", false);
+        let err = validate_project_bootstrap("my-app", &response, false).unwrap_err();
+        assert!(
+            err.contains("does not support per-project tenants")
+                && err.contains("Local Developer")
+                && err.contains("enscrive start"),
+            "error must name the mismatch and the upgrade path: {err}"
+        );
+    }
+
+    /// ADR §5 FORBIDDEN: "a project silently sharing another project's
+    /// tenant". Two directories named `api` must not collide into one
+    /// memory without the developer saying so.
+    #[test]
+    fn project_bootstrap_refuses_a_name_collision_by_default() {
+        let response = bootstrap_response("api", false);
+        let err = validate_project_bootstrap("api", &response, false).unwrap_err();
+        assert!(
+            err.contains("already exists") && err.contains("--adopt-existing"),
+            "error must offer both remedies: {err}"
+        );
+    }
+
+    #[test]
+    fn project_bootstrap_allows_an_adopted_tenant() {
+        let response = bootstrap_response("api", false);
+        assert_eq!(
+            validate_project_bootstrap("api", &response, true).unwrap(),
+            "issued-project-key"
+        );
+    }
+
+    #[test]
+    fn project_bootstrap_rejects_a_tenant_with_no_key() {
+        let mut response = bootstrap_response("my-app", true);
+        response.api_key = None;
+        let err = validate_project_bootstrap("my-app", &response, false).unwrap_err();
+        assert!(err.contains("issued no API key"), "unexpected: {err}");
+    }
+
+    /// Requirement 4 of the dispatch brief: a stopped stack produces an
+    /// actionable message naming `enscrive start`, never a raw connection
+    /// error. Port 1 is reserved and never listening.
+    #[tokio::test]
+    async fn stopped_stack_names_enscrive_start() {
+        let mut local = sample_local_profile();
+        local.ports.developer = 1;
+        local.ports.keycloak = 1;
+
+        let err = ensure_local_stack_running("http://127.0.0.1:1", &local, "local")
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("is not running") && err.contains("enscrive start"),
+            "error must tell the developer to start the stack: {err}"
+        );
+        assert!(
+            !err.contains("Connection refused") && !err.contains("os error"),
+            "error must not leak a raw transport error: {err}"
+        );
+    }
+
+    /// The request body `/local/bootstrap` receives is the cross-repo
+    /// contract with enscrive-developer #228 — `tenant_name` is what keys
+    /// the per-project tenant, and a new project must always be issued its
+    /// own key. Asserted against a real socket rather than by inspection.
+    #[tokio::test]
+    async fn bootstrap_request_carries_the_project_tenant_name() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+
+            // Headers first. The request may arrive across several reads,
+            // so keep going until the blank line shows up — breaking early
+            // would hand the assertions a truncated body.
+            let (head_end, content_length) = loop {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break (raw.len(), 0);
+                }
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw);
+                if let Some(idx) = text.find("\r\n\r\n") {
+                    let declared = text[..idx]
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            if name.trim().eq_ignore_ascii_case("content-length") {
+                                value.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    break (idx + 4, declared);
+                }
+            };
+
+            // Then exactly Content-Length bytes of body.
+            while raw.len() - head_end < content_length {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..n]);
+            }
+
+            let text = String::from_utf8_lossy(&raw).to_string();
+            let path = text.lines().next().unwrap_or("").to_string();
+            let body = text[head_end..].to_string();
+
+            let response = serde_json::to_string(&json!({
+                "user_id": "u", "tenant_id": "t", "tenant_name": "my-app",
+                "environment_id": "e", "environment_name": "development",
+                "api_key_id": "k", "api_key": "issued-project-key",
+                "created_tenant": true, "created_environment": true, "issued_api_key": true,
+            }))
+            .unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        response.len(),
+                        response
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            (path, body)
+        });
+
+        let local = sample_local_profile();
+        let keycloak_user = LocalKeycloakUser {
+            subject: "kc-subject-1".to_string(),
+            email: "developer@local.enscrive".to_string(),
+        };
+        let response = bootstrap_local_stack_named(
+            &format!("http://127.0.0.1:{port}"),
+            &local,
+            &keycloak_user,
+            "my-app",
+            "project-my-app-cli",
+        )
+        .await
+        .expect("bootstrap should succeed against the mock stack");
+
+        let (path, body) = server.await.unwrap();
+        assert!(path.starts_with("POST /local/bootstrap "), "got: {path}");
+
+        let sent: Value = serde_json::from_str(&body).expect("request body is JSON");
+        assert_eq!(sent["tenant_name"], "my-app", "the per-project tenant key");
+        assert_eq!(sent["developer_subject"], "kc-subject-1");
+        assert_eq!(
+            sent["issue_api_key"], true,
+            "a new project has no key yet, so bootstrap must always issue one"
+        );
+        assert_eq!(sent["api_key_label"], "project-my-app-cli");
+        assert_eq!(sent["environment_name"], "development");
+
+        assert_eq!(response.tenant_name, "my-app");
+        assert_eq!(response.api_key.as_deref(), Some("issued-project-key"));
+    }
+
+    /// A marker pointing at a profile the key store lost must fail loudly:
+    /// falling through to the default profile would write this project's
+    /// memories into another tenant.
+    #[test]
+    fn resolver_marker_with_missing_profile_is_an_error() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let mut profiles = precedence_profiles();
+        profiles.profiles.remove("project-my-app");
+        let marker = precedence_marker();
+
+        let err = resolve_api_context_with(&profiles, None, None, None, Some(&marker)).unwrap_err();
+        assert!(
+            err.contains("project-my-app") && err.contains("enscrive project init"),
+            "error must name the missing profile and the fix: {err}"
+        );
     }
 
     // Intentionally holds `_guard` across the `.await` below: it serializes

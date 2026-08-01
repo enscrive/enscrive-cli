@@ -7,6 +7,7 @@ mod license;
 mod local;
 mod output;
 mod preflight;
+mod project;
 mod release_channel;
 mod revisions;
 mod segmentation;
@@ -74,6 +75,17 @@ struct Cli {
     command: Commands,
 }
 
+/// The real clap command tree, for tests that must assert an invocation is
+/// something this binary actually accepts.
+///
+/// `project::tests::agent_doc_only_teaches_real_commands` uses it to hold
+/// the generated `.enscrive/AGENT.md` to the ADR §5 contract: the doc may
+/// not teach an agent a command or flag the CLI does not have.
+#[cfg(test)]
+pub fn command_for_test() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize a managed or self-managed Enscrive profile
@@ -87,6 +99,15 @@ enum Commands {
 
     /// Show resolved profile and local stack status
     Status(StatusArgs),
+
+    /// Per-project memory — give the project in this directory its own
+    /// isolated Enscrive tenant, so any agent working here can remember,
+    /// recall, and retire without global config. Design of record: ADR
+    /// ENSCRIVE-CLI-APP-MEMORY-2026-07-31.
+    Project {
+        #[command(subcommand)]
+        sub: ProjectSubcommand,
+    },
 
     /// Check stack health through /health
     Health,
@@ -392,6 +413,35 @@ struct StopArgs {
 
 #[derive(Args)]
 struct StatusArgs {}
+
+#[derive(Subcommand)]
+enum ProjectSubcommand {
+    /// Make Enscrive live in this project: create its own isolated tenant
+    /// on the running local stack, store that tenant's API key in your
+    /// per-user key store, and drop a committable `.enscrive/` marker
+    /// (config.toml + AGENT.md). Every enscrive command run anywhere in
+    /// this directory tree then targets this project's memory.
+    Init(ProjectInitArgs),
+}
+
+#[derive(Args)]
+struct ProjectInitArgs {
+    /// Project and tenant name. Defaults to this directory's name,
+    /// sanitized.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// Directory to initialize (default: the current directory)
+    #[arg(long)]
+    dir: Option<std::path::PathBuf>,
+
+    /// Deliberately bind this project to a tenant that already exists
+    /// under this name, sharing that memory. Without this flag a name
+    /// collision is refused, so two projects can never silently share one
+    /// tenant.
+    #[arg(long = "adopt-existing")]
+    adopt_existing: bool,
+}
 
 #[derive(Args)]
 struct SearchArgs {
@@ -3954,6 +4004,10 @@ mod tier_annotation_tests {
 fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
     use evals2::{Datasets2Subcommand, EvalDefsSubcommand, EvalRunsSubcommand, VoiceDiff2Subcommand};
     let key: &str = match cmd {
+        // skip-list: `project init` talks to the local stack's
+        // /local/bootstrap, not to a /v1 endpoint, so it carries no
+        // deployment-tier or plan row in v1-surface-contract.toml.
+        Commands::Project { .. } => return None,
         Commands::Search(_) => "search",
         Commands::Complete(_) => "complete",
         Commands::Agents { sub } => match sub {
@@ -4287,6 +4341,9 @@ async fn main() {
         | Commands::Start(_)
         | Commands::Stop(_)
         | Commands::Status(_) => None,
+        // `project init` resolves the local stack profile itself — it runs
+        // BEFORE this project has an API key to resolve.
+        Commands::Project { .. } => None,
         Commands::Health => None,
         // ENS-751: GET /v1/ratecard is public (no API-key auth) — resolved
         // directly inside the handler, same pattern as Health.
@@ -4466,12 +4523,35 @@ async fn main() {
                     (plan_val, license_obj)
                 };
 
+                // app-memory (ADR §3.5): when run inside a project, status
+                // names the project tenant its commands are actually
+                // targeting, and the portal where a human can browse it.
+                // A malformed marker is reported in-band rather than
+                // failing `status` — status is the tool you reach for when
+                // something is wrong.
+                let project_field = match project::discover() {
+                    Ok(Some(found)) => Some(json!({
+                        "name": found.marker.project.name,
+                        "root": found.root.display().to_string(),
+                        "marker": found.marker_path.display().to_string(),
+                        "tenant_id": found.marker.project.tenant_id,
+                        "tenant_name": found.marker.project.tenant_name,
+                        "endpoint": found.marker.project.endpoint,
+                        "api_key_profile": found.marker.project.profile,
+                    })),
+                    Ok(None) => None,
+                    Err(e) => Some(json!({ "error": e })),
+                };
+
                 if let Some(obj) = data.as_object_mut() {
                     obj.insert("plan".to_string(), plan.clone());
                     if mode != "managed"
                         && let Some(lic) = license_field
                     {
                         obj.insert("license".to_string(), lic);
+                    }
+                    if let Some(project) = project_field.clone() {
+                        obj.insert("project".to_string(), project);
                     }
                 }
 
@@ -4499,6 +4579,27 @@ async fn main() {
                         };
                         println!("Plan: {plan_str}  License: {license_summary}");
                         println!("Mode: {mode}");
+                        if let Some(project) = &project_field {
+                            match project.get("error").and_then(|v| v.as_str()) {
+                                Some(error) => println!("Project: unreadable — {error}"),
+                                None => {
+                                    let get = |key: &str| {
+                                        project.get(key).and_then(|v| v.as_str()).unwrap_or("")
+                                    };
+                                    println!(
+                                        "Project: {}  Tenant: {} ({})",
+                                        get("name"),
+                                        get("tenant_name"),
+                                        get("tenant_id")
+                                    );
+                                    // The portal is served by the local
+                                    // stack this project's endpoint points
+                                    // at — the same URL `project init`
+                                    // celebrated.
+                                    println!("Portal: {}", get("endpoint"));
+                                }
+                            }
+                        }
                     }
                     OutputFormat::Json => {}
                 }
@@ -4506,6 +4607,29 @@ async fn main() {
                 CliResponse::success("status", data).emit(fmt)
             }
             Err(e) => CliResponse::fail("status", e, FailureClass::Bug, EXIT_FAILURE).emit(fmt),
+        },
+        Commands::Project { sub } => match sub {
+            ProjectSubcommand::Init(args) => {
+                match project::init(project::InitOptions {
+                    name: args.name.clone(),
+                    dir: args.dir.clone(),
+                    profile: cli.profile.clone(),
+                    adopt_existing: args.adopt_existing,
+                })
+                .await
+                {
+                    Ok(data) => {
+                        if fmt == OutputFormat::Human {
+                            project::print_init_summary(&data);
+                        }
+                        CliResponse::success("project init", data).emit(fmt)
+                    }
+                    Err(e) => {
+                        CliResponse::fail("project init", e, FailureClass::Bug, EXIT_CONFIG)
+                            .emit(fmt)
+                    }
+                }
+            }
         },
         Commands::Health => {
             // Probe /v1/health, not /health. The edge /health can return 200 even
@@ -9204,6 +9328,10 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         "stop",
         "status",
         "health",
+        // app-memory: creates this project's tenant through the local
+        // stack's /local/bootstrap, not a /v1 endpoint, so it carries no
+        // deployment-tier or plan row.
+        "project init",
         // CLI-TIER-007/008/009: license subcommands write locally; no /v1 endpoint.
         "license activate",
         "license status",
