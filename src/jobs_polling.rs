@@ -137,7 +137,15 @@ pub async fn await_job_terminal<P: JobPoller>(
     poll_path: &str,
     cfg: PollConfig,
 ) -> PollOutcome {
-    let deadline = std::time::Instant::now() + cfg.timeout;
+    // `tokio::time::Instant`, deliberately, to match the clock the delays
+    // below sleep on. Outside a test runtime this is the same monotonic
+    // clock `std::time::Instant` reads, so production behavior is
+    // unchanged; inside one it means the deadline and the sleeps cannot
+    // disagree. Mixing them (a wall-clock deadline against tokio sleeps)
+    // made this loop's own timing untestable: the deadline could elapse
+    // while the scheduler was starved of CPU and had not yet delivered the
+    // polls, which is exactly the flake this fixes.
+    let deadline = tokio::time::Instant::now() + cfg.timeout;
     let mut delay = cfg.initial_delay;
     let mut last_job = Value::Null;
     let mut poll_count: u64 = 0;
@@ -165,7 +173,7 @@ pub async fn await_job_terminal<P: JobPoller>(
                     };
                 }
 
-                if std::time::Instant::now() >= deadline {
+                if tokio::time::Instant::now() >= deadline {
                     return PollOutcome::TimedOut {
                         last_status: status,
                         last_job: job,
@@ -177,7 +185,7 @@ pub async fn await_job_terminal<P: JobPoller>(
                 delay = (delay * 2).min(cfg.max_delay);
             }
             Err(e) => {
-                if std::time::Instant::now() >= deadline {
+                if tokio::time::Instant::now() >= deadline {
                     return PollOutcome::PollFailed {
                         error: e.to_string(),
                         last_job,
@@ -622,7 +630,21 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    /// `start_paused` runs this on tokio's VIRTUAL clock: the sleeps in
+    /// `await_job_terminal` complete instantly and the deadline advances by
+    /// exactly the slept duration, so the poll count is arithmetic rather
+    /// than a race against the scheduler.
+    ///
+    /// It previously used real time — a 5ms deadline with 1ms delays — and
+    /// asserted `poll_count >= 3`. That is a bet that the runtime gets
+    /// scheduled at least three times inside five wall-clock milliseconds,
+    /// which a loaded machine loses: reproduced at 9 failures in 20 full-suite
+    /// runs under 3x CPU oversubscription. Now that `test` is a required
+    /// check, that intermittently blocked merges on unrelated PRs.
+    ///
+    /// Widening the deadline would only have lowered the probability. Virtual
+    /// time removes the race outright, and the test no longer sleeps at all.
+    #[tokio::test(start_paused = true)]
     async fn times_out_when_no_terminal_status() {
         let poller = ScriptedPoller::new(vec![
             Ok(json!({ "status": "pending" })),
@@ -643,13 +665,23 @@ mod tests {
                 ..
             } => {
                 assert_eq!(last_status, "running");
-                // 5ms deadline with 1ms initial+max delay should produce
-                // 3+ polls (the first three are scripted; ScriptedPoller
-                // then repeats the last entry until deadline).
-                assert!(
-                    poll_count >= 3,
-                    "should have consumed all three scripted polls; got {poll_count}",
+                // Deterministic on the virtual clock: delay is pinned at 1ms
+                // (initial == max, so the doubling saturates immediately), so
+                // the loop polls at t=0..=5ms and returns on the tick where
+                // the deadline is first reached — six polls. The first three
+                // are scripted; ScriptedPoller then repeats its last entry,
+                // which is why `last_status` is still "running".
+                assert_eq!(
+                    poll_count, 6,
+                    "1ms delay against a 5ms deadline must poll at t=0..=5ms"
                 );
+                assert!(
+                    poller.call_count() as u64 == poll_count,
+                    "every counted poll must correspond to a real poller call: \
+                     counted {poll_count}, poller saw {}",
+                    poller.call_count()
+                );
+                assert_eq!(poller.last_path().as_deref(), Some("/v1/jobs/t"));
             }
             other => panic!("expected TimedOut, got {other:?}"),
         }

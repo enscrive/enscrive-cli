@@ -88,20 +88,34 @@ impl fmt::Display for ApiError {
             ApiError::InvalidResponse { status, body } => {
                 write!(f, "HTTP {status}: {body}")
             }
+            // ENS-3054 W4 §4.7: these two used to print the raw JSON body,
+            // burying the one sentence that mattered inside a serialized
+            // object. Extract the message the same way the 4xx path already
+            // does; the compact body is the fallback only when the server
+            // sent nothing recognizable.
             ApiError::ServerClassified {
                 class,
                 status,
                 body,
-            } => {
-                let body_str = serde_json::to_string(body).unwrap_or_default();
-                write!(f, "HTTP {status} [{class}]: {body_str}")
-            }
+            } => write!(f, "HTTP {status} [{class}]: {}", body_message(body)),
             ApiError::Http4xx {
                 status, message, ..
-            } => write!(f, "HTTP {status}: {message}"),
+            } => {
+                write!(f, "HTTP {status}: {message}")?;
+                // An expired or wrong key is otherwise a dead end: the
+                // server can only say "invalid", not how to get a good one.
+                if *status == 401 || *status == 403 {
+                    write!(
+                        f,
+                        ". If this key is stale, re-issue one: `enscrive bootstrap --issue-key` \
+                         for a local stack, or `enscrive project init` in a project directory. \
+                         Check which key is in play with `enscrive status`."
+                    )?;
+                }
+                Ok(())
+            }
             ApiError::Http5xx { status, body } => {
-                let body_str = serde_json::to_string(body).unwrap_or_default();
-                write!(f, "HTTP {status}: {body_str}")
+                write!(f, "HTTP {status}: {}", body_message(body))
             }
             ApiError::NotYetAvailable { status } => {
                 write!(f, "HTTP {status}: not yet available on public /v1")
@@ -147,11 +161,109 @@ mod display_tests {
             "must not leak the raw transport chain: {rendered}"
         );
     }
+
+    /// A server-classified failure used to render its whole JSON body,
+    /// burying the sentence that mattered. `wallet_unprovisioned` is the
+    /// real 503 a clean-seat user hits before their wallet is provisioned.
+    #[test]
+    fn server_classified_shows_the_message_not_the_raw_body() {
+        let rendered = ApiError::ServerClassified {
+            class: "wallet_unprovisioned".to_string(),
+            status: 503,
+            body: serde_json::json!({
+                "error": "tenant wallet is not provisioned",
+                "failure_class": "wallet_unprovisioned",
+            }),
+        }
+        .to_string();
+
+        assert_eq!(
+            rendered,
+            "HTTP 503 [wallet_unprovisioned]: tenant wallet is not provisioned"
+        );
+        assert!(
+            !rendered.contains('{'),
+            "must not print the serialized body: {rendered}"
+        );
+    }
+
+    #[test]
+    fn http5xx_shows_the_message_not_the_raw_body() {
+        let rendered = ApiError::Http5xx {
+            status: 500,
+            body: serde_json::json!({ "error": "no active rate card configured" }),
+        }
+        .to_string();
+        assert_eq!(rendered, "HTTP 500: no active rate card configured");
+    }
+
+    /// Only when the body carries nothing recognizable do we fall back to
+    /// the raw JSON — losing the detail entirely would be worse.
+    #[test]
+    fn unrecognized_body_falls_back_to_json() {
+        let rendered = ApiError::Http5xx {
+            status: 500,
+            body: serde_json::json!({ "unexpected": [1, 2] }),
+        }
+        .to_string();
+        assert!(rendered.contains("unexpected"), "got: {rendered}");
+    }
+
+    /// An auth failure is otherwise a dead end — the server can only say
+    /// "invalid", never how to obtain a working key.
+    #[test]
+    fn auth_failures_say_how_to_get_a_new_key() {
+        for status in [401u16, 403] {
+            let rendered = ApiError::Http4xx {
+                status,
+                code: None,
+                message: "invalid api key".to_string(),
+                body: serde_json::json!({}),
+            }
+            .to_string();
+            assert!(
+                rendered.contains("invalid api key"),
+                "must keep the server's message: {rendered}"
+            );
+            assert!(
+                rendered.contains("--issue-key") && rendered.contains("project init"),
+                "HTTP {status} must name how to re-issue a key: {rendered}"
+            );
+        }
+    }
+
+    /// Other 4xx keep their message clean — the key hint is auth-specific
+    /// and would be noise on a 404.
+    #[test]
+    fn other_4xx_get_no_key_hint() {
+        let rendered = ApiError::Http4xx {
+            status: 404,
+            code: None,
+            message: "corpus not found: abc".to_string(),
+            body: serde_json::json!({}),
+        }
+        .to_string();
+        assert_eq!(rendered, "HTTP 404: corpus not found: abc");
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The human-readable sentence out of a server error body.
+///
+/// Servers put it under `message` or `error`. When neither is present the
+/// compact JSON is better than nothing — but it is the fallback, not the
+/// default, so a normal error reads as prose rather than a serialized
+/// object.
+fn body_message(body: &Value) -> String {
+    body.get("message")
+        .or_else(|| body.get("error"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(body).unwrap_or_default())
+}
 
 /// Classify an HTTP error response into the appropriate `ApiError` variant.
 /// Called with a non-success status + the raw body text from any client method.
