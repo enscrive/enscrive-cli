@@ -2523,7 +2523,15 @@ fn require_api_key(api_key: Option<String>, fmt: OutputFormat) -> String {
         _ => {
             CliResponse::fail(
                 "",
-                "API key required: set ENSCRIVE_API_KEY or pass --api-key".to_string(),
+                // ENS-3054 W4 §4.7: the old text named only the two
+                // one-off overrides, which are the LEAST likely fix. Lead
+                // with the setup paths that actually store a key.
+                "no API key available for this command. Pick whichever fits: \
+                 for a local stack, `enscrive start` bootstraps a key (or `enscrive bootstrap` \
+                 if the stack is already up); for a per-project tenant, `enscrive project init` \
+                 in the project directory; for managed, `enscrive init --mode managed`. \
+                 To override just this invocation, pass --api-key or set ENSCRIVE_API_KEY."
+                    .to_string(),
                 FailureClass::Bug,
                 EXIT_CONFIG,
             )

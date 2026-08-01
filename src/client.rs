@@ -61,6 +61,29 @@ pub enum ApiError {
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            // ENS-3054 W4 §4.7. A stopped stack is the single most common
+            // failure a new developer hits, and reqwest's own Display is
+            // a chain ending in "tcp connect error: Connection refused (os
+            // error 111)" — accurate, and useless as a next step. Name the
+            // endpoint that refused and the command that fixes it.
+            ApiError::Network(e) if e.is_connect() => {
+                let target = e
+                    .url()
+                    .map(|url| {
+                        let mut base = url.clone();
+                        base.set_path("");
+                        base.set_query(None);
+                        base.to_string()
+                    })
+                    .unwrap_or_else(|| "the Enscrive API".to_string());
+                write!(
+                    f,
+                    "could not connect to {target} — nothing is listening there. \
+                     If this is your local stack, run `enscrive start` (then `enscrive status` \
+                     to confirm it came up). If you meant a different endpoint, check \
+                     `--endpoint` / ENSCRIVE_BASE_URL and your profile."
+                )
+            }
             ApiError::Network(e) => write!(f, "request failed: {e}"),
             ApiError::InvalidResponse { status, body } => {
                 write!(f, "HTTP {status}: {body}")
@@ -85,6 +108,44 @@ impl fmt::Display for ApiError {
             }
             ApiError::Timeout => write!(f, "request timed out"),
         }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    /// ENS-3054 W4 §4.7. Built from a REAL refused connection rather than
+    /// a hand-made variant, so this asserts on what a developer with a
+    /// stopped stack actually sees. Port 1 is reserved and never listening.
+    #[tokio::test]
+    async fn connection_refused_names_the_endpoint_and_the_fix() {
+        let error = Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("build client")
+            .get("http://127.0.0.1:1/v1/search")
+            .send()
+            .await
+            .expect_err("port 1 must refuse the connection");
+        assert!(
+            error.is_connect(),
+            "expected a connect error, got: {error} (is something listening on port 1?)"
+        );
+
+        let rendered = ApiError::Network(error).to_string();
+        assert!(
+            rendered.contains("http://127.0.0.1:1"),
+            "must name the endpoint that refused: {rendered}"
+        );
+        assert!(
+            rendered.contains("enscrive start"),
+            "must name the command that fixes it: {rendered}"
+        );
+        assert!(
+            !rendered.contains("os error"),
+            "must not leak the raw transport chain: {rendered}"
+        );
     }
 }
 
