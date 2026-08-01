@@ -7,6 +7,7 @@ mod license;
 mod local;
 mod output;
 mod preflight;
+mod project;
 mod release_channel;
 mod revisions;
 mod segmentation;
@@ -72,6 +73,17 @@ struct Cli {
 
     #[command(subcommand)]
     command: Commands,
+}
+
+/// The real clap command tree, for tests that must assert an invocation is
+/// something this binary actually accepts.
+///
+/// `project::tests::agent_doc_only_teaches_real_commands` uses it to hold
+/// the generated `.enscrive/AGENT.md` to the ADR §5 contract: the doc may
+/// not teach an agent a command or flag the CLI does not have.
+#[cfg(test)]
+pub fn command_for_test() -> clap::Command {
+    <Cli as clap::CommandFactory>::command()
 }
 
 #[derive(Subcommand)]

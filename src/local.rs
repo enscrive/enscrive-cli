@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 
+use crate::project;
+
 const DEFAULT_LOCAL_PROFILE: &str = "local";
 const DEFAULT_MANAGED_PROFILE: &str = "managed";
 const DEFAULT_LEPTOS_OUTPUT_NAME: &str = "enscrive-developer";
@@ -459,18 +461,86 @@ struct LocalBootstrapResponse {
     issued_api_key: bool,
 }
 
+/// Resolve the endpoint + API key every `/v1` command runs against.
+///
+/// app-memory epic (ADR §3.2): a `.enscrive/` project marker found by
+/// walking up from the working directory selects *that project's* tenant,
+/// so an agent working inside a project needs zero global config. The
+/// precedence, highest first:
+///
+/// 1. `--api-key` / `ENSCRIVE_API_KEY`, `--endpoint` / `ENSCRIVE_BASE_URL`
+///    — per-value overrides, always win.
+/// 2. `--profile` / `ENSCRIVE_PROFILE` — an explicit profile outranks the
+///    marker, so a developer standing in a project can still aim a command
+///    at their managed tenant.
+/// 3. The `.enscrive/` marker.
+/// 4. The default profile.
+///
+/// With no marker present this is byte-for-byte the pre-app-memory
+/// behavior: step 3 drops out and the function is steps 1, 2, 4.
 pub fn resolve_api_context(
     profile_name: Option<&str>,
     endpoint_override: Option<String>,
     api_key_override: Option<String>,
 ) -> Result<ResolvedApiContext, String> {
     let profiles = load_profiles()?;
-    let selected_name = selected_profile_name(profile_name, &profiles);
+    let project = project::discover()?;
+    resolve_api_context_with(
+        &profiles,
+        profile_name,
+        endpoint_override,
+        api_key_override,
+        project.as_ref().map(|found| &found.marker),
+    )
+}
+
+/// The precedence rules of [`resolve_api_context`], with the profile store
+/// and the discovered marker passed in.
+///
+/// Split out so the precedence tests are pure: they neither mutate the
+/// process-global working directory (racy under `cargo test`'s thread pool)
+/// nor touch `$XDG_CONFIG_HOME`.
+fn resolve_api_context_with(
+    profiles: &ProfilesFile,
+    profile_name: Option<&str>,
+    endpoint_override: Option<String>,
+    api_key_override: Option<String>,
+    marker: Option<&project::ProjectMarker>,
+) -> Result<ResolvedApiContext, String> {
+    let explicit_profile = profile_name
+        .map(ToOwned::to_owned)
+        .or_else(|| env::var("ENSCRIVE_PROFILE").ok())
+        .filter(|name| !name.trim().is_empty());
+
+    // An explicit profile outranks the marker; the marker outranks the
+    // default profile.
+    let (selected_name, marker_in_effect) = match (explicit_profile, marker) {
+        (Some(name), _) => (Some(name), None),
+        (None, Some(marker)) => (Some(marker.project.profile.clone()), Some(marker)),
+        (None, None) => (profiles.default_profile.clone(), None),
+    };
+
     let selected_profile = selected_name
         .as_ref()
         .and_then(|name| profiles.profiles.get(name).cloned());
 
+    // A marker naming a profile the key store does not have is a broken
+    // project, not a reason to silently fall back to the default profile —
+    // that would write this project's memories into another tenant.
+    if let (Some(marker), None) = (marker_in_effect, selected_profile.as_ref()) {
+        return Err(format!(
+            "project '{}' references CLI profile '{}', which is not in {}. \
+             Re-run `enscrive project init` in this project to re-issue its API key.",
+            marker.project.name,
+            marker.project.profile,
+            profiles_path_for_display()
+        ));
+    }
+
     let endpoint = endpoint_override
+        .or_else(|| {
+            marker_in_effect.map(|marker| marker.project.endpoint.clone())
+        })
         .or_else(|| {
             selected_profile
                 .as_ref()
@@ -486,6 +556,14 @@ pub fn resolve_api_context(
         profile_name: selected_name,
         profile_mode: selected_profile.map(|profile| profile.mode),
     })
+}
+
+/// `~/.config/enscrive/profiles.toml`, for error messages. Falls back to
+/// the literal path when `$HOME` is unset — the message is advisory.
+fn profiles_path_for_display() -> String {
+    cli_home()
+        .map(|home| home.config_root.join("profiles.toml").display().to_string())
+        .unwrap_or_else(|_| "~/.config/enscrive/profiles.toml".to_string())
 }
 
 pub async fn init_managed(opts: ManagedInitOptions) -> Result<Value, String> {
@@ -3614,6 +3692,169 @@ mod tests {
         assert_eq!(resolved.endpoint, "https://api.enscrive.io");
         assert_eq!(resolved.api_key.as_deref(), Some("secret"));
         assert_eq!(resolved.profile_name.as_deref(), Some("managed"));
+    }
+
+    // ── app-memory: `.enscrive/` marker precedence (ADR §3.2) ───────────
+    //
+    // These drive `resolve_api_context_with` rather than the cwd-reading
+    // `resolve_api_context`, so they never mutate the process-global
+    // working directory. Walk-up discovery itself is covered by
+    // `project::tests::discover_walks_up_parent_directories`.
+
+    fn precedence_profiles() -> ProfilesFile {
+        let mut profiles = ProfilesFile {
+            version: PROFILE_VERSION,
+            default_profile: Some("local".to_string()),
+            profiles: BTreeMap::new(),
+        };
+        profiles.profiles.insert(
+            "local".to_string(),
+            StoredProfile {
+                mode: "local".to_string(),
+                endpoint: "http://127.0.0.1:3000".to_string(),
+                api_key: Some("default-profile-key".to_string()),
+                local: None,
+            },
+        );
+        profiles.profiles.insert(
+            "managed".to_string(),
+            StoredProfile {
+                mode: "managed".to_string(),
+                endpoint: "https://api.enscrive.io".to_string(),
+                api_key: Some("managed-key".to_string()),
+                local: None,
+            },
+        );
+        profiles.profiles.insert(
+            "project-my-app".to_string(),
+            StoredProfile {
+                mode: "local".to_string(),
+                endpoint: "http://127.0.0.1:3000".to_string(),
+                api_key: Some("project-key".to_string()),
+                local: None,
+            },
+        );
+        profiles
+    }
+
+    fn precedence_marker() -> project::ProjectMarker {
+        project::ProjectMarker {
+            version: project::MARKER_VERSION,
+            project: project::ProjectSection {
+                name: "my-app".to_string(),
+                tenant_id: "11111111-2222-3333-4444-555555555555".to_string(),
+                tenant_name: "my-app".to_string(),
+                endpoint: "http://127.0.0.1:3000".to_string(),
+                profile: "project-my-app".to_string(),
+            },
+        }
+    }
+
+    /// No marker → unchanged behavior: the default profile.
+    #[test]
+    fn resolver_without_marker_uses_default_profile() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let resolved =
+            resolve_api_context_with(&precedence_profiles(), None, None, None, None).unwrap();
+        assert_eq!(resolved.profile_name.as_deref(), Some("local"));
+        assert_eq!(resolved.api_key.as_deref(), Some("default-profile-key"));
+    }
+
+    /// Marker beats the default profile — the whole point of the epic.
+    #[test]
+    fn resolver_marker_beats_default_profile() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let marker = precedence_marker();
+        let resolved =
+            resolve_api_context_with(&precedence_profiles(), None, None, None, Some(&marker))
+                .unwrap();
+        assert_eq!(resolved.profile_name.as_deref(), Some("project-my-app"));
+        assert_eq!(resolved.api_key.as_deref(), Some("project-key"));
+        assert_eq!(resolved.endpoint, "http://127.0.0.1:3000");
+    }
+
+    /// An explicit `--profile` outranks the marker.
+    #[test]
+    fn resolver_explicit_profile_beats_marker() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let marker = precedence_marker();
+        let resolved = resolve_api_context_with(
+            &precedence_profiles(),
+            Some("managed"),
+            None,
+            None,
+            Some(&marker),
+        )
+        .unwrap();
+        assert_eq!(resolved.profile_name.as_deref(), Some("managed"));
+        assert_eq!(resolved.api_key.as_deref(), Some("managed-key"));
+        assert_eq!(resolved.endpoint, "https://api.enscrive.io");
+    }
+
+    /// `ENSCRIVE_PROFILE` outranks the marker the same way `--profile`
+    /// does. (In the binary clap already folds the env var into
+    /// `profile_name`; this covers the bare-env path.)
+    #[test]
+    fn resolver_env_profile_beats_marker() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::set_var("ENSCRIVE_PROFILE", "managed") };
+
+        let marker = precedence_marker();
+        let resolved =
+            resolve_api_context_with(&precedence_profiles(), None, None, None, Some(&marker));
+
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+        let resolved = resolved.unwrap();
+        assert_eq!(resolved.profile_name.as_deref(), Some("managed"));
+        assert_eq!(resolved.api_key.as_deref(), Some("managed-key"));
+    }
+
+    /// `--api-key` / `ENSCRIVE_API_KEY` is the top of the precedence
+    /// ladder: it wins even inside a project.
+    #[test]
+    fn resolver_explicit_key_beats_marker() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let marker = precedence_marker();
+        let resolved = resolve_api_context_with(
+            &precedence_profiles(),
+            None,
+            Some("https://elsewhere.example".to_string()),
+            Some("flag-key".to_string()),
+            Some(&marker),
+        )
+        .unwrap();
+        assert_eq!(resolved.api_key.as_deref(), Some("flag-key"));
+        assert_eq!(resolved.endpoint, "https://elsewhere.example");
+        // The marker still selected which profile is "active" — only the
+        // overridden values changed.
+        assert_eq!(resolved.profile_name.as_deref(), Some("project-my-app"));
+    }
+
+    /// A marker pointing at a profile the key store lost must fail loudly:
+    /// falling through to the default profile would write this project's
+    /// memories into another tenant.
+    #[test]
+    fn resolver_marker_with_missing_profile_is_an_error() {
+        let _guard = crate::test_support::lock_env();
+        unsafe { env::remove_var("ENSCRIVE_PROFILE") };
+
+        let mut profiles = precedence_profiles();
+        profiles.profiles.remove("project-my-app");
+        let marker = precedence_marker();
+
+        let err = resolve_api_context_with(&profiles, None, None, None, Some(&marker)).unwrap_err();
+        assert!(
+            err.contains("project-my-app") && err.contains("enscrive project init"),
+            "error must name the missing profile and the fix: {err}"
+        );
     }
 
     // Intentionally holds `_guard` across the `.await` below: it serializes
