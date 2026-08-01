@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
-            LOG_OPTS="--no-merges --first-parent ${{ github.event.pull_request.base.sha }}^..${{ github.event.pull_request.head.sha }}"
+            LOG_OPTS="--no-merges --first-parent ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
           else
             LOG_OPTS="-1"
           fi
