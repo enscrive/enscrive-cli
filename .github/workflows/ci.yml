@@ -400,6 +400,18 @@ jobs:
             --content "The Wave4a canary phrase is xyzzy-plugh-${{ matrix.runtime }}; auth tokens are minted in session.rs." \
             --output json
 
+          # Control document, never deleted, matching the SAME query. It is
+          # what makes the retire assertion sound: "the target is absent" is
+          # a negative, and a negative passes trivially when search is
+          # broken, returns an error envelope, or the corpus is empty. The
+          # control still being returned proves search was alive and the
+          # corpus non-empty at the moment we concluded the delete worked.
+          enscrive ingest documents \
+            --corpus-id "$corpus_id" \
+            --document-id "wave4a-control" \
+            --content "The Wave4a canary phrase also appears in this control document, which is never deleted." \
+            --output json
+
           echo "corpus_id=$corpus_id" >> "$GITHUB_OUTPUT"
 
       # ADR §7 item 2 (recall). Asserts the document comes back with a real
@@ -430,37 +442,6 @@ jobs:
                   | select(type == "number" and . > 0)] | length > 0' /tmp/recall.json >/dev/null \
             || { echo "FAIL: hit carries no positive numeric score"; jq . /tmp/recall.json; exit 1; }
           echo "OK: recalled with score $(jq -r '[.data.results[] | select(.document_id == "wave4a-memory") | .score][0]' /tmp/recall.json)"
-
-      # ADR §7 item 2 (retire) — the FIRST live end-to-end exercise of the
-      # P3 per-document delete path (cli #52 -> developer #229 -> observe
-      # #45 -> embed #93) against released binaries. A failure here is a
-      # product finding, not a gate defect.
-      - name: "retire [ADR §7.2 — delete removes it from search]"
-        run: |
-          set -euo pipefail
-          cd "${{ steps.project_init.outputs.root }}"
-
-          enscrive corpus document delete \
-            --corpus-id "${{ steps.remember.outputs.corpus_id }}" \
-            --document-id "wave4a-memory" \
-            --output json | tee /tmp/delete.json
-
-          for attempt in 1 2 3 4 5 6; do
-            enscrive search --query "what is the Wave4a canary phrase" \
-              --corpus "${{ steps.remember.outputs.corpus_id }}" \
-              --output json > /tmp/after-delete.json || true
-            if jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length == 0' \
-                 /tmp/after-delete.json >/dev/null 2>&1; then
-              echo "OK: retired memory no longer returned by search"
-              exit 0
-            fi
-            echo "attempt $attempt: still present, retrying"; sleep 5
-          done
-
-          echo "FAIL: document still returned by search after delete —"
-          echo "      this is a P3 delete-path finding, NOT a gate defect."
-          jq . /tmp/after-delete.json
-          exit 1
 
       # ADR §7 item 4 / §5 FORBIDDEN ("a project silently sharing another
       # project's tenant"). A second project on the SAME stack must not see
@@ -497,15 +478,29 @@ jobs:
           enscrive search --query "what is the Wave4a canary phrase" \
             --corpus "$beta_corpus" --output json > /tmp/beta-scoped.json || true
           jq . /tmp/beta-scoped.json || cat /tmp/beta-scoped.json
-          jq -e '.ok == true' /tmp/beta-scoped.json >/dev/null \
+          # Liveness first, for the same reason as the retire step: the
+          # assertions below are negatives, and a negative is free if the
+          # search never ran. Beta's OWN document must come back.
+          jq -e '.ok == true and (.data.results | type == "array")' /tmp/beta-scoped.json >/dev/null \
             || { echo "FAIL: beta's own scoped search errored"; exit 1; }
-          jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length == 0' \
+          jq -e '[.data.results[] | select(.document_id == "beta-memory")] | length > 0' \
             /tmp/beta-scoped.json >/dev/null \
-            || { echo "FAIL: project beta can see project alpha's memory"; exit 1; }
+            || { echo "FAIL: beta cannot even see its OWN memory — search is not live here"; exit 1; }
+
+          # Both of alpha's documents still EXIST at this point: this step
+          # deliberately runs BEFORE retire. Ordered the other way the
+          # assertion is vacuous — alpha's document would already be
+          # deleted, so beta could never return it and this would pass with
+          # zero tenant isolation.
+          for doc in wave4a-memory wave4a-control; do
+            jq -e --arg d "$doc" '[.data.results[] | select(.document_id == $d)] | length == 0' \
+              /tmp/beta-scoped.json >/dev/null \
+              || { echo "FAIL: project beta can see project alpha's document $doc"; exit 1; }
+          done
           if grep -qF "xyzzy-plugh" /tmp/beta-scoped.json; then
             echo "FAIL: alpha's canary content leaked into beta's search results"; exit 1
           fi
-          echo "OK: beta's corpus contains none of alpha's memory"
+          echo "OK: beta sees its own memory and none of alpha's (both alpha docs still exist)"
 
           # ── Corpus-UNSCOPED search: a standing probe of a KNOWN open
           # defect, deliberately NOT gating.
@@ -551,6 +546,58 @@ jobs:
             fi
           fi
           echo "OK: ADR §7.4 satisfied — beta's corpus contains none of alpha's memory"
+
+      # ADR §7 item 2 (retire) — the FIRST live end-to-end exercise of the
+      # P3 per-document delete path (cli #52 -> developer #229 -> observe
+      # #45 -> embed #93) against released binaries. A failure here is a
+      # product finding, not a gate defect.
+      - name: "retire [ADR §7.2 — delete removes it from search]"
+        run: |
+          set -euo pipefail
+          cd "${{ steps.project_init.outputs.root }}"
+
+          enscrive corpus document delete \
+            --corpus-id "${{ steps.remember.outputs.corpus_id }}" \
+            --document-id "wave4a-memory" \
+            --output json | tee /tmp/delete.json
+
+          # "The target is absent" is a NEGATIVE assertion, and a negative
+          # passes trivially when the search never really ran — an error
+          # envelope has no `.data.results`, and `[.data.results[]?]` on it
+          # is `[]`, which satisfies `length == 0`. Verified: feeding this
+          # jq an `{"ok":false,...}` payload returns true.
+          #
+          # So each attempt must first establish that the search WORKED:
+          # `.ok == true`, `.data.results` is genuinely an array, and the
+          # never-deleted control document is still returned. Only against
+          # a live search over a non-empty corpus does the target's absence
+          # mean the delete worked.
+          for attempt in 1 2 3 4 5 6; do
+            enscrive search --query "what is the Wave4a canary phrase" \
+              --corpus "${{ steps.remember.outputs.corpus_id }}" \
+              --output json > /tmp/after-delete.json || true
+
+            if jq -e '.ok == true and (.data.results | type == "array")' \
+                 /tmp/after-delete.json >/dev/null 2>&1 \
+               && jq -e '[.data.results[] | select(.document_id == "wave4a-control")] | length > 0' \
+                 /tmp/after-delete.json >/dev/null 2>&1 \
+               && jq -e '[.data.results[] | select(.document_id == "wave4a-memory")] | length == 0' \
+                 /tmp/after-delete.json >/dev/null 2>&1; then
+              echo "OK: retired memory gone, control document still returned (search proven live)"
+              exit 0
+            fi
+            echo "attempt $attempt: not yet in the expected state, retrying"; sleep 5
+          done
+
+          echo "FAIL: delete did not take effect, or search stopped working."
+          echo "      Expected: ok=true, control document present, target absent."
+          jq . /tmp/after-delete.json || cat /tmp/after-delete.json
+          if jq -e '.ok == true' /tmp/after-delete.json >/dev/null 2>&1; then
+            echo "      Search succeeded, so this is a P3 delete-path finding, NOT a gate defect."
+          else
+            echo "      Search itself failed — check the service logs collected below."
+          fi
+          exit 1
 
       # ADR §5: "the AGENT.md is a contract: every capability it instructs
       # MUST be exercised by the CI gate, so the agent-usage doc can never
