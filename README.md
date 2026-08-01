@@ -120,6 +120,19 @@ Bring-your-own-key for embeddings works on every plan.
 
 ## Commands
 
+Local stack and project setup:
+
+```
+enscrive init            Configure a managed or self-hosted profile
+enscrive start           Start the local self-hosted stack
+enscrive stop            Stop the local self-hosted stack
+enscrive status          Resolved profile, stack health, active project
+enscrive bootstrap       Re-run tenant/key bootstrap on a running stack
+enscrive project init    Give this directory its own isolated memory
+```
+
+Working with memory:
+
 ```
 enscrive search          Search a corpus
 enscrive embeddings      Embedding primitives
@@ -161,6 +174,59 @@ enscrive init --profile local --set-default --mode self-managed ...
 ```
 
 Runtime state (Docker Compose volumes, container IDs, logs) for self-hosted profiles lives at `~/.local/share/enscrive/runtime/<profile>/`.
+
+### The key file
+
+`~/.config/enscrive/profiles.toml` is the **only** place the CLI stores API keys. Each profile holds its endpoint, its mode (`managed` or `local`), and its key in plaintext:
+
+```toml
+version = 1
+default_profile = "local"
+
+[profiles.local]
+mode = "local"
+endpoint = "http://127.0.0.1:3000"
+api_key = "..."          # secret — never commit this file
+```
+
+Treat it like `~/.ssh/id_ed25519`:
+
+```bash
+chmod 600 ~/.config/enscrive/profiles.toml
+```
+
+Keys reach this file two ways — `enscrive init` (you paste one, or `enscrive start` bootstraps one for a local stack) and `enscrive project init` (which mints a per-project tenant key and stores it under a `project-<name>` profile). Nothing else writes keys, and no command ever prints one.
+
+**Per-project markers hold no secrets.** `enscrive project init` writes a committable `.enscrive/config.toml` next to your code that references its key *by profile name*, never by value — so the marker is safe to commit while the key stays in the file above. See `.enscrive/AGENT.md`, dropped in the same directory, for how an agent uses it.
+
+To rotate a key, re-run `enscrive init` for that profile (or `enscrive project init` in the project directory) — both overwrite the stored key in place.
+
+---
+
+## Search score calibration
+
+`--score-threshold` filters results by similarity score. The single most common way to conclude "search is broken" is to set it by intuition:
+
+```bash
+# Looks reasonable. Returns nothing.
+enscrive search --query "how are auth tokens minted" --score-threshold 0.9
+```
+
+Scores are cosine similarity over embedding vectors, and **genuinely relevant matches usually land near the middle of the range, not near 1.0.** A threshold of `0.8`–`0.9` filters out results you would have considered correct. There is no universal cutoff: the useful range shifts with the embedding model, your chunk sizes, and how the query is phrased.
+
+Calibrate against your own corpus instead of guessing:
+
+```bash
+# 1. Search with NO threshold and read the scores you actually get back.
+enscrive search --query "how are auth tokens minted" --limit 10 --output json \
+  | jq '.data.results[] | {score, document_id}'
+
+# 2. Find where genuinely relevant results stop and noise starts.
+# 3. Set the threshold just below that, then re-check as the corpus grows.
+enscrive search --query "how are auth tokens minted" --score-threshold 0.45
+```
+
+Leaving `--score-threshold` unset returns the top `--limit` matches ranked by score, which is the right default for most retrieval — including agent memory, where a weak-but-relevant hit still beats no context at all. Reach for a threshold when you specifically need "return nothing rather than something marginal".
 
 ---
 
@@ -226,6 +292,8 @@ On failure:
 ```
 
 Exit codes: `0` success, `1` bug, `2` unsupported, `3` config error, `4` plan required, `5` confirmation required.
+
+With `--output json`, **stdout carries exactly one JSON document and nothing else** — on success and on failure alike. Human-readable prose, progress ticks, and warnings all go to stderr, so `enscrive ... --output json | jq` is always safe and never needs filtering. This is enforced by a test (`tests/json_output_purity.rs`), not just a convention.
 
 ---
 
