@@ -487,17 +487,53 @@ jobs:
             --content "Beta project memory: unrelated content about deployment runbooks." \
             --output json
 
-          # Search beta for ALPHA's canary. Corpus-unscoped, so this covers
-          # beta's whole tenant rather than one corpus.
+          # ── The ADR §7.4 assertion: beta's own corpus must not contain
+          # alpha's memory. Corpus-scoped, matching how every other search
+          # in this job runs.
+          #
+          # `|| true` then dump: in --output json the failure envelope goes
+          # to STDOUT, so a bare redirect swallows the error into the file
+          # and `set -e` kills the step with nothing on the console.
           enscrive search --query "what is the Wave4a canary phrase" \
-            --output json > /tmp/beta-search.json
+            --corpus "$beta_corpus" --output json > /tmp/beta-scoped.json || true
+          jq . /tmp/beta-scoped.json || cat /tmp/beta-scoped.json
+          jq -e '.ok == true' /tmp/beta-scoped.json >/dev/null \
+            || { echo "FAIL: beta's own scoped search errored"; exit 1; }
           jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length == 0' \
-            /tmp/beta-search.json >/dev/null \
-            || { echo "FAIL: project beta can see project alpha's memory"; jq . /tmp/beta-search.json; exit 1; }
-          if grep -qF "xyzzy-plugh" /tmp/beta-search.json; then
+            /tmp/beta-scoped.json >/dev/null \
+            || { echo "FAIL: project beta can see project alpha's memory"; exit 1; }
+          if grep -qF "xyzzy-plugh" /tmp/beta-scoped.json; then
             echo "FAIL: alpha's canary content leaked into beta's search results"; exit 1
           fi
-          echo "OK: projects are isolated — beta sees none of alpha's memory"
+          echo "OK: beta's corpus contains none of alpha's memory"
+
+          # ── Corpus-UNSCOPED search. `.enscrive/AGENT.md` teaches "omit
+          # --corpus to search across this project's whole memory", so this
+          # has to hold or the doc is teaching something that does not work
+          # (ADR §5 FORBIDDEN). Probed explicitly rather than assumed,
+          # because embed filters search on corpus_id alone — there is no
+          # tenant clause in SearchRequest (enscrive-embed
+          # docs/state-of-embed/04-SUBSTRATE-AND-SEARCH.md §6), so this path
+          # is where a cross-tenant leak would surface if it surfaces at all.
+          set +e
+          enscrive search --query "what is the Wave4a canary phrase" \
+            --output json > /tmp/beta-unscoped.json
+          unscoped_rc=$?
+          set -e
+          jq . /tmp/beta-unscoped.json || cat /tmp/beta-unscoped.json
+          if [ "$unscoped_rc" -ne 0 ]; then
+            echo "FINDING: corpus-unscoped search FAILED (exit $unscoped_rc)."
+            echo "  AGENT.md teaches it, so either the doc or the stack is wrong."
+            echo "  This is a product finding, not a gate defect."
+            exit 1
+          fi
+          jq -e '[.data.results[]? | select(.document_id == "wave4a-memory")] | length == 0' \
+            /tmp/beta-unscoped.json >/dev/null \
+            || { echo "FINDING: unscoped search LEAKED alpha's memory into beta's tenant"; exit 1; }
+          if grep -qF "xyzzy-plugh" /tmp/beta-unscoped.json; then
+            echo "FINDING: alpha's canary content leaked cross-tenant via unscoped search"; exit 1
+          fi
+          echo "OK: projects are isolated — beta sees none of alpha's memory, scoped or unscoped"
 
       # ADR §5: "the AGENT.md is a contract: every capability it instructs
       # MUST be exercised by the CI gate, so the agent-usage doc can never
