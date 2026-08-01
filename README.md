@@ -120,6 +120,19 @@ Bring-your-own-key for embeddings works on every plan.
 
 ## Commands
 
+Local stack and project setup:
+
+```
+enscrive init            Configure a managed or self-hosted profile
+enscrive start           Start the local self-hosted stack
+enscrive stop            Stop the local self-hosted stack
+enscrive status          Resolved profile, stack health, active project
+enscrive bootstrap       Re-run tenant/key bootstrap on a running stack
+enscrive project init    Give this directory its own isolated memory
+```
+
+Working with memory:
+
 ```
 enscrive search          Search a corpus
 enscrive embeddings      Embedding primitives

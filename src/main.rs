@@ -100,6 +100,12 @@ enum Commands {
     /// Show resolved profile and local stack status
     Status(StatusArgs),
 
+    /// Re-run tenant / environment / API-key bootstrap against an
+    /// already-running local stack. `enscrive start` does this as one of
+    /// its steps; use this when that step is what failed, so you can
+    /// recover without tearing down a working stack. Idempotent.
+    Bootstrap(BootstrapArgs),
+
     /// Per-project memory — give the project in this directory its own
     /// isolated Enscrive tenant, so any agent working here can remember,
     /// recall, and retire without global config. Design of record: ADR
@@ -413,6 +419,15 @@ struct StopArgs {
 
 #[derive(Args)]
 struct StatusArgs {}
+
+#[derive(Args)]
+struct BootstrapArgs {
+    /// Issue and store a fresh API key even if this profile already has
+    /// one. Without this, a key is issued only when the profile has none —
+    /// the same rule `enscrive start` follows.
+    #[arg(long = "issue-key")]
+    issue_key: bool,
+}
 
 #[derive(Subcommand)]
 enum ProjectSubcommand {
@@ -4371,6 +4386,7 @@ fn cmd_key_for_command(cmd: &Commands) -> Option<&'static str> {
         | Commands::Start(_)
         | Commands::Stop(_)
         | Commands::Status(_)
+        | Commands::Bootstrap(_)
         | Commands::Health
         | Commands::License { .. } => return None,
     };
@@ -4453,6 +4469,8 @@ async fn main() {
         // `project init` resolves the local stack profile itself — it runs
         // BEFORE this project has an API key to resolve.
         Commands::Project { .. } => None,
+        // `bootstrap` is what MINTS the profile's key; it cannot require one.
+        Commands::Bootstrap(_) => None,
         Commands::Health => None,
         // ENS-751: GET /v1/ratecard is public (no API-key auth) — resolved
         // directly inside the handler, same pattern as Health.
@@ -4717,6 +4735,19 @@ async fn main() {
             }
             Err(e) => CliResponse::fail("status", e, FailureClass::Bug, EXIT_FAILURE).emit(fmt),
         },
+        Commands::Bootstrap(args) => {
+            match local::bootstrap(local::BootstrapOptions {
+                profile_name: cli.profile.clone(),
+                issue_key: args.issue_key,
+            })
+            .await
+            {
+                Ok(data) => CliResponse::success("bootstrap", data).emit(fmt),
+                Err(e) => {
+                    CliResponse::fail("bootstrap", e, FailureClass::Bug, EXIT_CONFIG).emit(fmt)
+                }
+            }
+        }
         Commands::Project { sub } => match sub {
             ProjectSubcommand::Init(args) => {
                 match project::init(project::InitOptions {
@@ -8035,6 +8066,26 @@ mod tests {
     }
 
     #[test]
+    fn bootstrap_parses_and_defaults_to_not_reissuing_a_key() {
+        let cli = Cli::try_parse_from(["enscrive", "bootstrap"]).expect("bootstrap must parse");
+        match cli.command {
+            Commands::Bootstrap(args) => assert!(
+                !args.issue_key,
+                "bootstrap must not mint a fresh key unless asked — `start` only issues when the \
+                 profile has none, and this must match"
+            ),
+            _ => panic!("expected bootstrap"),
+        }
+
+        let cli = Cli::try_parse_from(["enscrive", "bootstrap", "--issue-key"])
+            .expect("bootstrap --issue-key must parse");
+        match cli.command {
+            Commands::Bootstrap(args) => assert!(args.issue_key),
+            _ => panic!("expected bootstrap"),
+        }
+    }
+
+    #[test]
     fn corpus_ensure_parses() {
         let cli = Cli::try_parse_from([
             "enscrive",
@@ -9594,6 +9645,9 @@ data: {\"total_segments\":1,\"processing_time_ms\":42,\"template_name\":\"Narrat
         "stop",
         "status",
         "health",
+        // W3 D11: re-runs /local/bootstrap on the local stack, not a /v1
+        // endpoint — no contract row, no tier or plan to gate on.
+        "bootstrap",
         // app-memory: creates this project's tenant through the local
         // stack's /local/bootstrap, not a /v1 endpoint, so it carries no
         // deployment-tier or plan row.

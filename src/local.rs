@@ -566,6 +566,91 @@ fn profiles_path_for_display() -> String {
         .unwrap_or_else(|_| "~/.config/enscrive/profiles.toml".to_string())
 }
 
+#[derive(Debug, Clone)]
+pub struct BootstrapOptions {
+    pub profile_name: Option<String>,
+    /// Force a fresh API key even when the profile already has one.
+    pub issue_key: bool,
+}
+
+/// `enscrive bootstrap` — re-run tenant/environment/API-key bootstrap
+/// against an already-running local stack (ENS-3054 W3 D11).
+///
+/// Bootstrap normally happens as a step inside `enscrive start`. When that
+/// step is the thing that failed — the stack came up but the tenant, rate
+/// card, wallet, or key did not — the only recovery was `enscrive stop &&
+/// enscrive start`, which tears down a working stack to redo one HTTP
+/// call. This exposes that step on its own.
+///
+/// Idempotent: `/local/bootstrap` is a load-or-create, so re-running it
+/// against a healthy stack changes nothing. Key issuance follows the same
+/// rule `start` uses — issue only when the profile has none — unless
+/// `issue_key` forces a fresh one for rotation.
+pub async fn bootstrap(opts: BootstrapOptions) -> Result<Value, String> {
+    let mut profiles = load_profiles()?;
+    let (profile_name, mut profile) =
+        load_local_profile(opts.profile_name.as_deref(), &profiles)?;
+    let local = profile.local.clone().ok_or_else(|| {
+        format!(
+            "profile '{profile_name}' is a managed profile — bootstrap applies to a self-managed \
+             local stack. Managed tenants are provisioned by Enscrive, not by this command."
+        )
+    })?;
+
+    // The stack must already be up: this command deliberately does NOT
+    // start anything, so that "bootstrap failed" never becomes "and then
+    // it silently restarted your services".
+    ensure_local_stack_running(&profile.endpoint, &local, &profile_name).await?;
+
+    let keycloak_user = bootstrap_keycloak(&local).await.map_err(|e| {
+        format!(
+            "could not reach the local identity service to resolve your developer account: {e}. \
+             Is the stack still starting? Check `enscrive status`."
+        )
+    })?;
+
+    let issue_api_key = opts.issue_key || profile.api_key.is_none();
+    let result =
+        bootstrap_local_stack(&profile.endpoint, &local, &keycloak_user, issue_api_key).await?;
+
+    if let Some(local_profile) = profile.local.as_mut() {
+        local_profile.bootstrap.tenant_id = Some(result.tenant_id.clone());
+        local_profile.bootstrap.environment_id = Some(result.environment_id.clone());
+        local_profile.bootstrap.api_key_id = result.api_key_id.clone();
+    }
+    if let Some(api_key) = result.api_key.clone() {
+        profile.api_key = Some(api_key);
+    }
+    profiles.profiles.insert(profile_name.clone(), profile);
+    save_profiles(&profiles)?;
+
+    Ok(json!({
+        "profile": profile_name,
+        "endpoint": result_endpoint(&profiles, &profile_name),
+        "tenant_id": result.tenant_id,
+        "tenant_name": result.tenant_name,
+        "environment_id": result.environment_id,
+        "environment_name": result.environment_name,
+        "created_tenant": result.created_tenant,
+        "created_environment": result.created_environment,
+        // Whether a key was issued and stored — never the key itself.
+        "issued_api_key": result.issued_api_key,
+        "api_key_id": result.api_key_id,
+        "api_key_stored": result.api_key.is_some(),
+        "portal": format!("http://127.0.0.1:{}", local.ports.developer),
+        "note": "bootstrap is idempotent; the tenant, environment, rate card, and wallet are \
+                 load-or-create. Re-run it any time `enscrive start` reported a bootstrap failure.",
+    }))
+}
+
+fn result_endpoint(profiles: &ProfilesFile, profile_name: &str) -> String {
+    profiles
+        .profiles
+        .get(profile_name)
+        .map(|profile| profile.endpoint.clone())
+        .unwrap_or_default()
+}
+
 /// What `enscrive project init` needs back from the local stack after
 /// creating (or loading) this project's tenant.
 #[derive(Debug, Clone)]
