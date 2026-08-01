@@ -170,8 +170,13 @@ fn restore_with_managed_token_passes_gate_on_non_tty() {
         "token-carrying automation must not be refused by the interactive \
          gate: {stderr}"
     );
+    // Assert the failure came from the transport, not the gate. Matched on
+    // either phrasing rather than one exact string: `ApiError`'s Display
+    // special-cases connection-refused into actionable guidance (ENS-3054
+    // W4 §4.7) and keeps "request failed" for other transport errors, and
+    // this test cares which LAYER failed, not how it was worded.
     assert!(
-        stderr.contains("request failed"),
+        stderr.contains("could not connect") || stderr.contains("request failed"),
         "failure must be the network call after the gate: {stderr}"
     );
 
