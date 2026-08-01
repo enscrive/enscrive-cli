@@ -28,7 +28,11 @@ curl -fsSL https://install.enscrive.io/install.sh | sh
 
 Installs the `enscrive` CLI binary to `~/.local/bin/enscrive`. No sudo required.
 
-Supported platforms: `x86_64`/`aarch64` Linux (glibc and musl), `x86_64`/`arm64` macOS.
+**Platforms published today: `x86_64-unknown-linux-gnu` only.** The installer detects
+`aarch64` Linux, musl, and both macOS architectures, and will install them as soon as
+they are released — but the release pipeline currently builds the one Linux target, so
+on any other platform the one-liner will tell you no binary is available. Build from
+source (below) works everywhere Rust does.
 
 > **Dev channel note.** `https://install.enscrive.io/install.sh` is the canonical install
 > URL and serves the `dev` channel. A shorter GA one-liner at `https://enscrive.io/install`
