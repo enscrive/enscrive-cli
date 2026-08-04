@@ -874,7 +874,13 @@ fn request_failure(command: &'static str, e: ApiError) -> CliResponse {
                         EXIT_CONFIRMATION_REQUIRED, EXIT_LICENSE_INVALID};
     let (class, exit_code) = match &e {
         ApiError::NotYetAvailable { .. } => (FailureClass::Unsupported, EXIT_UNSUPPORTED),
-        ApiError::Timeout | ApiError::Network(_) | ApiError::InvalidResponse { .. }
+        // ENS-3237: kept identical to main.rs `request_failure` — an
+        // unreachable endpoint must classify the same way on every command
+        // surface, or the exit code would depend on which subcommand a
+        // script happened to call.
+        ApiError::Timeout => (FailureClass::Config, EXIT_CONFIG),
+        ApiError::Network(e) if e.is_connect() => (FailureClass::Config, EXIT_CONFIG),
+        ApiError::Network(_) | ApiError::InvalidResponse { .. }
         | ApiError::Http4xx { .. } | ApiError::Http5xx { .. } => (FailureClass::Bug, EXIT_FAILURE),
         ApiError::ServerClassified { class, .. } => {
             let fc = match class.as_str() {
@@ -887,6 +893,7 @@ fn request_failure(command: &'static str, e: ApiError) -> CliResponse {
                 "FAIL_LICENSE_INVALID" => FailureClass::LicenseInvalid,
                 "FAIL_UNIMPLEMENTED" => FailureClass::Unimplemented,
                 "FAIL_FALSE_CLAIM" => FailureClass::FalseClaim,
+                "FAIL_CONFIG" => FailureClass::Config,
                 _ => FailureClass::Bug,
             };
             let code = match fc {

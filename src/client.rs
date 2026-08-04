@@ -790,7 +790,8 @@ mod tests {
     fn api_error_to_class(err: &ApiError) -> FailureClass {
         match err {
             ApiError::NotYetAvailable { .. } => FailureClass::Unsupported,
-            ApiError::Timeout => FailureClass::Bug,
+            ApiError::Timeout => FailureClass::Config,
+            ApiError::Network(e) if e.is_connect() => FailureClass::Config,
             ApiError::Network(_) => FailureClass::Bug,
             ApiError::InvalidResponse { .. } => FailureClass::Bug,
             ApiError::ServerClassified { class, .. } => map_class_str(class),
@@ -978,14 +979,40 @@ mod tests {
         assert_eq!(api_error_to_class(&err), FailureClass::Bug);
     }
 
-    /// Timeout → ApiError::Timeout → Bug
+    /// ENS-3237: a timeout against the configured endpoint is a config /
+    /// environment condition, not a CLI defect.
     #[test]
-    fn timeout_variant_maps_to_bug() {
+    fn timeout_variant_maps_to_config() {
         let err = ApiError::Timeout;
-        assert_eq!(api_error_to_class(&err), FailureClass::Bug);
-        // Ensure Display works without panic
+        assert_eq!(api_error_to_class(&err), FailureClass::Config);
         let s = err.to_string();
         assert!(s.contains("timed out"), "unexpected display: {s}");
+        assert!(
+            s.contains("enscrive status") || s.contains("ENSCRIVE_BASE_URL"),
+            "a timeout must point at the thing to check: {s}"
+        );
+    }
+
+    /// ENS-3237: nothing listening on the configured endpoint is the most
+    /// common first-contact failure there is. Built from a REAL refused
+    /// connection — port 1 is reserved and never listening.
+    #[tokio::test]
+    async fn connection_refused_maps_to_config_not_bug() {
+        let error = Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("build client")
+            .get("http://127.0.0.1:1/v1/search")
+            .send()
+            .await
+            .expect_err("port 1 must refuse the connection");
+        assert!(error.is_connect(), "expected a connect error, got: {error}");
+
+        assert_eq!(
+            api_error_to_class(&ApiError::Network(error)),
+            FailureClass::Config,
+            "a stopped stack must not self-report as an Enscrive bug"
+        );
     }
 
     /// Plain 404 with non-JSON body → InvalidResponse → Bug

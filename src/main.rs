@@ -2553,7 +2553,14 @@ fn request_failure(command: &str, error: client::ApiError) -> CliResponse {
 
     let (class, exit_code) = match &error {
         ApiError::NotYetAvailable { .. } => (FailureClass::Unsupported, EXIT_UNSUPPORTED),
-        ApiError::Timeout => (FailureClass::Bug, EXIT_FAILURE),
+        // ENS-3237. Nothing listening on the configured endpoint, or the
+        // deadline elapsed, is a configuration/environment condition — the
+        // stack is down, or the endpoint is wrong. It used to report
+        // FAIL_BUG/1, i.e. the CLI told a first-contact user that their own
+        // stopped stack was an Enscrive defect. Every other transport error
+        // (TLS, malformed response, body read) stays FAIL_BUG.
+        ApiError::Timeout => (FailureClass::Config, EXIT_CONFIG),
+        ApiError::Network(e) if e.is_connect() => (FailureClass::Config, EXIT_CONFIG),
         ApiError::Network(_) => (FailureClass::Bug, EXIT_FAILURE),
         ApiError::InvalidResponse { .. } => (FailureClass::Bug, EXIT_FAILURE),
         ApiError::Http4xx { .. } => (FailureClass::Bug, EXIT_FAILURE),
@@ -2581,6 +2588,7 @@ fn map_failure_class(raw: &str) -> FailureClass {
         "FAIL_LICENSE_INVALID" => FailureClass::LicenseInvalid,
         "FAIL_UNIMPLEMENTED" => FailureClass::Unimplemented,
         "FAIL_FALSE_CLAIM" => FailureClass::FalseClaim,
+        "FAIL_CONFIG" => FailureClass::Config,
         "FAIL_API_ERROR" => FailureClass::ApiError,
         "FAIL_TIMEOUT" => FailureClass::Timeout,
         _ => FailureClass::Bug,
@@ -2590,6 +2598,7 @@ fn map_failure_class(raw: &str) -> FailureClass {
 /// Exit code to pair with a given `FailureClass`.
 fn exit_code_for(class: FailureClass) -> i32 {
     match class {
+        FailureClass::Config => EXIT_CONFIG,
         FailureClass::Unsupported | FailureClass::UnsupportedInLocalMode => EXIT_UNSUPPORTED,
         FailureClass::PlanRequired => output::EXIT_PLAN_REQUIRED,
         FailureClass::ConfirmationRequired => output::EXIT_CONFIRMATION_REQUIRED,
