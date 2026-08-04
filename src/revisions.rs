@@ -75,7 +75,7 @@ pub struct RestoreArgs {
     pub dry_run: bool,
 
     /// Required to proceed with the destructive restore. Without this the
-    /// command refuses (CLI-TIER-013); in an interactive TTY you are then
+    /// command refuses; in an interactive TTY you are then
     /// prompted to re-type the revision id.
     #[arg(long, default_value_t = false)]
     pub confirm: bool,

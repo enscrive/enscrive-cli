@@ -108,8 +108,7 @@ enum Commands {
 
     /// Per-project memory — give the project in this directory its own
     /// isolated Enscrive tenant, so any agent working here can remember,
-    /// recall, and retire without global config. Design of record: ADR
-    /// ENSCRIVE-CLI-APP-MEMORY-2026-07-31.
+    /// recall, and retire without global config.
     Project {
         #[command(subcommand)]
         sub: ProjectSubcommand,
@@ -129,7 +128,7 @@ enum Commands {
     Complete(CompleteArgs),
 
     /// Enscrive Agents — persistent, corpus-bound agents through
-    /// /v1/agents (ENS-783). Each agent is a saved {provider, model,
+    /// /v1/agents. Each agent is a saved {provider, model,
     /// system_prompt, corpus_id, top_k, max_tokens} config; `answer`
     /// retrieves from the bound corpus and reasons over it in one call
     /// (thin passthrough — no local scoring, budget-gated and metered
@@ -231,7 +230,7 @@ enum Commands {
         sub: BackupSubcommand,
     },
 
-    /// Revisions of your tenant data — point-in-time restore points (ENS-651)
+    /// Revisions of your tenant data — point-in-time restore points
     Revisions {
         #[command(subcommand)]
         sub: revisions::RevisionsSubcommand,
@@ -250,7 +249,7 @@ enum Commands {
     /// Usage and metering commands
     Usage(UsageArgs),
 
-    /// Wallet balance + debit history commands (ENS-476 / ENS-750)
+    /// Wallet balance + debit history commands
     Wallet {
         #[command(subcommand)]
         sub: WalletSubcommand,
@@ -262,7 +261,7 @@ enum Commands {
         sub: JobsSubcommand,
     },
 
-    /// Batch-set management commands (J-024)
+    /// Batch-set management commands
     BatchSets {
         #[command(subcommand)]
         sub: BatchSetsSubcommand,
@@ -278,29 +277,29 @@ enum Commands {
 
     /// Evals 2.0 dataset primitive commands (list/get/describe/delete/upload).
     /// Distinct from legacy `enscrive evals datasets` which targets
-    /// `/v1/evals/datasets/*` (eval_campaigns lineage) — EV-016 unifies.
+    /// `/v1/evals/datasets/*`.
     Datasets {
         #[command(subcommand)]
         sub: evals2::Datasets2Subcommand,
     },
 
     /// Evals 2.0 eval definitions + runs (`/v1/eval-defs/*`, `/v1/eval-runs/*`).
-    /// Distinct from legacy `enscrive evals campaigns` — EV-016 unifies.
+    /// Distinct from legacy `enscrive evals campaigns`.
     EvalDefs {
         #[command(subcommand)]
         sub: evals2::EvalDefsSubcommand,
     },
 
-    /// License management for self-managed / enterprise deployments
-    /// (CLI-TIER-007, ENS-62). The enscrive-developer service verifies the
-    /// JWT at startup — the CLI only stores it.
+    /// License management for self-managed / enterprise deployments.
+    /// The enscrive-developer service verifies the JWT at startup — the
+    /// CLI only stores it.
     License {
         #[command(subcommand)]
         sub: LicenseSubcommand,
     },
 }
 
-/// License subcommands (CLI-TIER-007 / ENS-63 / ENS-64).
+/// License subcommands.
 #[derive(Subcommand)]
 enum LicenseSubcommand {
     /// Activate a license JWT by writing it to
@@ -325,7 +324,7 @@ enum LicenseSubcommand {
     Deactivate,
 }
 
-/// Arguments for `enscrive license activate` (CLI-TIER-007).
+/// Arguments for `enscrive license activate`.
 #[derive(Args)]
 struct LicenseActivateArgs {
     /// Signed license JWT obtained from the enscrive.io portal.
@@ -362,7 +361,7 @@ struct InitArgs {
     #[arg(long = "embed-bin")]
     embed_bin: Option<String>,
 
-    /// Path to esm binary for self-managed mode (ENS-153). Defaults to
+    /// Path to esm binary for self-managed mode. Defaults to
     /// `esm` discovered via PATH. Override when esm is installed at a
     /// non-standard location.
     #[arg(long = "esm-bin")]
@@ -396,7 +395,7 @@ struct InitArgs {
     /// Override the release manifest URL. Defaults to the dev channel at
     /// `https://developer.enscrive.io/releases/dev/latest.json` (same
     /// distribution as `install.sh`); will be re-pointed once production
-    /// CloudFront is provisioned (tracked under ENS-81). Supports `file://`
+    /// CloudFront is provisioned. Supports `file://`
     /// for offline harnesses. Also reads `ENSCRIVE_MANIFEST_URL`.
     #[arg(long = "manifest-url", env = "ENSCRIVE_MANIFEST_URL")]
     manifest_url: Option<String>,
@@ -529,7 +528,7 @@ struct SearchArgs {
     resolution: Option<String>,
 }
 
-/// Arguments for `enscrive complete` (ENS-751, POST /v1/complete).
+/// Arguments for `enscrive complete` (POST /v1/complete).
 ///
 /// Single-shot mode (`--prompt`) and agentic tool-use mode (`--messages`)
 /// are mutually exclusive — exactly one is required, matching the server's
@@ -584,7 +583,7 @@ struct CompleteArgs {
     top_p: Option<f32>,
 }
 
-/// ENS-783 PR-5: `enscrive agents` subcommands — thin passthrough over
+/// `enscrive agents` subcommands — thin passthrough over
 /// enscrive-developer's `/v1/agents` CRUD + answer surface. No local
 /// scoring or reasoning logic lives in the CLI.
 #[derive(Subcommand)]
@@ -801,7 +800,7 @@ enum RatecardSubcommand {
     Show(RatecardShowArgs),
 }
 
-/// Arguments for `enscrive ratecard show` (ENS-751, GET /v1/ratecard).
+/// Arguments for `enscrive ratecard show` (GET /v1/ratecard).
 #[derive(Args)]
 struct RatecardShowArgs {
     /// RFC3339 timestamp; look up the rate card active at this instant
@@ -842,7 +841,7 @@ enum ModelsSubcommand {
     /// List public embedding and chunking model names
     List,
 
-    /// Show model card detail for a specific model (J-021)
+    /// Show model card detail for a specific model
     ///
     /// Accepts <provider>/<model> as a positional argument, e.g.:
     ///   enscrive models show nebius/Qwen%2FQwen3-Embedding-8B
@@ -850,7 +849,7 @@ enum ModelsSubcommand {
     Show(ModelsShowArgs),
 }
 
-/// J-021: Arguments for `enscrive models show`.
+/// Arguments for `enscrive models show`.
 #[derive(Args)]
 struct ModelsShowArgs {
     /// Provider/model string as a single arg, e.g. "nebius/Qwen/Qwen3-Embedding-8B".
@@ -905,7 +904,7 @@ struct IngestPreparedArgs {
     #[arg(long, conflicts_with = "segments_json")]
     segments_file: Option<String>,
 
-    /// ENS-475 Wave A: return immediately with the launched job
+    /// Return immediately with the launched job
     /// instead of polling to terminal status. Ignored when the server
     /// returns synchronously (no `job_id` in the response).
     #[arg(long = "async", default_value_t = false)]
@@ -924,7 +923,7 @@ struct IngestDocumentsArgs {
 
     /// Single document ID (for single-document ingest). If omitted when
     /// using --content/--content-file, a deterministic content-hash id
-    /// ("doc-<sha256 prefix>") is generated (ENS-3054) so identical
+    /// ("doc-<sha256 prefix>") is generated so identical
     /// content re-ingests as a no-op; pass this explicitly to control
     /// replace-a-prior-version semantics.
     #[arg(long = "document-id")]
@@ -949,7 +948,7 @@ struct IngestDocumentsArgs {
     #[arg(long = "voice-id")]
     voice_id: Option<String>,
 
-    /// DEPRECATED (ENS-638): the server always processes ingest
+    /// DEPRECATED: the server always processes ingest
     /// asynchronously and ignores this flag; accepted for compatibility
     #[arg(long)]
     sync: bool,
@@ -962,7 +961,7 @@ struct IngestDocumentsArgs {
     #[arg(long = "dry-run")]
     dry_run: bool,
 
-    /// ENS-475 Wave A: return immediately with the launched job
+    /// Return immediately with the launched job
     /// instead of polling to terminal status. Mutually exclusive with
     /// `--sync` (the latter requests a synchronous server-side path).
     /// Ignored when the server returns synchronously regardless
@@ -1023,9 +1022,7 @@ enum CorpusSubcommand {
     /// Delete a corpus
     ///
     /// Destructive. Requires `--confirm` to proceed; in an interactive TTY
-    /// you'll be prompted to type the corpus id to double-check
-    /// (CLI-TIER-013). In non-TTY / JSON mode, `--confirm-token` will be
-    /// required once CLI-TIER-014 lands.
+    /// you'll be prompted to type the corpus id to double-check.
     Delete(CorpusDeleteArgs),
 
     /// Get corpus stats
@@ -1055,22 +1052,22 @@ enum CorpusSubcommand {
         include_content: bool,
     },
 
-    /// Get enriched detail for a single corpus (J-004c)
+    /// Get enriched detail for a single corpus
     Get {
         #[arg(long)]
         id: String,
     },
 
-    /// Discard all uncommitted pending changes for a corpus (J-004c)
+    /// Discard all uncommitted pending changes for a corpus
     Revert {
         #[arg(long)]
         id: String,
     },
 
-    /// Show the commit history for a corpus (J-004c)
+    /// Show the commit history for a corpus
     Commits(CorpusCommitsArgs),
 
-    /// Get vector-space metrics for a corpus (J-020)
+    /// Get vector-space metrics for a corpus
     Metrics(CorpusMetricsArgs),
 
     /// Stage document changes for later commit
@@ -1085,28 +1082,27 @@ enum CorpusSubcommand {
     /// Delete a specific pending staged change
     PendingDelete(CorpusPendingDeleteArgs),
 
-    /// Document-scoped operations — app-memory epic P3 (ADR
-    /// ENSCRIVE-CLI-APP-MEMORY-2026-07-31 §3/§6-P3).
+    /// Document-scoped operations.
     #[command(subcommand)]
     Document(CorpusDocumentSubcommand),
 
     /// Materialize a purpose-built corpus from a dataset's selected
-    /// corpus subset (ENS-104). Closes the rapid-voice-iteration gap in
-    /// the 5-step E2E evals vision: an 83-doc stratified sample re-embeds
-    /// in seconds instead of hours.
+    /// corpus subset. Closes the rapid-voice-iteration gap in the 5-step
+    /// evals workflow: an 83-doc stratified sample re-embeds in seconds
+    /// instead of hours.
     MaterializeFromDataset(CorpusMaterializeFromDatasetArgs),
 
     /// Populate an existing empty corpus with a dataset's corpus,
-    /// chunked by the supplied voice (ENS-133, parent ENS-132). The
-    /// canonical Step-4 primitive of the 5-step Enscrive eval workflow
+    /// chunked by the supplied voice. The canonical Step-4 primitive of
+    /// the 5-step Enscrive eval workflow
     /// (voice + empty corpus + dataset → populate → eval). The
     /// corpus's existing model + dimensions bind the embedding
     /// space; the voice's embedding_model is advisory only. Returns 409
     /// if the corpus already has documents.
     PopulateFromDataset(CorpusPopulateFromDatasetArgs),
 
-    /// Promote a corpus into another environment (WS-45 / ADR
-    /// CORPUS-ENV-PROMOTION-2026-06-27). Requires a Pro+/Enterprise plan
+    /// Promote a corpus into another environment. Requires a
+    /// Pro+/Enterprise plan
     /// (MultiEnv entitlement); the target env must belong to the same tenant
     /// and differ from the source (POST /v1/corpora/{id}/promote).
     Promote {
@@ -1120,7 +1116,7 @@ enum CorpusSubcommand {
     },
 }
 
-/// CLI-TIER-013: args for `enscrive corpus delete`.
+/// Args for `enscrive corpus delete`.
 #[derive(Args)]
 struct CorpusDeleteArgs {
     /// Corpus UUID to delete.
@@ -1163,7 +1159,7 @@ struct CorpusCommitArgs {
     #[arg(long)]
     id: String,
 
-    /// DEPRECATED (ENS-638): the server always processes commits
+    /// DEPRECATED: the server always processes commits
     /// asynchronously and ignores this flag; accepted for compatibility
     #[arg(long = "force-sync")]
     force_sync: bool,
@@ -1184,8 +1180,7 @@ struct CorpusPendingDeleteArgs {
     document_id: String,
 }
 
-/// App-memory epic P3 (ADR ENSCRIVE-CLI-APP-MEMORY-2026-07-31 §3/§6-P3):
-/// `enscrive corpus document <verb>`.
+/// `enscrive corpus document <verb>` subcommands.
 #[derive(Subcommand)]
 enum CorpusDocumentSubcommand {
     /// Retire a single memory: delete one document (all its chunks, all
@@ -1204,7 +1199,7 @@ struct CorpusDocumentDeleteArgs {
     document_id: String,
 }
 
-/// J-004c: Arguments for `enscrive corpus commits`.
+/// Arguments for `enscrive corpus commits`.
 #[derive(Args)]
 struct CorpusCommitsArgs {
     /// Corpus ID.
@@ -1216,7 +1211,7 @@ struct CorpusCommitsArgs {
     limit: i64,
 }
 
-/// ENS-104: Arguments for `enscrive corpus materialize-from-dataset`.
+/// Arguments for `enscrive corpus materialize-from-dataset`.
 #[derive(Args)]
 struct CorpusMaterializeFromDatasetArgs {
     /// Dataset UUID whose selected corpus subset drives the ingest.
@@ -1237,7 +1232,7 @@ struct CorpusMaterializeFromDatasetArgs {
     voice_id: Option<String>,
 }
 
-/// ENS-133: Arguments for `enscrive corpus populate-from-dataset`.
+/// Arguments for `enscrive corpus populate-from-dataset`.
 #[derive(Args)]
 struct CorpusPopulateFromDatasetArgs {
     /// Existing corpus UUID to populate. Must currently have
@@ -1255,7 +1250,7 @@ struct CorpusPopulateFromDatasetArgs {
     #[arg(long = "voice-id")]
     voice_id: String,
 
-    /// ENS-394 Phase 1: return immediately with the launched job_id
+    /// Return immediately with the launched job_id
     /// instead of polling to terminal status. The job continues
     /// server-side; use `enscrive jobs get --id <job_id>` to check
     /// progress.
@@ -1270,7 +1265,7 @@ struct CorpusPopulateFromDatasetArgs {
     timeout_secs: u64,
 }
 
-/// J-020: Arguments for `enscrive corpus metrics`.
+/// Arguments for `enscrive corpus metrics`.
 #[derive(Args)]
 struct CorpusMetricsArgs {
     /// Corpus UUID to compute metrics for.
@@ -1358,7 +1353,7 @@ enum VoicesSubcommand {
 
     /// Delete a voice
     ///
-    /// Destructive. Requires `--confirm` (CLI-TIER-013); interactive TTY
+    /// Destructive. Requires `--confirm`; interactive TTY
     /// sessions also prompt for the voice id for double-check.
     Delete(VoicesDeleteArgs),
 
@@ -1384,7 +1379,7 @@ enum VoicesSubcommand {
     /// Search with a voice profile
     Search(VoiceSearchArgs),
 
-    /// EV-011 voice-diff analyzer + EV-012 cost estimator.
+    /// Voice-diff analyzer + cost estimator.
     #[command(subcommand)]
     Diff2(evals2::VoiceDiff2Subcommand),
 }
@@ -1431,7 +1426,7 @@ Example query item:
     "match_mode": "document_prefix"
   }"#;
 
-/// CLI-TIER-013: args for `enscrive voices delete`.
+/// Args for `enscrive voices delete`.
 #[derive(Args)]
 struct VoicesDeleteArgs {
     /// Voice UUID to delete.
@@ -1728,7 +1723,7 @@ struct FromUrlArgs {
     #[arg(long = "timeout-secs", alias = "timeout", default_value_t = 300u64)]
     timeout_secs: u64,
 
-    /// ENS-475 Wave A: return immediately with the launched job
+    /// Return immediately with the launched job
     /// instead of polling to terminal status. The job continues
     /// server-side; use `enscrive jobs get --id <job_id>` to check
     /// progress.
@@ -2098,7 +2093,7 @@ struct UpdateEvalDatasetArgs {
     queries_file: Option<String>,
 }
 
-/// Wallet subcommands (ENS-476 / ENS-750) — mirrors of the portal wallet
+/// Wallet subcommands — mirrors of the portal wallet
 /// read surface onto the API-key `/v1` surface.
 #[derive(Subcommand)]
 enum WalletSubcommand {
@@ -2165,10 +2160,10 @@ enum JobsSubcommand {
     /// Cancel a running job
     Cancel(JobsCancelArgs),
 
-    /// Retry failed sub-batches of a batch-set job (J-024 Unit 3)
+    /// Retry failed sub-batches of a batch-set job
     Retry(JobsRetryArgs),
 
-    /// Abandon a failed batch-set job, cleaning up staging corpora (J-024 Unit 3)
+    /// Abandon a failed batch-set job, cleaning up staging corpora
     Abandon(JobsAbandonArgs),
 }
 
@@ -2177,21 +2172,21 @@ struct JobsListArgs {
     /// Filter by job status (pending | in_progress | complete | failed | cancelled).
     #[arg(long)]
     status: Option<String>,
-    /// ENS-394 §A7: filter by job_kind (corpus_ingest, embedding_batch_*,
+    /// Filter by job_kind (corpus_ingest, embedding_batch_*,
     /// search, corpus_delete, eval_run, legacy).
     #[arg(long)]
     kind: Option<String>,
-    /// ENS-394 §A7: filter by parent job UUID. Pass the literal string
+    /// Filter by parent job UUID. Pass the literal string
     /// `null` to list only top-level (no parent) jobs.
     #[arg(long = "parent-id")]
     parent_id: Option<String>,
-    /// ENS-394 §A7: RFC-3339 lower bound on created_at.
+    /// RFC-3339 lower bound on created_at.
     #[arg(long = "created-after")]
     created_after: Option<String>,
-    /// ENS-394 §A7: RFC-3339 upper bound on created_at.
+    /// RFC-3339 upper bound on created_at.
     #[arg(long = "created-before")]
     created_before: Option<String>,
-    /// ENS-394 §A7: filter by async classification. true → write-side
+    /// Filter by async classification. true → write-side
     /// kinds (corpus_ingest, embedding_batch_*, corpus_delete,
     /// eval_run); false → search.
     #[arg(long = "async")]
@@ -2259,7 +2254,7 @@ enum BatchSetsSubcommand {
     Abandon(BatchSetsGetArgs),
 }
 
-/// J-024: Arguments for `enscrive batch-sets list`.
+/// Arguments for `enscrive batch-sets list`.
 #[derive(Args)]
 struct BatchSetsListArgs {
     /// Corpus UUID
@@ -2275,7 +2270,7 @@ struct BatchSetsListArgs {
     offset: Option<u32>,
 }
 
-/// J-024: Arguments for `enscrive batch-sets get`.
+/// Arguments for `enscrive batch-sets get`.
 #[derive(Args)]
 struct BatchSetsGetArgs {
     /// Batch-set UUID
@@ -2288,13 +2283,13 @@ struct BatchSetsGetArgs {
 
 #[derive(Subcommand)]
 enum AdminSubcommand {
-    /// Rate-limit governor commands (DESIGN §R9)
+    /// Rate-limit governor commands
     RateLimits {
         #[command(subcommand)]
         sub: AdminRateLimitsSubcommand,
     },
 
-    /// Inbound /v1 edge rate-limit override commands (ENS-782). Distinct from
+    /// Inbound /v1 edge rate-limit override commands. Distinct from
     /// the provider governor above: these manage the per-tenant override layer
     /// on the inbound request limiter, keyed by route CATEGORY
     /// (search | query_embeddings | ingest | corpus_crud | voice_crud |
@@ -2304,66 +2299,66 @@ enum AdminSubcommand {
         sub: AdminApiRateLimitsSubcommand,
     },
 
-    /// Rate card management commands (ENS-175 / ENS-486). Requires an API
+    /// Rate card management commands. Requires an API
     /// key with the Admin capability (operator key, not a normal tenant key).
     Ratecard {
         #[command(subcommand)]
         sub: AdminRatecardSubcommand,
     },
 
-    /// Operator wallet top-up commands (ENS-752)
+    /// Operator wallet top-up commands
     Wallet {
         #[command(subcommand)]
         sub: admin_ops::AdminWalletSubcommand,
     },
 
-    /// Durable admin audit-log commands (ENS-752 / ENS-250 / WS-16)
+    /// Durable admin audit-log commands
     Audit {
         #[command(subcommand)]
         sub: admin_ops::AdminAuditSubcommand,
     },
 
-    /// Admin-scoped incident log viewer (ENS-752 / ENS-298)
+    /// Admin-scoped incident log viewer
     Incidents {
         #[command(subcommand)]
         sub: admin_ops::AdminIncidentsSubcommand,
     },
 
-    /// Migration status commands (ENS-752 / ENS-229)
+    /// Migration status commands
     Migrations {
         #[command(subcommand)]
         sub: admin_ops::AdminMigrationsSubcommand,
     },
 
-    /// Aggregate stack telemetry commands (ENS-752)
+    /// Aggregate stack telemetry commands
     Telemetry {
         #[command(subcommand)]
         sub: admin_ops::AdminTelemetrySubcommand,
     },
 
-    /// Metering backfill commands (ENS-752 / Pillar 2 M3.2-5)
+    /// Metering backfill commands
     Metering {
         #[command(subcommand)]
         sub: admin_ops::AdminMeteringSubcommand,
     },
 
-    /// Operator tenant provisioning + erasure commands (ENS-752)
+    /// Operator tenant provisioning + erasure commands
     Tenants {
         #[command(subcommand)]
         sub: admin_ops::AdminTenantsSubcommand,
     },
 
-    /// Operator API-key minting commands (ENS-752)
+    /// Operator API-key minting commands
     ApiKeys {
         #[command(subcommand)]
         sub: admin_ops::AdminApiKeysSubcommand,
     },
 
-    /// Import a tenant's catalog backup artifact (ENS-752 / ENS-648).
+    /// Import a tenant's catalog backup artifact.
     /// Admin-only; confirm-gated; checksum-verified before any write.
     CatalogImport(admin_ops::AdminCatalogImportArgs),
 
-    /// Corpus repair commands (ENS-752 / ENS-660)
+    /// Corpus repair commands
     Corpora {
         #[command(subcommand)]
         sub: admin_ops::AdminCorporaSubcommand,

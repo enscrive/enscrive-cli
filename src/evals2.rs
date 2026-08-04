@@ -80,7 +80,7 @@ pub struct DatasetsCreateArgs {
     pub selected_doc_ids: Option<String>,
     #[arg(long)]
     pub rationale: Option<String>,
-    /// ENS-397 Phase 1.5: for HuggingFace sources the server returns
+    /// For HuggingFace sources the server returns
     /// `202 Accepted + JobLaunchResponse`; this flag returns the
     /// launch response immediately instead of polling to terminal
     /// status. Ignored for non-async source types (croissant) which
@@ -103,7 +103,7 @@ pub struct DatasetsUploadArgs {
     #[arg(long)]
     pub dir: String,
     /// Which qrels split to upload when the directory uses the BEIR layout
-    /// (qrels/<split>.tsv). Default "test" — matches EV-003 baseline
+    /// (qrels/<split>.tsv). Default "test" — matches the baseline
     /// comparison. Ignored when a flat qrels.tsv is present.
     #[arg(long, default_value = "test")]
     pub qrels_split: String,
@@ -131,7 +131,7 @@ pub struct DatasetsUploadArgs {
     /// For `explicit`: free-form rationale (stored for audit).
     #[arg(long)]
     pub rationale: Option<String>,
-    /// ENS-475 Wave A: return immediately with the launched job
+    /// Return immediately with the launched job
     /// instead of polling to terminal status. Ignored when the server
     /// returns synchronously (small uploads inline the response).
     #[arg(long = "async", default_value_t = false)]
@@ -165,7 +165,7 @@ pub enum EvalDefsSubcommand {
         #[command(subcommand)]
         sub: EvalRunsSubcommand,
     },
-    /// Publish a completed full-scope run as canonical (EV-017).
+    /// Publish a completed full-scope run as canonical.
     Publish(EvalDefsPublishArgs),
     /// List active publications for an eval.
     Publications {

@@ -43,7 +43,7 @@ pub struct AdminWalletCreditArgs {
 
     /// Amount to credit, in MICROS (1,000,000 micros = $1.00). Must be > 0.
     /// Sent verbatim as the server's exact-integer unit — no client-side
-    /// dollar→micros float conversion (ENS-708 exact-ledger discipline).
+    /// dollar→micros float conversion.
     #[arg(long = "amount-micros", required = true)]
     amount_micros: i64,
 
