@@ -361,7 +361,9 @@ and prototype, for free, forever.
 
 **Production or commercial use requires a paid license:**
 
-- **Managed** (`api.enscrive.io`): an Enscrive **subscription** with metered billing.
+- **Managed** (`api.enscrive.io`): an Enscrive **subscription** with metered
+  billing. Not yet on sale — the managed plane is pre-launch and refuses
+  connections, so self-managed is the only path today.
 - **Self-managed** (CLI / self-hosted stack): an Enscrive **commercial license**.
 - **Enterprise**: a **custom agreement**.
 
