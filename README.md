@@ -335,6 +335,12 @@ On failure:
 
 Exit codes: `0` success, `1` bug, `2` unsupported, `3` config error, `4` plan required, `5` confirmation required.
 
+`3` (`FAIL_CONFIG`) covers a bad argument *and* an endpoint the CLI could not
+reach — connection refused or timed out. If your stack is down or `--endpoint`
+points somewhere wrong, you get `3`, not `1`; `1` means the CLI itself
+misbehaved. Scripts that treat any non-zero exit as a defect should special-case
+`3` as "check the stack/endpoint first".
+
 With `--output json`, **stdout carries exactly one JSON document and nothing else** — on success and on failure alike. Human-readable prose, progress ticks, and warnings all go to stderr, so `enscrive ... --output json | jq` is always safe and never needs filtering. This is enforced by a test (`tests/json_output_purity.rs`), not just a convention.
 
 ---
@@ -355,7 +361,9 @@ and prototype, for free, forever.
 
 **Production or commercial use requires a paid license:**
 
-- **Managed** (`api.enscrive.io`): an Enscrive **subscription** with metered billing.
+- **Managed** (`api.enscrive.io`): an Enscrive **subscription** with metered
+  billing. Not yet on sale — the managed plane is pre-launch and refuses
+  connections, so self-managed is the only path today.
 - **Self-managed** (CLI / self-hosted stack): an Enscrive **commercial license**.
 - **Enterprise**: a **custom agreement**.
 

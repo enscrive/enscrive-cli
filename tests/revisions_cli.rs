@@ -3,14 +3,19 @@
 //! These run the real `enscrive` binary (CARGO_BIN_EXE) with an isolated
 //! HOME (no profiles.toml) and a deliberately unreachable endpoint
 //! (`http://127.0.0.1:9`). Every refusal asserted here exits with
-//! EXIT_CONFIRMATION_REQUIRED (5) — NOT a network failure (1) — which
+//! EXIT_CONFIRMATION_REQUIRED (5) — NOT a network failure — which
 //! proves the destructive-command gate fires BEFORE any API call is
 //! attempted.
+//!
+//! ENS-3237 moved unreachable-endpoint failures from EXIT_FAILURE (1) to
+//! EXIT_CONFIG (3): a refused connection is a configuration/environment
+//! condition, not a CLI defect. The gate tests are unaffected (they never
+//! reach the network); the one test that deliberately falls THROUGH the
+//! gate to the network now expects 3.
 
 use std::process::{Command, Stdio};
 
 const UNREACHABLE_ENDPOINT: &str = "http://127.0.0.1:9";
-const EXIT_FAILURE: i32 = 1;
 const EXIT_CONFIG: i32 = 3;
 const EXIT_CONFIRMATION_REQUIRED: i32 = 5;
 /// A syntactically valid revision id (revision ids are UUIDs); the gate
@@ -147,7 +152,9 @@ fn restore_with_managed_token_passes_gate_on_non_tty() {
     // Non-TTY stdin + no --confirm: with a token the gate must be satisfied
     // and execution must proceed past it. The next step is the revision
     // lookup against the unreachable endpoint — so the proof of finding 4
-    // is exit code 1 (network failure AFTER the gate), never 5 (refusal).
+    // is that we exit on the network failure AFTER the gate (EXIT_CONFIG,
+    // ENS-3237), never 5 (refusal). What this test pins is which LAYER
+    // failed, not the numeric code for its own sake.
     let out = enscrive(
         home.path(),
         &[
@@ -161,7 +168,7 @@ fn restore_with_managed_token_passes_gate_on_non_tty() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         out.status.code(),
-        Some(EXIT_FAILURE),
+        Some(EXIT_CONFIG),
         "token-satisfied non-TTY restore must pass the gate and fail only at \
          the (unreachable) network layer — stderr: {stderr}"
     );

@@ -458,8 +458,8 @@ case ":$PATH:" in
 esac
 
 echo "Next steps:"
-echo "  enscrive init --mode managed      # connect to api.enscrive.io"
-echo "  enscrive init --mode self-managed # fetch service stack + run locally"
+echo "  enscrive init --mode self-managed # fetch service stack + run locally (supported today)"
+echo "  enscrive init --mode managed      # api.enscrive.io (pre-launch — not yet accepting connections)"
 echo ""
 # Docs home for the public CLI (PUBLIC-CLI-DOCS proposal §4, venue B).
 echo "Docs: https://enscrive.io/docs"

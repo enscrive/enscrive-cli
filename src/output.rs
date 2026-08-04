@@ -34,6 +34,16 @@ pub enum FailureClass {
     /// server-side. (ENS-651 review.)
     #[serde(rename = "FAIL_TIMEOUT")]
     Timeout,
+    /// The CLI could not reach the endpoint it was configured to talk to —
+    /// nothing listening, or the deadline elapsed before a response. The
+    /// endpoint, the profile, or whether the stack is running is what needs
+    /// fixing; the binary itself is fine.
+    ///
+    /// Distinct from `Bug` on purpose: an unreachable endpoint is the most
+    /// common first-contact failure there is, and classifying it `FAIL_BUG`
+    /// told every new user their stack being down was an Enscrive defect.
+    #[serde(rename = "FAIL_CONFIG")]
+    Config,
 }
 
 impl fmt::Display for FailureClass {
@@ -50,6 +60,7 @@ impl fmt::Display for FailureClass {
             Self::LicenseInvalid => write!(f, "FAIL_LICENSE_INVALID"),
             Self::ApiError => write!(f, "FAIL_API_ERROR"),
             Self::Timeout => write!(f, "FAIL_TIMEOUT"),
+            Self::Config => write!(f, "FAIL_CONFIG"),
         }
     }
 }
@@ -211,6 +222,7 @@ mod tests {
         );
         assert_eq!(FailureClass::ApiError.to_string(), "FAIL_API_ERROR");
         assert_eq!(FailureClass::Timeout.to_string(), "FAIL_TIMEOUT");
+        assert_eq!(FailureClass::Config.to_string(), "FAIL_CONFIG");
     }
 
     #[test]
@@ -229,6 +241,7 @@ mod tests {
             (FailureClass::LicenseInvalid, "FAIL_LICENSE_INVALID"),
             (FailureClass::ApiError, "FAIL_API_ERROR"),
             (FailureClass::Timeout, "FAIL_TIMEOUT"),
+            (FailureClass::Config, "FAIL_CONFIG"),
         ] {
             let r = CliResponse::fail("cmd", "msg".to_string(), class, 1);
             let json = serde_json::to_value(&r).unwrap();

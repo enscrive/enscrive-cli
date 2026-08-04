@@ -35,11 +35,25 @@ Handlers terminate by building a `CliResponse` and calling `.emit(fmt)`
 | success | 0 | `{ok:true, command, data}` |
 | `FAIL_BUG` | 1 | generic failure |
 | `FAIL_UNSUPPORTED` | 2 | endpoint not on this surface |
-| config | 3 | bad client input |
+| `FAIL_CONFIG` | 3 | bad client input, **or** the configured endpoint is unreachable (connection refused / timed out) |
 | `FAIL_PLAN_REQUIRED` | 4 | plan gate |
 | `FAIL_CONFIRMATION_REQUIRED` | 5 | destructive op needs confirm |
 | `FAIL_QUOTA_EXCEEDED` | 6 | quota |
 | `FAIL_LICENSE_INVALID` | 7 | license |
+
+Two transport rules a script can rely on:
+
+- **Unreachable endpoint → `FAIL_CONFIG` / exit 3.** A refused connection or a
+  request timeout against the configured endpoint means the stack is down or
+  the endpoint is wrong — not a CLI defect. (It classified as `FAIL_BUG` / 1
+  before ENS-3237.) Every other transport error — TLS, malformed response,
+  body read — remains `FAIL_BUG` / 1, as do server-side job failures and
+  poll timeouts, which are outcomes of a job that actually ran.
+- **A pre-launch refusal is never a success, whatever its status code.** A
+  body carrying `not_yet_available` or `phase: pre-launch` maps to
+  `FAIL_UNSUPPORTED` / exit 2 on *any* HTTP status. The managed edge answers
+  `/v1/*` with that body under **HTTP 200**, so keying on 503 made the CLI
+  report `ok:true` for a refusal to serve (ENS-3243).
 
 `--output json` prints the whole envelope; `--output human` (the default,
 `main.rs:65`) prints only `data` on success and `[CLASS] error` to stderr on

@@ -49,9 +49,12 @@ pub enum ApiError {
     /// 5xx response whose JSON body did NOT carry a `failure_class`.
     Http5xx { status: u16, body: Value },
 
-    /// 503 with `failure_class` == `"not_yet_available"` **or** without a
-    /// `failure_class` but with pre-launch markers in the body.
+    /// The response body carried a pre-launch refusal marker
+    /// (`not_yet_available` / `phase: pre-launch`), on ANY status code.
     /// Maps directly to `FailureClass::Unsupported`.
+    ///
+    /// `status` is retained for diagnostics only — it is deliberately not a
+    /// condition of this variant. See `is_pre_launch` / `interpret_response`.
     NotYetAvailable { status: u16 },
 
     /// Request timed out (reqwest timeout fires before a response arrives).
@@ -117,10 +120,21 @@ impl fmt::Display for ApiError {
             ApiError::Http5xx { status, body } => {
                 write!(f, "HTTP {status}: {}", body_message(body))
             }
-            ApiError::NotYetAvailable { status } => {
-                write!(f, "HTTP {status}: not yet available on public /v1")
-            }
-            ApiError::Timeout => write!(f, "request timed out"),
+            // "not yet available on public /v1" left a first-contact user with
+            // nowhere to go. Name the situation and the path that does work.
+            ApiError::NotYetAvailable { status } => write!(
+                f,
+                "this endpoint refused the request as not-yet-available (HTTP {status}). \
+                 The managed plane at api.enscrive.io is pre-launch and is not accepting \
+                 connections yet. Run your own stack instead: \
+                 `enscrive init --mode self-managed`, then `enscrive start`."
+            ),
+            ApiError::Timeout => write!(
+                f,
+                "request timed out. If this is your local stack, check it is up with \
+                 `enscrive status`; otherwise check `--endpoint` / ENSCRIVE_BASE_URL \
+                 and your profile."
+            ),
         }
     }
 }
@@ -265,6 +279,38 @@ fn body_message(body: &Value) -> String {
         .unwrap_or_else(|| serde_json::to_string(body).unwrap_or_default())
 }
 
+/// Interpret any `/v1` response — success or failure — into a JSON value or
+/// an `ApiError`.
+///
+/// Every JSON-returning client method funnels through here so the pre-launch
+/// check cannot be bypassed by one call site. That check comes FIRST, before
+/// the status split, because a refusal is not required to arrive with a
+/// refusal's status code: the managed edge (`api.enscrive.io`) answers every
+/// path — `/v1/*` included — with an ALB fixed response carrying
+/// `{"error":"not_yet_available","phase":"pre-launch"}` and **HTTP 200**.
+/// Keying on 503 meant that body parsed as a successful result and the CLI
+/// reported `ok:true` for what is actually a refusal to serve.
+fn interpret_response(status: u16, body_text: &str) -> Result<Value, ApiError> {
+    if let Ok(body) = serde_json::from_str::<Value>(body_text)
+        && is_pre_launch(&body)
+    {
+        return Err(ApiError::NotYetAvailable { status });
+    }
+
+    if !(200..300).contains(&(status as u32)) {
+        return Err(classify_error_response(status, body_text));
+    }
+
+    if body_text.trim().is_empty() {
+        return Ok(Value::Null);
+    }
+
+    serde_json::from_str(body_text).map_err(|_| ApiError::InvalidResponse {
+        status,
+        body: body_text.to_string(),
+    })
+}
+
 /// Classify an HTTP error response into the appropriate `ApiError` variant.
 /// Called with a non-success status + the raw body text from any client method.
 fn classify_error_response(status: u16, body_text: &str) -> ApiError {
@@ -327,10 +373,14 @@ fn classify_error_response(status: u16, body_text: &str) -> ApiError {
     }
 }
 
-/// Return true when the JSON body contains pre-launch markers that the
-/// original string heuristics keyed on.
+/// Return true when the JSON body carries a pre-launch refusal marker.
+///
+/// Status-independent by design: the marker is the evidence, not the code it
+/// arrives with. Checked across every field the edge and the service are
+/// known to put it in, so a body is recognized whether it says
+/// `{"phase":"pre-launch"}`, `{"error":"not_yet_available"}`, or carries the
+/// class in `failure_class`.
 fn is_pre_launch(body: &Value) -> bool {
-    // `"phase": "pre-launch"` or error/message containing "not_yet_available"
     if body
         .get("phase")
         .and_then(Value::as_str)
@@ -339,14 +389,15 @@ fn is_pre_launch(body: &Value) -> bool {
     {
         return true;
     }
-    // error field containing the literal string
-    if body
-        .get("error")
-        .and_then(Value::as_str)
-        .map(|e| e.contains("not_yet_available"))
-        .unwrap_or(false)
-    {
-        return true;
+    for field in ["error", "message", "failure_class"] {
+        if body
+            .get(field)
+            .and_then(Value::as_str)
+            .map(|v| v.contains("not_yet_available"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
     }
     false
 }
@@ -420,18 +471,7 @@ impl EnscriveClient {
             .await
             .map_err(map_reqwest_err)?;
 
-        if !(200..300).contains(&(status as u32)) {
-            return Err(classify_error_response(status, &body_text));
-        }
-
-        if body_text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-
-        serde_json::from_str(&body_text).map_err(|_| ApiError::InvalidResponse {
-            status,
-            body: body_text,
-        })
+        interpret_response(status, &body_text)
     }
 
     pub async fn get_bytes_with_query(
@@ -588,18 +628,7 @@ impl EnscriveClient {
         let status = response.status().as_u16();
         let body_text = response.text().await.map_err(map_reqwest_err)?;
 
-        if !(200..300).contains(&(status as u32)) {
-            return Err(classify_error_response(status, &body_text));
-        }
-
-        if body_text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-
-        serde_json::from_str(&body_text).map_err(|_| ApiError::InvalidResponse {
-            status,
-            body: body_text,
-        })
+        interpret_response(status, &body_text)
     }
 
     pub async fn post_text(&self, path: &str, body: Value, accept: &str) -> Result<String, String> {
@@ -708,16 +737,7 @@ impl EnscriveClient {
         let status = response.status().as_u16();
         let body_text = response.text().await.map_err(map_reqwest_err)?;
 
-        if !(200..300).contains(&(status as u32)) {
-            return Err(classify_error_response(status, &body_text));
-        }
-        if body_text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_str(&body_text).map_err(|_| ApiError::InvalidResponse {
-            status,
-            body: body_text,
-        })
+        interpret_response(status, &body_text)
     }
 
     async fn send_json(
@@ -743,18 +763,7 @@ impl EnscriveClient {
         let status = response.status().as_u16();
         let body_text = response.text().await.map_err(map_reqwest_err)?;
 
-        if !(200..300).contains(&(status as u32)) {
-            return Err(classify_error_response(status, &body_text));
-        }
-
-        if body_text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-
-        serde_json::from_str(&body_text).map_err(|_| ApiError::InvalidResponse {
-            status,
-            body: body_text,
-        })
+        interpret_response(status, &body_text)
     }
 }
 
@@ -781,7 +790,8 @@ mod tests {
     fn api_error_to_class(err: &ApiError) -> FailureClass {
         match err {
             ApiError::NotYetAvailable { .. } => FailureClass::Unsupported,
-            ApiError::Timeout => FailureClass::Bug,
+            ApiError::Timeout => FailureClass::Config,
+            ApiError::Network(e) if e.is_connect() => FailureClass::Config,
             ApiError::Network(_) => FailureClass::Bug,
             ApiError::InvalidResponse { .. } => FailureClass::Bug,
             ApiError::ServerClassified { class, .. } => map_class_str(class),
@@ -831,6 +841,117 @@ mod tests {
         assert_eq!(api_error_to_class(&err), FailureClass::Unsupported);
     }
 
+    // --- ENS-3243: pre-launch detection must not be status-code-brittle ---
+
+    /// The regression this closes. `api.enscrive.io` fronts `/v1/*` with an
+    /// ALB fixed response that carries the pre-launch refusal under **HTTP
+    /// 200** — verified live: every path, including `/v1/corpora`, answers
+    /// `200 {"error":"not_yet_available","region":"us","phase":"pre-launch",
+    /// "retry_after":null}`. The old code only looked for the marker on
+    /// 503s, so this body parsed as a successful result and the CLI printed
+    /// `ok:true` for a refusal to serve.
+    #[test]
+    fn pre_launch_marker_on_200_is_a_failure_not_a_success() {
+        let body = r#"{"error":"not_yet_available","region":"us","phase":"pre-launch","retry_after":null}"#;
+        let result = interpret_response(200, body);
+
+        let err = result.expect_err("a pre-launch refusal must never be Ok");
+        assert!(
+            matches!(err, ApiError::NotYetAvailable { status: 200 }),
+            "expected NotYetAvailable, got {err:?}"
+        );
+        assert_eq!(api_error_to_class(&err), FailureClass::Unsupported);
+
+        // The message must leave a first-contact user somewhere to go.
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("api.enscrive.io") && rendered.contains("pre-launch"),
+            "must name the situation: {rendered}"
+        );
+        assert!(
+            rendered.contains("self-managed"),
+            "must name the path that works: {rendered}"
+        );
+    }
+
+    /// The marker is the evidence, not the status code it rides on.
+    #[test]
+    fn pre_launch_marker_is_recognized_on_any_status() {
+        for status in [200, 201, 403, 500, 502, 503] {
+            let body = r#"{"error":"not_yet_available","phase":"pre-launch"}"#;
+            let err = interpret_response(status, body)
+                .expect_err("pre-launch must fail on status {status}");
+            assert!(
+                matches!(err, ApiError::NotYetAvailable { .. }),
+                "status {status} must classify as NotYetAvailable, got {err:?}"
+            );
+        }
+    }
+
+    /// End-to-end through the real `EnscriveClient` against a mock that
+    /// answers exactly like the live managed edge: HTTP 200 carrying the
+    /// pre-launch body. Asserts on what a caller receives, not on the
+    /// classifier in isolation — the unit tests above can't catch a call
+    /// site that bypasses `interpret_response`.
+    #[tokio::test]
+    async fn client_treats_200_pre_launch_edge_response_as_a_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        const EDGE_BODY: &str =
+            r#"{"error":"not_yet_available","region":"us","phase":"pre-launch","retry_after":null}"#;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock edge");
+        let port = listener.local_addr().unwrap().port();
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(1) {
+                let mut stream = match stream {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    EDGE_BODY.len(),
+                    EDGE_BODY
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let client = EnscriveClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "test-key".to_string(),
+            None,
+        );
+        let result = client.get_json("/v1/corpora").await;
+
+        let err = result.expect_err(
+            "a 200 carrying the pre-launch marker must not be reported as success",
+        );
+        assert!(
+            matches!(err, ApiError::NotYetAvailable { status: 200 }),
+            "expected NotYetAvailable, got {err:?}"
+        );
+    }
+
+    /// Guard the other direction: an ordinary 200 must still succeed. A
+    /// marker check that swallowed healthy responses would be worse than
+    /// the bug it replaced.
+    #[test]
+    fn ordinary_200_still_succeeds() {
+        let body = r#"{"corpora":[],"total":0}"#;
+        let value = interpret_response(200, body).expect("a normal 200 must stay Ok");
+        assert_eq!(value["total"], 0);
+
+        // Including bodies that merely mention a phase that is not pre-launch.
+        let live = r#"{"phase":"live","results":[]}"#;
+        assert!(interpret_response(200, live).is_ok(), "phase:live must pass");
+    }
+
     /// 403 with `failure_class: plan_required` → ServerClassified → PlanRequired
     #[test]
     fn a403_plan_required_maps_to_server_classified() {
@@ -858,14 +979,40 @@ mod tests {
         assert_eq!(api_error_to_class(&err), FailureClass::Bug);
     }
 
-    /// Timeout → ApiError::Timeout → Bug
+    /// ENS-3237: a timeout against the configured endpoint is a config /
+    /// environment condition, not a CLI defect.
     #[test]
-    fn timeout_variant_maps_to_bug() {
+    fn timeout_variant_maps_to_config() {
         let err = ApiError::Timeout;
-        assert_eq!(api_error_to_class(&err), FailureClass::Bug);
-        // Ensure Display works without panic
+        assert_eq!(api_error_to_class(&err), FailureClass::Config);
         let s = err.to_string();
         assert!(s.contains("timed out"), "unexpected display: {s}");
+        assert!(
+            s.contains("enscrive status") || s.contains("ENSCRIVE_BASE_URL"),
+            "a timeout must point at the thing to check: {s}"
+        );
+    }
+
+    /// ENS-3237: nothing listening on the configured endpoint is the most
+    /// common first-contact failure there is. Built from a REAL refused
+    /// connection — port 1 is reserved and never listening.
+    #[tokio::test]
+    async fn connection_refused_maps_to_config_not_bug() {
+        let error = Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("build client")
+            .get("http://127.0.0.1:1/v1/search")
+            .send()
+            .await
+            .expect_err("port 1 must refuse the connection");
+        assert!(error.is_connect(), "expected a connect error, got: {error}");
+
+        assert_eq!(
+            api_error_to_class(&ApiError::Network(error)),
+            FailureClass::Config,
+            "a stopped stack must not self-report as an Enscrive bug"
+        );
     }
 
     /// Plain 404 with non-JSON body → InvalidResponse → Bug
