@@ -31,6 +31,10 @@ enum Banned {
     /// A programme label: word followed by a single capital letter or
     /// digit token, e.g. `Wave A`, `Unit 3`, `Pillar 2`.
     Label(&'static str),
+    /// A Rust type path, e.g. `Commands::Agents`. Help once told users to
+    /// "see `Commands::Agents`" — an identifier that exists only in this
+    /// crate's source. The command they wanted was `enscrive agents`.
+    RustTypePath,
 }
 
 const BANNED: &[Banned] = &[
@@ -44,6 +48,7 @@ const BANNED: &[Banned] = &[
     Banned::Label("Wave"),
     Banned::Label("Unit"),
     Banned::Label("Pillar"),
+    Banned::RustTypePath,
 ];
 
 /// `PREFIX-<digits>` anywhere in `text`.
@@ -64,6 +69,25 @@ fn has_ticket_id(text: &str, prefix: &str) -> bool {
             .next()
             .is_some_and(|c| c.is_ascii_digit())
         {
+            return true;
+        }
+    }
+    false
+}
+
+/// `Ident::Ident` — two capitalised identifiers joined by `::`. Narrow on
+/// purpose: `/v1/agents` and `enscrive agents` are fine, and the module
+/// paths users legitimately see (none today) would need capitals on both
+/// sides to trip this.
+fn has_rust_type_path(text: &str) -> bool {
+    for (idx, _) in text.match_indices("::") {
+        let before = text[..idx].chars().rev().take_while(|c| c.is_alphanumeric());
+        let lhs_ok = before.last().is_some_and(|c| c.is_ascii_uppercase());
+        let rhs_ok = text[idx + 2..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_uppercase());
+        if lhs_ok && rhs_ok {
             return true;
         }
     }
@@ -96,6 +120,7 @@ fn violations(text: &str) -> Vec<String> {
             Banned::TicketId(prefix) => has_ticket_id(text, prefix),
             Banned::Literal(literal) => text.contains(literal),
             Banned::Label(label) => has_label(text, label),
+            Banned::RustTypePath => has_rust_type_path(text),
         };
         if hit {
             found.push(format!("{banned:?}"));
@@ -204,6 +229,7 @@ fn scanner_catches_what_it_claims_to() {
     assert!(!violations("Rate-limit governor commands (DESIGN §R9)").is_empty());
     assert!(!violations("ADR ENSCRIVE-CLI-APP-MEMORY-2026-07-31").is_empty());
     assert!(!violations("Metering backfill (Pillar 2 M3.2-5)").is_empty());
+    assert!(!violations("see `Commands::Agents`").is_empty());
 
     // ...and must not fire on legitimate help prose.
     assert!(violations("Return immediately with the launched job").is_empty());
@@ -212,4 +238,7 @@ fn scanner_catches_what_it_claims_to() {
     assert!(violations("RFC-3339 lower bound on created_at").is_empty());
     assert!(violations("the unit of work is a chunk").is_empty());
     assert!(violations("Promote a corpus into another environment").is_empty());
+    assert!(violations("see `enscrive agents`").is_empty());
+    assert!(violations("through /v1/agents").is_empty());
+    assert!(violations("clamped to 1..=200").is_empty());
 }

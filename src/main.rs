@@ -124,7 +124,7 @@ enum Commands {
     /// (proxies the tenant's BYOK or platform-managed provider key,
     /// budget-gated and metered). For a persisted, corpus-bound agent
     /// that answers repeatedly against the same retrieval config, see
-    /// `Commands::Agents`.
+    /// `enscrive agents`.
     Complete(CompleteArgs),
 
     /// Enscrive Agents — persistent, corpus-bound agents through
