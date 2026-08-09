@@ -519,7 +519,9 @@ struct SearchArgs {
     #[arg(long = "metadata")]
     filter_metadata: Vec<String>,
 
-    /// Hybrid search alpha: 0.0 = pure dense, 1.0 = pure BM25 sparse
+    /// NOT AVAILABLE: hybrid dense/BM25 retrieval is unimplemented. Supplying
+    /// this is refused by the server with 400 hybrid_retrieval_unavailable
+    /// rather than silently ignored (ENS-3299). Omit it.
     #[arg(long)]
     hybrid_alpha: Option<f32>,
 
@@ -1619,7 +1621,9 @@ struct VoiceSearchArgs {
     #[arg(long = "metadata")]
     filter_metadata: Vec<String>,
 
-    /// Hybrid search alpha: 0.0 = pure dense, 1.0 = pure BM25 sparse
+    /// NOT AVAILABLE: hybrid dense/BM25 retrieval is unimplemented. Supplying
+    /// this is refused by the server with 400 hybrid_retrieval_unavailable
+    /// rather than silently ignored (ENS-3299). Omit it.
     #[arg(long)]
     hybrid_alpha: Option<f32>,
 
