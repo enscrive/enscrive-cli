@@ -40,6 +40,12 @@
 #      The required review did NOT go away. What changed is who satisfies it:
 #      require_code_owner_reviews was set false precisely so the independent
 #      reviewer's approval satisfies the requirement instead of the founder's.
+#      VERIFY IT — a checkable fact, not an assertion in a file you are reading:
+#        gh api repos/enscrive/enscrive-cli/branches/main/protection \
+#          --jq '.required_pull_request_reviews
+#                | {approvals: .required_approving_review_count,
+#                   code_owners: .require_code_owner_reviews}'
+#      expected: {"approvals": 1, "code_owners": false}
 #   2. That reviewer is enscrive-reviewer[bot] running
 #      .github/workflows/pr-review.yml — an independent Opus review on every
 #      non-draft PR (A-002). AUTO_MERGE=false: the reviewer approves, the
@@ -90,6 +96,20 @@
 #   A register that claims protection it does not have is worse than no
 #   register: it is the failure mode this whole change set exists to remove.
 #
+# CAN THE REVIEWER APPROVE ITS OWN HARNESS? Yes, and that is a genuine
+# narrowing of control — stated here rather than left to be discovered. With
+# owner routing gone, a PR editing .github/scripts/pr-review.sh or
+# .github/workflows/ can carry the bot's own approval. What still stands
+# between that and main:
+#   * the bot CANNOT MERGE. AUTO_MERGE=false, and allow_auto_merge was set
+#     false across the fleet (A-034 / ENS-3513) after the reviewer squash-merged
+#     enscrive-embed #92 on its own sub-threshold approval. Approval is not
+#     merge; the orchestrator is the arbiter and is a different actor.
+#   * those paths escalate to Opus (HIGH_RISK), so the approval given is at
+#     least the strongest available.
+# If that is judged insufficient, the fix is branch protection requiring a
+# NON-BOT approval on .github/** — not a paragraph in this file.
+#
 # --- SENSITIVE PATHS (no owner; read these harder) ---------------------------
 
 # /installer/**
@@ -134,6 +154,29 @@
 # /scripts/wipe-*
 #     Admin destructive bulk-mutation tooling. Defensive globs: no-op if absent
 #     today, still worth reading hard if added later. Irreversible-on-execution.
+
+# --- WHAT THE RETIRED FOUNDER_GATED BLOCK NAMED, AND WHY IT IS NOT HERE -------
+#
+# The FOUNDER_GATED regex removed from .github/scripts/pr-review.sh covered
+# .github/workflows/, .github/scripts/, channels/, src/signature.rs,
+# src/provision.rs, src/manifest.rs and src/fingerprint.rs.
+#
+# The first two are registered above. The other five ARE NOT REGISTERED AND ARE
+# NOT IN THE HIGH_RISK REGEX, and the reason is not an oversight: none of them
+# exists in this repository. Verified against origin/main on 2026-08-15 —
+# `channels/`, `src/signature.rs`, `src/provision.rs`, `src/manifest.rs` and
+# `src/fingerprint.rs` are all absent. They are enscrive-deploy's release-trust
+# files; this repo's copy of the reviewer script was seeded from deploy's and
+# inherited the paths verbatim. That half of the gate has therefore been dead
+# code here for its entire life — it could never fire.
+#
+# Registering paths that do not exist would put a false entry in a register
+# whose entire purpose is to not overstate what it protects. If any of these
+# files is ever added to enscrive-cli, register it here AND add it to the
+# HIGH_RISK regex at the same time.
+#
+# The live release-trust surface in THIS repo is /installer/** and
+# /src/release_channel.rs, both registered above and both escalating.
 
 # --- DELIBERATELY NOT LISTED -------------------------------------------------
 #
