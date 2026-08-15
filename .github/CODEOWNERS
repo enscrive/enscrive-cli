@@ -1,54 +1,94 @@
-# CODEOWNERS — Cloud-Native Dev Topology PRD §6.7
+# CODEOWNERS — enscrive-cli
 #
-# Founder review (@chrisroge) is REQUIRED, in addition to automated/agent
-# review, for the high-risk paths below. GitHub applies the LAST matching
-# pattern.
+# INTENTIONALLY NO OWNERS. (A-034, founder-directed, reaffirmed 2026-08-15)
 #
-# Enforcement note: to make this a hard gate, the repo's branch protection
-# must also enable "Require review from Code Owners".
-
-# v1 surface contract — the canonical mapping of /v1 endpoints to CLI commands.
-# Drift here breaks the customer contract.
-/v1-surface-contract.toml @chrisroge
-
-# Installer + install pipeline — supply-chain critical (cosign verify, S3 fetch).
-/installer/** @chrisroge
-
-# Release channel resolution — picks which artifact a customer install pulls.
-/src/release_channel.rs @chrisroge
-
-# License gating — entitlement enforcement.
-/src/license.rs @chrisroge
-
-# Pre-flight checks — guardrails before commands hit the platform.
-/src/preflight.rs @chrisroge
-
-# Dependency manifests — version bumps carry dependency-rot risk.
-/Cargo.toml @chrisroge
-/Cargo.lock @chrisroge
-
-# Release / CI workflows — supply chain.
-/.github/workflows/** @chrisroge
-
-# === ADR-0003 §6.7 additions (2026-05-28) ===
+#   "My top priority is ensuring our github workflow is as I described with me
+#    providing zero founder reviews or founder merge, with the only exception
+#    being rate card changes or changes that touch the rate card."
 #
-# Reviewer B may NOT merge any PR that touches a path below; only the
-# founder authorizes the merge. The gate itself (CODEOWNERS, the §6.7
-# ADR document) is gated to prevent any PR from routing a gated path
-# around the gate.
+# The founder<->orchestrator conversation is the endorsement. Independent review
+# is the `claude -p` reviewer (A-002, ENS-569); the orchestrator is the final
+# merge arbiter. Deploy beyond dev remains founder authority (A-003) — that gate
+# lives at `provision`, not at the PR.
+#
+# The ONE founder gate in the fleet is /rate-cards/ in enscrive-governance.
+# It is not here: this repo contains no rate card.
+#
+# WHY THIS FILE STILL EXISTS. Every path below was marked high-risk for a real
+# reason, and that reason is worth keeping even though the founder is no longer
+# the reviewer. This file is now a REGISTER OF SENSITIVE PATHS: prose for a
+# human or agent reviewer, not a routing rule. The signal stays load-bearing in
+# machine terms too — .github/scripts/pr-review.sh escalates the reviewer model
+# from Sonnet to Opus (HIGH_RISK) for EVERY path listed below. That coverage is
+# not inherited — the regex was widened in the same change that removed the
+# founder gate, precisely so these paths would not silently drop from
+# "founder reviews it" to "Sonnet reviews it". Verified path-by-path; see the
+# WIDENED note in .github/scripts/pr-review.sh.
+#
+# Removing the owner is the point: an owned path auto-requests a review, which
+# is what put PRs in the founder's queue.
+#
+# --- SENSITIVE PATHS (no owner; read these harder) ---------------------------
 
-# (c) — the gate itself. Universally @chrisroge.
-**/CODEOWNERS @chrisroge
+# /installer/**
+#     Supply-chain critical: cosign verify + S3 fetch. The installer is pulled
+#     by unattended `curl | sh` from a CloudFront distribution with no WAF, so
+#     it is the one path in this repo where an unreviewed merge reaches users
+#     directly, with no `provision` gate in between. Read it as production.
+#     HIGH_RISK: escalated (widened 2026-08-15).
 
-# (a) — admin destructive bulk-mutation tooling (defensive globs; no-op
-# if absent today, gated if added later).
-/scripts/clean-* @chrisroge
-/scripts/purge-* @chrisroge
-/scripts/bulk-delete-* @chrisroge
-/scripts/wipe-* @chrisroge
+# /v1-surface-contract.toml
+#     The canonical mapping of /v1 endpoints to CLI commands. Drift here breaks
+#     the customer contract.
+#     HIGH_RISK: escalated (widened 2026-08-15).
 
-# enscrive-cli has no auth middleware, no migrations, no billing/ledger,
-# and no ESM by design (CLI is a customer-facing thin client per its
-# CLAUDE.md). Categories (a) for migrations/billing/ESM and (b) for
-# trust-boundary do not apply to this repo and are intentionally not
-# defended here.
+# /src/release_channel.rs
+#     Picks which artifact a customer install pulls. A wrong channel ships
+#     unreleased code to customers.
+#     HIGH_RISK: escalated (widened 2026-08-15).
+
+# /src/license.rs
+#     Entitlement enforcement. A weakened check gives away paid capability.
+#     HIGH_RISK: escalated (widened 2026-08-15).
+
+# /src/preflight.rs
+#     Guardrails that run before commands hit the platform.
+#     HIGH_RISK: escalated (widened 2026-08-15).
+
+# /Cargo.toml
+# /Cargo.lock
+#     Dependency manifests — version bumps carry supply-chain and
+#     dependency-rot risk.
+#     HIGH_RISK: escalated (Cargo.toml and, since 2026-08-15, Cargo.lock).
+
+# /.github/workflows/**
+#     Release and CI workflows — supply chain.
+#     HIGH_RISK: escalated.
+
+# /.github/scripts/**
+#     The reviewer harness itself. The thing that judges every other PR should
+#     be read with the same care as the thing it judges.
+#     HIGH_RISK: escalated.
+
+# **/CODEOWNERS
+#     This file. A PR that weakens or removes it is a gate-widening attempt
+#     regardless of which repo it lives in.
+#     HIGH_RISK: escalated.
+
+# /scripts/clean-*
+# /scripts/purge-*
+# /scripts/bulk-delete-*
+# /scripts/wipe-*
+#     Admin destructive bulk-mutation tooling. Defensive globs: no-op if absent
+#     today, still worth reading hard if added later. Irreversible-on-execution.
+#     HIGH_RISK: escalated (widened 2026-08-15).
+
+# --- DELIBERATELY NOT LISTED -------------------------------------------------
+#
+# enscrive-cli has no auth middleware, no migrations, no billing/ledger, and no
+# ESM by design — it is a customer-facing thin client per its CLAUDE.md. Those
+# categories are intentionally not defended here, and their absence is a
+# statement, not an oversight.
+#
+# A-034 removes the founder as reviewer. It does NOT make a previously-ungated
+# path gated, and it does not license removing a path from this register.

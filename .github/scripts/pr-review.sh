@@ -119,58 +119,58 @@ if [ "${#DIFF}" -gt "$CAP" ]; then
   TRUNCATED=1
 fi
 
-# FOUNDER-GATED paths: the root-of-trust. The reviewer NEVER auto-merges changes
-# to its own harness, to any workflow (the gating layer itself), or to the
-# release trust pipeline (cosign verify / provision / channel routing). These
-# escalate to a human (needs-founder) instead of auto-merging. ENS-569 Gap-4
-# refinement: the thing that judges every other PR must not merge its own
-# changes on its own approval.
+# NO FOUNDER GATE AT PR TIME (A-034, founder-directed, reaffirmed 2026-08-15).
 #
-# INTENTIONAL IN THIS REPO -- founder-affirmed 2026-07-14. Do NOT "fix" this by
-# porting enscrive-developer's de-gated template.
+#   "My top priority is ensuring our github workflow is as I described with me
+#    providing zero founder reviews or founder merge, with the only exception
+#    being rate card changes or changes that touch the rate card."
 #
-# Background: the 2026-06-29 blanket de-gate (developer#140) removed this block
-# as fleet-wide policy, and ENS-857 item 2 lists the repos that never received
-# it as "stale pre-#140 posture". On 2026-07-14 the founder SPLIT that decision.
-# De-gated: enscrive-docs, enscrive-metering-sentinel (no custody/signing role;
-# their branch protection also moved to require_code_owner_reviews=false).
-# Deliberately still gated: enscrive-cli (the public installer),
-# enscrive-secrets-manager (secret custody) and enscrive-bootstrap-authority
-# (the bootstrap-bundle signer) -- these keep BOTH this block and
-# require_code_owner_reviews=true.
+# A FOUNDER_GATED block used to live here. It withheld approval and posted
+# FOUNDER MERGE REQUIRED when a PR touched .github/workflows, .github/scripts,
+# channels/, or the release-trust files (signature/provision/manifest/
+# fingerprint). It is removed rather than narrowed to rate-card paths, because
+# THIS REPO CONTAINS NO RATE CARD -- rate cards live only in enscrive-governance
+# (/rate-cards/, gated there by CODEOWNERS + require_code_owner_reviews). A
+# rate-card-scoped gate here would be dead code that could never fire, and dead
+# gates rot into false assurance.
 #
-# Why: this is the "thin root-of-trust gate (supply-chain/secrets)" from the
-# 2026-06-27 posture, scoped back on purpose. A poisoned installer / leaked
-# secret / poisoned signing path is a repo+artifact risk that the founder's
-# `provision` gate does NOT catch -- provisioning is the real risk gate for
-# everything else, but not for these.
+# What replaces it: the founder<->orchestrator conversation is the endorsement,
+# this reviewer is the independent check (A-002), and the orchestrator merges as
+# final arbiter. Deploy beyond dev is unchanged and remains founder authority
+# (A-003) -- that gate lives at `provision`, not at the PR, and it is the one
+# that actually stops a bad artifact from reaching users.
 #
-# In enscrive-cli the gate pairs with a deliberately NARROW CODEOWNERS
-# (/installer/** + /v1-surface-contract.toml -> @chrisroge): the installer is
-# fetched by unattended `curl | sh` from a CloudFront distribution with no WAF,
-# so it is the one path where an unreviewed auto-merge reaches users directly.
+# The sensitive paths this gate named are NOT forgotten: they are recorded in
+# .github/CODEOWNERS as a no-owner register, and most of them still escalate the
+# reviewer model from Sonnet to Opus via HIGH_RISK below.
 #
-# So here this gate is CURRENT POSTURE, not un-rolled-out drift. If a sweep
-# flags this file as stale pre-#140, that sweep is wrong for this repo --
-# re-read this comment before removing anything.
-FOUNDER_GATED=0
-if printf '%s' "$FILES" | grep -qE '\.github/workflows/|\.github/scripts/|channels/|src/signature\.rs|src/provision\.rs|src/manifest\.rs|src/fingerprint\.rs'; then
-  FOUNDER_GATED=1
-fi
-# enscrive-secrets-manager (esm) is a trust anchor — the secrets manager itself.
-# It is dispatchable (a worker may propose changes), but EVERY change to it is
-# founder-merged, never auto-merged, whatever files it touches. (Secret VALUES
-# remain founder-only regardless; this gates esm CODE at the merge boundary.)
-case "$REPO" in
-  */enscrive-secrets-manager) FOUNDER_GATED=1 ;;
-esac
+# Do not re-add a FOUNDER_GATED block here. If the money gate ever needs to
+# extend beyond enscrive-governance, it belongs in CODEOWNERS where GitHub
+# enforces it -- not in the reviewer harness, which a PR to this very file
+# could edit away.
 
 # High-risk paths escalate the review model (Sonnet -> Opus); this does NOT block
 # on its own. Tracks the real trust surface (auth, billing/metering/ledger,
 # tenant isolation, migrations, proto, crypto, secrets) so the stronger reviewer
 # judges those changes, per ENS-569 Gap-2.
+#
+# WIDENED 2026-08-15 alongside the A-034 removal of the founder gate. The gate
+# that used to hold these paths for a human is gone, so the paths it protected
+# must at least reach the stronger reviewer instead of silently dropping to
+# Sonnet. Added for this repo:
+#   installer/          - fetched by unattended `curl | sh` from a CloudFront
+#                         distribution with no WAF; the one path here that
+#                         reaches users with no `provision` gate in between
+#   release_channel.rs  - picks which artifact a customer install pulls
+#   license.rs          - entitlement enforcement
+#   preflight.rs        - guardrails before commands hit the platform
+#   v1-surface-contract - the /v1-to-CLI contract; drift breaks customers
+#   Cargo.lock          - the previous regex matched only Cargo.toml, so a
+#                         lockfile-only dependency change escaped escalation
+#   clean-/purge-/bulk-delete-/wipe- - destructive bulk-mutation tooling;
+#                         irreversible-on-execution, defensive (no-op today)
 HIGH_RISK=0
-if printf '%s' "$FILES" | grep -qiE '\.github/workflows/|\.github/scripts/|Cargo\.toml|CODEOWNERS|/migrations/|/proto/|billing|metering|credits|ledger|rbac|crypto|byok|byom|tenant_isolation|hmac|/audit|secrets|keycloak|/auth'; then
+if printf '%s' "$FILES" | grep -qiE '\.github/workflows/|\.github/scripts/|Cargo\.(toml|lock)|CODEOWNERS|/migrations/|/proto/|billing|metering|credits|ledger|rbac|crypto|byok|byom|tenant_isolation|hmac|/audit|secrets|keycloak|/auth|installer/|release_channel|license\.rs|preflight\.rs|v1-surface-contract|/(clean|purge|bulk-delete|wipe)-'; then
   HIGH_RISK=1
 fi
 
@@ -273,25 +273,6 @@ BLOCK_COUNT=$(count_blocking_issues /tmp/decision.json)
 VERDICT=$(effective_decision "$DECISION" "$BLOCK_COUNT" "$TRUNCATED" "$PASS_CONF")
 echo "Effective verdict: $VERDICT (raw decision=$DECISION confidence=$CONF blockers=$BLOCK_COUNT truncated=$TRUNCATED)"
 
-# Root-of-trust changes are NEVER auto-merged, whatever the effective verdict
-# above (restored here after an ENS-854 patching error briefly dropped this
-# gate -- see PR discussion). Post the review as guidance, label
-# needs-founder, and stop (no approval) so branch protection holds the PR
-# for a human merge. The check stays green: this is a deliberate hold, not a
-# failure. This composes WITH the ENS-569/ENS-854 verdict guard above, not in
-# place of it: even an approve:coerced verdict on a root-of-trust file still
-# stops here, unmerged.
-if [ "$FOUNDER_GATED" = "1" ]; then
-  echo "FOUNDER-GATED path touched -> escalate to founder (no auto-merge)"
-  gh label create needs-founder --color B60205 \
-    --description "Touches root-of-trust: reviewer harness / workflows / release trust pipeline" 2>/dev/null || true
-  gh pr edit "$PR" --add-label needs-founder || true
-  EXTRA=""
-  [ -n "$ISSUES" ] && EXTRA=$(printf '\n\nReviewer notes:\n%s' "$ISSUES")
-  BODY_MD=$(printf '[auto-review] (ENS-569): **FOUNDER MERGE REQUIRED** — this PR touches the root-of-trust (the reviewer harness, a workflow, or the release trust pipeline), which is never auto-merged. Reviewer assessment (model %s, confidence %s — this is NOT an approval):\n\n%s%s' "$MODEL" "$CONF" "$SUMMARY" "$EXTRA")
-  gh pr comment "$PR" --body "$BODY_MD" || true
-  exit 0
-fi
 
 if [ "$VERDICT" = "approve:model" ] || [ "$VERDICT" = "approve:coerced" ]; then
   echo "APPROVE (verdict $VERDICT, confidence $CONF)"
@@ -359,11 +340,11 @@ PRIOR=$(gh pr view "$PR" --json reviews \
 PRIOR=${PRIOR:-0}
 
 if [ "$PRIOR" -ge 2 ]; then
-  echo "Flapping ceiling hit ($PRIOR prior change-requests) -> escalate to founder"
-  gh label create needs-founder --color B60205 \
+  echo "Flapping ceiling hit ($PRIOR prior change-requests) -> escalate to orchestrator"
+  gh label create needs-orchestrator --color FBCA04 \
     --description "Reviewer escalation: exceeded change-request cycles" 2>/dev/null || true
-  gh pr edit "$PR" --add-label needs-founder || true
-  CMT=$(printf '[auto-review] requested changes %sx (ENS-569 flapping ceiling reached). Escalating to founder rather than looping.\n\nLatest blocking issues:\n%s' "$PRIOR" "$ISSUES")
+  gh pr edit "$PR" --add-label needs-orchestrator || true
+  CMT=$(printf '[auto-review] requested changes %sx (ENS-569 flapping ceiling reached). Escalating to the orchestrator (final arbiter) rather than looping.\n\nLatest blocking issues:\n%s' "$PRIOR" "$ISSUES")
   gh pr comment "$PR" --body "$CMT" || true
 else
   echo "Request changes (cycle $((PRIOR + 1)))"
