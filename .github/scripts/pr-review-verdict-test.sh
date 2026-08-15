@@ -161,7 +161,17 @@ check "e2e: fail-safe unparseable     -> request_changes:real" request_changes:r
 # EXACT shape the script greps. The benign cases are not decoration: without
 # them a regex that matched everything would pass, which is how a gate starts
 # reporting protection it does not provide.
-HR_RE=$(grep -oE "grep -qiE '[^']*'" "$HERE/pr-review.sh" | tail -1 | sed -E "s/grep -qiE '//; s/'$//")
+# Extract the HIGH_RISK pattern by SENTINEL, not by "last grep -qiE in the
+# file" — that earlier form bound to whatever grep happened to come last, so
+# any unrelated grep added later would silently repoint every assertion below
+# at the wrong pattern while the suite still reported PASS. A guard that can
+# quietly test the wrong thing is the defect class this file exists to catch.
+HR_RE=$(grep -A6 'ENS-4350-REGEX-SENTINEL' "$HERE/pr-review.sh" \
+        | grep -oE "grep -qiE '[^']*'" | head -1 | sed -E "s/grep -qiE '//; s/'$//")
+if [ -z "$HR_RE" ] && ! grep -q '^HIGH_RISK=1$' "$HERE/pr-review.sh"; then
+  printf 'FAIL - ENS-4350 sentinel missing from pr-review.sh; the guard cannot bind\n'
+  FAILS=$((FAILS + 1))
+fi
 if [ -z "$HR_RE" ]; then
   if grep -q '^HIGH_RISK=1$' "$HERE/pr-review.sh"; then
     printf 'ok   - HIGH_RISK is unconditional in this repo; path matching N/A\n'
