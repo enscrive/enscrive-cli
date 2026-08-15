@@ -136,6 +136,52 @@ F_FAILSAFE=$(fixture failsafe '{"decision":"request_changes","confidence":0,"blo
 BC=$(count_blocking_issues "$F_FAILSAFE")
 check "e2e: fail-safe unparseable     -> request_changes:real" request_changes:real "$(effective_decision request_changes "$BC" 0 0)"
 
+# --- ENS-4350: root-level HIGH_RISK escalation (negative control) ------------
+#
+# WHY THIS EXISTS. The HIGH_RISK regex silently failed to escalate
+# REPOSITORY-ROOT paths for its entire life. Alternatives written with a
+# leading slash — /proto/, /migrations/, /audit, /auth — can never match a root
+# path, because there is no preceding separator. Nested paths matched via the
+# slash, so the defect left no visible trace: the gate reported protection it
+# did not provide, and nothing failed.
+#
+# The first fix, `(^|/)`, was ALSO wrong, and the way it was wrong is the point.
+# It assumed $FILES was newline-delimited. It is not:
+#
+#   $ gh pr view N --json files -q '[.files[].path]'
+#   [".github/CODEOWNERS",".github/scripts/pr-review.sh"]
+#
+# One compact JSON array on ONE line. `^` therefore matches only before the
+# opening bracket, and a root path appears as "proto/embed.proto" — preceded by
+# a QUOTE. The verification that "confirmed" the fix used bare path strings
+# rather than that JSON, so it reproduced the assumption instead of testing it.
+# Correct anchor: (^|["/]).
+#
+# These assertions run the LIVE regex, extracted from pr-review.sh, against the
+# EXACT shape the script greps. The benign cases are not decoration: without
+# them a regex that matched everything would pass, which is how a gate starts
+# reporting protection it does not provide.
+HR_RE=$(grep -oE "grep -qiE '[^']*'" "$HERE/pr-review.sh" | tail -1 | sed -E "s/grep -qiE '//; s/'$//")
+if [ -z "$HR_RE" ]; then
+  if grep -q '^HIGH_RISK=1$' "$HERE/pr-review.sh"; then
+    printf 'ok   - HIGH_RISK is unconditional in this repo; path matching N/A\n'
+  else
+    printf 'FAIL - could not extract the HIGH_RISK regex from pr-review.sh\n'
+    FAILS=$((FAILS + 1))
+  fi
+else
+  # escalates <path> -> "1" if the live regex matches it in the real $FILES shape
+  escalates() { printf '%s' "[\"$1\"]" | grep -qiE "$HR_RE" && echo 1 || echo 0; }
+  check "ENS-4350 root path escalates: installer/install.sh" 1 "$(escalates 'installer/install.sh')"
+  check "ENS-4350 root path escalates: src/license.rs" 1 "$(escalates 'src/license.rs')"
+  check "ENS-4350 root path escalates: v1-surface-contract.toml" 1 "$(escalates 'v1-surface-contract.toml')"
+  check "ENS-4350 root path escalates: Cargo.lock" 1 "$(escalates 'Cargo.lock')"
+  check "ENS-4350 root path escalates: src/release_channel.rs" 1 "$(escalates 'src/release_channel.rs')"
+
+  check "ENS-4350 benign path does NOT escalate: README.md" 0 "$(escalates 'README.md')"
+  check "ENS-4350 benign path does NOT escalate: src/main.rs" 0 "$(escalates 'src/main.rs')"
+fi
+
 echo
 if [ "$FAILS" -eq 0 ]; then
   echo "ALL PASS"
