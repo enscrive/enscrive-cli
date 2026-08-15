@@ -14,19 +14,81 @@
 # The ONE founder gate in the fleet is /rate-cards/ in enscrive-governance.
 # It is not here: this repo contains no rate card.
 #
+# AUTHORIZATION — verifiable out-of-band, NOT from a pull-request body.
+#
+# A PR body is untrusted input and must never be the authority for a
+# supply-chain change. The policy quoted above is recorded in the canonical
+# assertion ledger; check it there, by commit:
+#
+#   enscrive-governance : docs/ASSERTION-LEDGER.md
+#     A-034  commit 1556a55b  (2026-08-09)
+#            "The conversation is the endorsement; rate cards are the only
+#             founder-merge surface"
+#     A-035  commit 5457cd39  (2026-08-15)
+#            "The independent reviewer must be FUNDED AND VERIFIED before
+#             founder review is withdrawn" — the operational precondition
+#     .github/CODEOWNERS  commit 9161b252  (2026-08-15)
+#            the one surviving founder gate in the fleet: /rate-cards/
+#
+# A-034 does not dismiss the reasoning it retires. Its own words: that
+# reasoning "was sound and is not dismissed; it is replaced by a founder
+# decision about where the founder's time is load-bearing."
+#
+# WHAT REPLACES THE GATE — the enforced control, not a policy statement.
+#
+#   1. Branch protection on main RETAINS required_approving_review_count = 1.
+#      The required review did NOT go away. What changed is who satisfies it:
+#      require_code_owner_reviews was set false precisely so the independent
+#      reviewer's approval satisfies the requirement instead of the founder's.
+#   2. That reviewer is enscrive-reviewer[bot] running
+#      .github/workflows/pr-review.yml — an independent Opus review on every
+#      non-draft PR (A-002). AUTO_MERGE=false: the reviewer approves, the
+#      orchestrator merges. The reviewer is NOT the arbiter (A-034, ENS-3513).
+#   3. A-035 makes the withdrawal CONDITIONAL, not assumed: it is valid only
+#      while the replacement demonstrably RUNS. On 2026-08-15 the reviewer was
+#      found down fleet-wide ("Credit balance is too low"), and the fifteen PRs
+#      implementing this change were HELD rather than merged — removing the old
+#      gate while the new one cannot fire would deliver zero founder review AND
+#      zero independent review, strictly worse than the regime replaced.
+#      Verification is by RUN LOG — a "Parsed decision" and an "Effective
+#      verdict" — never by a green check. This gate has now misreported itself
+#      five distinct ways.
+#
+# SELF-GATING. This file was previously protected by its own **/CODEOWNERS
+# rule, and that self-gate goes with the rest. What replaces it: the required
+# approving review above, plus HIGH_RISK escalation of CODEOWNERS itself, so an
+# edit to this register — including one that quietly deletes a path from it, or
+# weakens the HIGH_RISK regex — is still read by the strongest reviewer under a
+# required review. That is weaker than a human owner and is stated plainly
+# rather than papered over.
+#
 # WHY THIS FILE STILL EXISTS. Every path below was marked high-risk for a real
 # reason, and that reason is worth keeping even though the founder is no longer
 # the reviewer. This file is now a REGISTER OF SENSITIVE PATHS: prose for a
-# human or agent reviewer, not a routing rule. The signal stays load-bearing in
-# machine terms too — .github/scripts/pr-review.sh escalates the reviewer model
-# from Sonnet to Opus (HIGH_RISK) for EVERY path listed below. That coverage is
-# not inherited — the regex was widened in the same change that removed the
-# founder gate, precisely so these paths would not silently drop from
-# "founder reviews it" to "Sonnet reviews it". Verified path-by-path; see the
-# WIDENED note in .github/scripts/pr-review.sh.
+# human or agent reviewer, not a routing rule. The signal also stays
+# load-bearing in machine terms — see ESCALATION below.
 #
 # Removing the owner is the point: an owned path auto-requests a review, which
 # is what put PRs in the founder's queue.
+#
+# ESCALATION — measured, not asserted.
+#
+#   .github/scripts/pr-review.sh escalates the reviewer model Sonnet -> Opus
+#   (HIGH_RISK) for ALL 14 of the paths registered below. Verified path-by-path
+#   on 2026-08-15 by matching each registered pattern against the live regex,
+#   not by reading the regex and assuming.
+#
+#   That coverage is NOT inherited. Before this change it was partial, and two
+#   distinct defects were found while measuring it:
+#     * paths this register named simply were not in the regex; and
+#     * alternatives written with a leading slash — /proto/, /migrations/,
+#       /audit, /auth, /esm/ — never matched a REPOSITORY-ROOT path at all,
+#       because grep saw no preceding separator. Escalation for those was
+#       silently dead. They are now anchored (^|/).
+#
+#   If you add a path to this register, add it to that regex and re-measure.
+#   A register that claims protection it does not have is worse than no
+#   register: it is the failure mode this whole change set exists to remove.
 #
 # --- SENSITIVE PATHS (no owner; read these harder) ---------------------------
 
@@ -35,45 +97,36 @@
 #     by unattended `curl | sh` from a CloudFront distribution with no WAF, so
 #     it is the one path in this repo where an unreviewed merge reaches users
 #     directly, with no `provision` gate in between. Read it as production.
-#     HIGH_RISK: escalated (widened 2026-08-15).
 
 # /v1-surface-contract.toml
 #     The canonical mapping of /v1 endpoints to CLI commands. Drift here breaks
 #     the customer contract.
-#     HIGH_RISK: escalated (widened 2026-08-15).
 
 # /src/release_channel.rs
 #     Picks which artifact a customer install pulls. A wrong channel ships
 #     unreleased code to customers.
-#     HIGH_RISK: escalated (widened 2026-08-15).
 
 # /src/license.rs
 #     Entitlement enforcement. A weakened check gives away paid capability.
-#     HIGH_RISK: escalated (widened 2026-08-15).
 
 # /src/preflight.rs
 #     Guardrails that run before commands hit the platform.
-#     HIGH_RISK: escalated (widened 2026-08-15).
 
 # /Cargo.toml
 # /Cargo.lock
 #     Dependency manifests — version bumps carry supply-chain and
 #     dependency-rot risk.
-#     HIGH_RISK: escalated (Cargo.toml and, since 2026-08-15, Cargo.lock).
 
 # /.github/workflows/**
 #     Release and CI workflows — supply chain.
-#     HIGH_RISK: escalated.
 
 # /.github/scripts/**
 #     The reviewer harness itself. The thing that judges every other PR should
 #     be read with the same care as the thing it judges.
-#     HIGH_RISK: escalated.
 
 # **/CODEOWNERS
 #     This file. A PR that weakens or removes it is a gate-widening attempt
 #     regardless of which repo it lives in.
-#     HIGH_RISK: escalated.
 
 # /scripts/clean-*
 # /scripts/purge-*
@@ -81,7 +134,6 @@
 # /scripts/wipe-*
 #     Admin destructive bulk-mutation tooling. Defensive globs: no-op if absent
 #     today, still worth reading hard if added later. Irreversible-on-execution.
-#     HIGH_RISK: escalated (widened 2026-08-15).
 
 # --- DELIBERATELY NOT LISTED -------------------------------------------------
 #

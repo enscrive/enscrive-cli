@@ -170,7 +170,7 @@ fi
 #   clean-/purge-/bulk-delete-/wipe- - destructive bulk-mutation tooling;
 #                         irreversible-on-execution, defensive (no-op today)
 HIGH_RISK=0
-if printf '%s' "$FILES" | grep -qiE '\.github/workflows/|\.github/scripts/|Cargo\.(toml|lock)|CODEOWNERS|/migrations/|/proto/|billing|metering|credits|ledger|rbac|crypto|byok|byom|tenant_isolation|hmac|/audit|secrets|keycloak|/auth|installer/|release_channel|license\.rs|preflight\.rs|v1-surface-contract|/(clean|purge|bulk-delete|wipe)-'; then
+if printf '%s' "$FILES" | grep -qiE '\.github/workflows/|\.github/scripts/|Cargo\.(toml|lock)|CODEOWNERS|(^|/)migrations/|(^|/)proto/|billing|metering|credits|ledger|rbac|crypto|byok|byom|tenant_isolation|hmac|(^|/)audit|secrets|keycloak|(^|/)auth|installer/|release_channel|license\.rs|preflight\.rs|v1-surface-contract|(^|/)(clean|purge|bulk-delete|wipe)-'; then
   HIGH_RISK=1
 fi
 
