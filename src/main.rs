@@ -521,7 +521,7 @@ struct SearchArgs {
 
     /// NOT AVAILABLE: hybrid dense/BM25 retrieval is unimplemented. Supplying
     /// this is refused by the server with 400 hybrid_retrieval_unavailable
-    /// rather than silently ignored (ENS-3299). Omit it.
+    /// rather than silently ignored. Omit it.
     #[arg(long)]
     hybrid_alpha: Option<f32>,
 
@@ -1623,7 +1623,7 @@ struct VoiceSearchArgs {
 
     /// NOT AVAILABLE: hybrid dense/BM25 retrieval is unimplemented. Supplying
     /// this is refused by the server with 400 hybrid_retrieval_unavailable
-    /// rather than silently ignored (ENS-3299). Omit it.
+    /// rather than silently ignored. Omit it.
     #[arg(long)]
     hybrid_alpha: Option<f32>,
 
