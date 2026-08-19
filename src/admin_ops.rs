@@ -517,8 +517,7 @@ pub struct AdminApiKeysCreateArgs {
     /// capabilities in the scope's own default set are accepted; anything else
     /// is refused with 400 "capability '<x>' is not allowed for scope '<s>'".
     /// Notably `records` and `agents` are in NO scope's set and cannot be
-    /// granted here, and `admin` is excluded from tenant scope (ENS-218).
-    /// See enscrive-developer api_keys.rs::default_capabilities_for_scope.
+    /// granted here, and `admin` is excluded from tenant scope.
     #[arg(long, value_delimiter = ',')]
     capabilities: Vec<String>,
 
