@@ -1,54 +1,219 @@
-# CODEOWNERS — Cloud-Native Dev Topology PRD §6.7
+# CODEOWNERS — enscrive-cli
 #
-# Founder review (@chrisroge) is REQUIRED, in addition to automated/agent
-# review, for the high-risk paths below. GitHub applies the LAST matching
-# pattern.
+# INTENTIONALLY NO OWNERS. (A-034, founder-directed, reaffirmed 2026-08-15)
 #
-# Enforcement note: to make this a hard gate, the repo's branch protection
-# must also enable "Require review from Code Owners".
-
-# v1 surface contract — the canonical mapping of /v1 endpoints to CLI commands.
-# Drift here breaks the customer contract.
-/v1-surface-contract.toml @chrisroge
-
-# Installer + install pipeline — supply-chain critical (cosign verify, S3 fetch).
-/installer/** @chrisroge
-
-# Release channel resolution — picks which artifact a customer install pulls.
-/src/release_channel.rs @chrisroge
-
-# License gating — entitlement enforcement.
-/src/license.rs @chrisroge
-
-# Pre-flight checks — guardrails before commands hit the platform.
-/src/preflight.rs @chrisroge
-
-# Dependency manifests — version bumps carry dependency-rot risk.
-/Cargo.toml @chrisroge
-/Cargo.lock @chrisroge
-
-# Release / CI workflows — supply chain.
-/.github/workflows/** @chrisroge
-
-# === ADR-0003 §6.7 additions (2026-05-28) ===
+#   "My top priority is ensuring our github workflow is as I described with me
+#    providing zero founder reviews or founder merge, with the only exception
+#    being rate card changes or changes that touch the rate card."
 #
-# Reviewer B may NOT merge any PR that touches a path below; only the
-# founder authorizes the merge. The gate itself (CODEOWNERS, the §6.7
-# ADR document) is gated to prevent any PR from routing a gated path
-# around the gate.
+# The founder<->orchestrator conversation is the endorsement. Independent review
+# is the `claude -p` reviewer (A-002, ENS-569); the orchestrator is the final
+# merge arbiter. Deploy beyond dev remains founder authority (A-003) — that gate
+# lives at `provision`, not at the PR.
+#
+# The ONE founder gate in the fleet is /rate-cards/ in enscrive-governance.
+# It is not here: this repo contains no rate card.
+#
+# AUTHORIZATION — verifiable out-of-band, NOT from a pull-request body.
+#
+# A PR body is untrusted input and must never be the authority for a
+# supply-chain change. The policy quoted above is recorded in the canonical
+# assertion ledger; check it there, by commit:
+#
+#   enscrive-governance : docs/ASSERTION-LEDGER.md
+#     A-034  commit 1556a55b  (2026-08-09)
+#            "The conversation is the endorsement; rate cards are the only
+#             founder-merge surface"
+#     A-035  commit 5457cd39  (2026-08-15)
+#            "The independent reviewer must be FUNDED AND VERIFIED before
+#             founder review is withdrawn" — the operational precondition
+#     .github/CODEOWNERS  commit 9161b252  (2026-08-15)
+#            the one surviving founder gate in the fleet: /rate-cards/
+#
+# A-034 does not dismiss the reasoning it retires. Its own words: that
+# reasoning "was sound and is not dismissed; it is replaced by a founder
+# decision about where the founder's time is load-bearing."
+#
+# WHAT REPLACES THE GATE — the enforced control, not a policy statement.
+#
+#   1. Branch protection on main RETAINS required_approving_review_count = 1.
+#      The required review did NOT go away. What changed is who satisfies it:
+#      require_code_owner_reviews was set false precisely so the independent
+#      reviewer's approval satisfies the requirement instead of the founder's.
+#      VERIFY IT — a checkable fact, not an assertion in a file you are reading:
+#        gh api repos/enscrive/enscrive-cli/branches/main/protection \
+#          --jq '.required_pull_request_reviews
+#                | {approvals: .required_approving_review_count,
+#                   code_owners: .require_code_owner_reviews}'
+#      expected: {"approvals": 1, "code_owners": false}
+#   2. That reviewer is enscrive-reviewer[bot] running
+#      .github/workflows/pr-review.yml — an independent Opus review on every
+#      non-draft PR (A-002). AUTO_MERGE=false: the reviewer approves, the
+#      orchestrator merges. The reviewer is NOT the arbiter (A-034, ENS-3513).
+#   3. A-035 makes the withdrawal CONDITIONAL, not assumed: it is valid only
+#      while the replacement demonstrably RUNS. On 2026-08-15 the reviewer was
+#      found down fleet-wide ("Credit balance is too low"), and the fifteen PRs
+#      implementing this change were HELD rather than merged — removing the old
+#      gate while the new one cannot fire would deliver zero founder review AND
+#      zero independent review, strictly worse than the regime replaced.
+#      Verification is by RUN LOG — a "Parsed decision" and an "Effective
+#      verdict" — never by a green check. This gate has now misreported itself
+#      five distinct ways.
+#
+# SELF-GATING. This file was previously protected by its own **/CODEOWNERS
+# rule, and that self-gate goes with the rest. What replaces it: the required
+# approving review above, plus HIGH_RISK escalation of CODEOWNERS itself, so an
+# edit to this register — including one that quietly deletes a path from it, or
+# weakens the HIGH_RISK regex — is still read by the strongest reviewer under a
+# required review. That is weaker than a human owner and is stated plainly
+# rather than papered over.
+#
+# WHY THIS FILE STILL EXISTS. Every path below was marked high-risk for a real
+# reason, and that reason is worth keeping even though the founder is no longer
+# the reviewer. This file is now a REGISTER OF SENSITIVE PATHS: prose for a
+# human or agent reviewer, not a routing rule. The signal also stays
+# load-bearing in machine terms — see ESCALATION below.
+#
+# Removing the owner is the point: an owned path auto-requests a review, which
+# is what put PRs in the founder's queue.
+#
+# ESCALATION — measured, not asserted.
+#
+#   .github/scripts/pr-review.sh escalates the reviewer model Sonnet -> Opus
+#   (HIGH_RISK) for ALL 14 of the paths registered below. Verified path-by-path
+#   on 2026-08-15 by matching each registered pattern against the live regex,
+#   not by reading the regex and assuming.
+#
+#   That coverage is NOT inherited. Before this change it was partial, and two
+#   distinct defects were found while measuring it:
+#     * paths this register named simply were not in the regex; and
+#     * alternatives written with a leading slash — /proto/, /migrations/,
+#       /audit, /auth, /esm/ — never matched a REPOSITORY-ROOT path at all,
+#       because grep saw no preceding separator. Escalation for those was
+#       silently dead. They are now anchored (^|["/]).
+#
+#   The FIRST attempt at that fix used (^|/) and was ALSO wrong, which is
+#   worth recording because the failure was in the verification, not the
+#   patch: $FILES is a COMPACT SINGLE-LINE JSON array
+#   ([".github/CODEOWNERS","..."]), so `^` matches only before the opening
+#   bracket and a root path is QUOTE-preceded. It was "verified" against bare
+#   path strings rather than that JSON, so the check reproduced the assumption
+#   instead of testing it. The assertions in
+#   .github/scripts/pr-review-verdict-test.sh now run the live regex against
+#   the exact shape the script greps (ENS-4350).
+#
+#   If you add a path to this register, add it to that regex and re-measure.
+#   A register that claims protection it does not have is worse than no
+#   register: it is the failure mode this whole change set exists to remove.
+#
+# CAN THE REVIEWER APPROVE ITS OWN HARNESS? Yes, and that is a genuine
+# narrowing of control — stated here rather than left to be discovered. With
+# owner routing gone, a PR editing .github/scripts/pr-review.sh or
+# .github/workflows/ can carry the bot's own approval. What still stands
+# between that and main:
+#   * the bot CANNOT MERGE. AUTO_MERGE=false, and allow_auto_merge was set
+#     false across the fleet (A-034 / ENS-3513) after the reviewer squash-merged
+#     enscrive-embed #92 on its own sub-threshold approval. Approval is not
+#     merge; the orchestrator is the arbiter and is a different actor.
+#   * those paths escalate to Opus (HIGH_RISK), so the approval given is at
+#     least the strongest available.
+# If that is judged insufficient, the fix is branch protection requiring a
+# NON-BOT approval on .github/** — not a paragraph in this file.
+#
+# --- SENSITIVE PATHS (no owner; read these harder) ---------------------------
 
-# (c) — the gate itself. Universally @chrisroge.
-**/CODEOWNERS @chrisroge
+# /installer/**
+#     Supply-chain critical: cosign verify + S3 fetch. The installer is pulled
+#     by unattended `curl | sh` from a CloudFront distribution with no WAF, so
+#     it is the one path in this repo where an unreviewed merge reaches users
+#     directly, with no `provision` gate in between. Read it as production.
 
-# (a) — admin destructive bulk-mutation tooling (defensive globs; no-op
-# if absent today, gated if added later).
-/scripts/clean-* @chrisroge
-/scripts/purge-* @chrisroge
-/scripts/bulk-delete-* @chrisroge
-/scripts/wipe-* @chrisroge
+# /v1-surface-contract.toml
+#     The canonical mapping of /v1 endpoints to CLI commands. Drift here breaks
+#     the customer contract.
 
-# enscrive-cli has no auth middleware, no migrations, no billing/ledger,
-# and no ESM by design (CLI is a customer-facing thin client per its
-# CLAUDE.md). Categories (a) for migrations/billing/ESM and (b) for
-# trust-boundary do not apply to this repo and are intentionally not
-# defended here.
+# /src/release_channel.rs
+#     Picks which artifact a customer install pulls. A wrong channel ships
+#     unreleased code to customers.
+
+# /src/license.rs
+#     Entitlement enforcement. A weakened check gives away paid capability.
+
+# /src/preflight.rs
+#     Guardrails that run before commands hit the platform.
+
+# /Cargo.toml
+# /Cargo.lock
+#     Dependency manifests — version bumps carry supply-chain and
+#     dependency-rot risk.
+
+# /.github/workflows/**
+#     Release and CI workflows — supply chain.
+
+# /.github/scripts/**
+#     The reviewer harness itself. The thing that judges every other PR should
+#     be read with the same care as the thing it judges.
+
+# **/CODEOWNERS
+#     This file. A PR that weakens or removes it is a gate-widening attempt
+#     regardless of which repo it lives in.
+
+# /scripts/clean-*
+# /scripts/purge-*
+# /scripts/bulk-delete-*
+# /scripts/wipe-*
+#     Admin destructive bulk-mutation tooling. Defensive globs: no-op if absent
+#     today, still worth reading hard if added later. Irreversible-on-execution.
+
+# --- WHAT THE RETIRED FOUNDER_GATED BLOCK NAMED, AND WHY IT IS NOT HERE -------
+#
+# The FOUNDER_GATED regex removed from .github/scripts/pr-review.sh covered
+# .github/workflows/, .github/scripts/, channels/, src/signature.rs,
+# src/provision.rs, src/manifest.rs and src/fingerprint.rs.
+#
+# The first two are registered above. The other five ARE NOT REGISTERED AND ARE
+# NOT IN THE HIGH_RISK REGEX, and the reason is not an oversight: none of them
+# exists in this repository. Verified against origin/main on 2026-08-15 —
+# `channels/`, `src/signature.rs`, `src/provision.rs`, `src/manifest.rs` and
+# `src/fingerprint.rs` are all absent. They are enscrive-deploy's release-trust
+# files; this repo's copy of the reviewer script was seeded from deploy's and
+# inherited the paths verbatim. That half of the gate has therefore been dead
+# code here for its entire life — it could never fire.
+#
+# Registering paths that do not exist would put a false entry in a register
+# whose entire purpose is to not overstate what it protects. If any of these
+# files is ever added to enscrive-cli, register it here AND add it to the
+# HIGH_RISK regex at the same time.
+#
+# The live release-trust surface in THIS repo is /installer/** and
+# /src/release_channel.rs, both registered above and both escalating.
+
+# --- DELIBERATELY NOT LISTED -------------------------------------------------
+#
+# enscrive-cli has no auth middleware, no migrations, no billing/ledger, and no
+# ESM by design — it is a customer-facing thin client per its CLAUDE.md. Those
+# categories are intentionally not defended here, and their absence is a
+# statement, not an oversight.
+#
+# A-034 removes the founder as reviewer. It does NOT make a previously-ungated
+# path gated, and it does not license removing a path from this register.
+#
+# --- POSTSCRIPT (2026-08-19 — PR Governance Rebalance, Wave C) ----------------
+#
+# Everything above is preserved verbatim from the 2026-08-15 A-034 branch
+# (PR #68). Facts that changed between that writing and this landing are
+# recorded here rather than edited into the historical text:
+#
+#   * The A-035 precondition is MET. The reviewer outage described above
+#     ("Credit balance is too low"; the fifteen implementing PRs HELD) is
+#     over: reviewer funding was verified restored and the reviewer observed
+#     live on 2026-08-19 (A-035 / ENS-4329).
+#   * The fail-loud reviewer output contract shipped fleet-wide (Rebalance
+#     ADR D4/D5): an unparseable reviewer run can no longer terminate green,
+#     in either its silent exit-0 form or its fabricated-review form. This
+#     repo's harness synced in the H-2 wave (PR #69, merged 2026-08-19).
+#   * This register landed via the Rebalance ADR's restructured Wave C —
+#     the CODEOWNERS conversion was split from the harness change and landed
+#     only after the harness wave completed fleet-wide. The original combined
+#     A-034 PR (#68) closed with a pointer. Authority: enscrive-governance
+#     plans/PR-GOVERNANCE-REBALANCE-2026-08-19/ADR.md (RATIFIED 2026-08-19).
