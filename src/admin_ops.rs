@@ -512,8 +512,12 @@ pub struct AdminApiKeysCreateArgs {
     #[arg(long)]
     scope: Option<String>,
 
-    /// Comma-separated capability list (e.g. "search,records,admin"). Empty
-    /// means "apply the default capabilities for the scope" server-side.
+    /// Comma-separated capability list (e.g. "search,voices,evals"). Empty
+    /// means "apply the default capabilities for the scope" server-side. Only
+    /// capabilities in the scope's own default set are accepted; anything else
+    /// is refused with 400 "capability '<x>' is not allowed for scope '<s>'".
+    /// Notably `records` and `agents` are in NO scope's set and cannot be
+    /// granted here, and `admin` is excluded from tenant scope.
     #[arg(long, value_delimiter = ',')]
     capabilities: Vec<String>,
 
