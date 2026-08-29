@@ -521,10 +521,11 @@ jobs:
     needs: [build, aggregate, sign]
     runs-on: ubuntu-latest
     if: success()
-    # Auxiliary — the binary is already in S3 by the time this runs. A failure
-    # here means notify-only failed (orchestrator not wired yet, PAT missing,
-    # rate-limited, etc.). Don't fail the release for it.
-    continue-on-error: true
+    # A publish that cannot be pinned into the dev channel must be RED, not
+    # green. This job used to be continue-on-error, which let a dead or
+    # missing ENSCRIVE_ORCHESTRATOR_PAT mask a silently unpinned release for
+    # days. See enscrive-governance audit
+    # 2026-08-28-RELEASE-PIPELINE-SILENT-PIN-FAILURE.
     steps:
       - name: Dispatch release-published to orchestrator
         env:
@@ -532,9 +533,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${ORCHESTRATOR_PAT}" ]; then
-            echo "::warning::ENSCRIVE_ORCHESTRATOR_PAT not configured — orchestrator notification skipped."
+            echo "::error::ENSCRIVE_ORCHESTRATOR_PAT not configured — binary published but NOT pinned into the dev channel (ENS-538)"
             echo "Set the secret per ENS-538 to enable auto-publish."
-            exit 0
+            exit 1
           fi
           # Resolve the published tag from the trigger event.
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
