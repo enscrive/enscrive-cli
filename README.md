@@ -131,6 +131,30 @@ Bring-your-own-key for embeddings works on every plan.
 
 ---
 
+## Updating a document
+
+`ingest documents --mode replace` reconciles each supplied document ID, including
+retiring stale trailing chunks when the new version is shorter. A document ID
+alone specifies identity: omitting `--mode` leaves the field absent from the
+request and preserves the server's default `append` behavior. Explicit
+`--mode append` adds chunks without requesting full replacement. `--mode upsert`
+is an alias for `replace`.
+
+Use the same explicit ID for successive versions:
+
+```bash
+enscrive ingest documents --corpus-id notes --document-id daily-note \
+  --content 'Morning: discuss the launch. Afternoon: review the budget.' --mode replace
+enscrive ingest documents --corpus-id notes --document-id daily-note \
+  --content 'Morning: discuss the launch.' --mode replace
+```
+
+The second request replaces `daily-note` with the shorter content; it does not
+replace other documents in `notes`. Without an explicit ID, single-document
+text/file input derives an ID from content, so edited content gets a different
+identity. For `--documents-json` or `--documents-file`, each document's `id` controls
+its identity and the selected mode applies to every supplied document.
+
 ## Commands
 
 Local stack and project setup:

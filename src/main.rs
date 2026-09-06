@@ -918,6 +918,23 @@ struct IngestPreparedArgs {
     timeout_secs: u64,
 }
 
+/// Public /v1/ingest reconciliation mode (ENS-5833).
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum DocumentIngestMode {
+    Append,
+    #[value(alias = "upsert")]
+    Replace,
+}
+
+impl DocumentIngestMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Append => "append",
+            Self::Replace => "replace",
+        }
+    }
+}
+
 #[derive(Args)]
 struct IngestDocumentsArgs {
     #[arg(long = "corpus-id")]
@@ -926,10 +943,16 @@ struct IngestDocumentsArgs {
     /// Single document ID (for single-document ingest). If omitted when
     /// using --content/--content-file, a deterministic content-hash id
     /// ("doc-<sha256 prefix>") is generated so identical
-    /// content re-ingests as a no-op; pass this explicitly to control
-    /// replace-a-prior-version semantics.
+    /// content has the same identity. A document ID alone does not request
+    /// replacement; use --mode replace to retire stale trailing chunks.
     #[arg(long = "document-id")]
     document_id: Option<String>,
+
+    /// Reconciliation per supplied document ID: append adds chunks; replace
+    /// retires stale trailing chunks when a document shrinks (alias: upsert).
+    /// Omit to preserve the server's default append behavior.
+    #[arg(long, value_enum)]
+    mode: Option<DocumentIngestMode>,
 
     /// Content as inline text (single doc)
     #[arg(long, conflicts_with = "content_file", conflicts_with = "documents_json", conflicts_with = "documents_file")]
@@ -5130,7 +5153,7 @@ async fn main() {
                              processes ingest asynchronously and ignores this flag"
                         );
                     }
-                    let body = json!({
+                    let mut body = json!({
                         "corpus_id": args.corpus_id,
                         "documents": documents,
                         "voice_id": args.voice_id,
@@ -5138,6 +5161,10 @@ async fn main() {
                         "sync": if args.sync { Some(true) } else { None::<bool> },
                         "no_batch": if args.no_batch { Some(true) } else { None::<bool> },
                     });
+                    // Preserve omission: null is not equivalent to the API's default.
+                    if let Some(mode) = args.mode {
+                        body["mode"] = json!(mode.as_str());
+                    }
                     let launch = match client.post_json("/v1/ingest", body).await {
                         Ok(v) => v,
                         Err(e) => request_failure("ingest documents", e).emit(fmt),
