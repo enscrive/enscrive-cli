@@ -45,6 +45,12 @@ on:
         type: string
         default: ""
 
+# ENS-5787: serialize channel publishers; never cancel an active pair upload.
+# GitHub does not promise FIFO ordering; latest remains discovery, not freshness proof.
+concurrency:
+  group: manifest-publication-${{ inputs.channel }}
+  cancel-in-progress: false
+
 permissions:
   id-token: write
   contents: read
@@ -72,6 +78,14 @@ jobs:
       CHANNEL: ${{ inputs.channel }}
 
     steps:
+      - name: Require the pinned signing workflow ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_WORKFLOW_REF}" == "enscrive/enscrive-cli/.github/workflows/manifest.yml@refs/heads/main" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+
       - name: Checkout enscrive-cli at main (per ENS-538)
         # ENS-538: under per-component pinning, `inputs.version` may be a tag
         # that only exists in one of the 7 release-tracked repos (not in
@@ -100,6 +114,100 @@ jobs:
           # if secret is absent (which will 403, matching today's behavior — surfaces
           # the missing-secret state loudly rather than silently).
           token: ${{ secrets.ENSCRIVE_ORCHESTRATOR_PAT || secrets.GITHUB_TOKEN }}
+
+      # VENDORED from enscrive-runners/.github/actions/install-cosign-verified
+      # (2026-07-18): enscrive-cli is a PUBLIC repo and GitHub never resolves
+      # a private repo's actions from a public caller — no org access setting
+      # changes that. The `uses:` form broke EVERY release since #40 landed
+      # it (v20260711-1523 → v20260714-1954, "Unable to resolve action"),
+      # leaving the shipped CLI binary a week stale (ENS-1608 + ~40 dupes).
+      # Behavior below is byte-faithful to the canonical action (retry +
+      # digest-pin + verified cache); keep the digest table in sync with the
+      # canonical copy via reviewed PRs. ENS-857 (no fleet workflow sync)
+      # tracks the drift class.
+      - name: Restore cached cosign binary (unverified at this point)
+        id: cache-restore
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.cosign-verified/cosign
+          key: cosign-verified-v2.5.2-${{ runner.os }}-${{ runner.arch }}
+      - name: "Install cosign (ENS-1177 pattern, vendored: verify cache or fetch with retries + digest pin)"
+        shell: bash
+        env:
+          COSIGN_VERSION: v2.5.2
+          INSTALL_DIR: ${{ github.workspace }}/.cosign-verified
+          RUNNER_OS_IN: ${{ runner.os }}
+          RUNNER_ARCH_IN: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          declare -A PINNED_SHA256=(
+            [v2.5.2/linux-amd64]="bcfeae05557a9f313ee4392d2f335d0ff69ebbfd232019e3736fb04999fe1734"
+            [v2.5.2/linux-arm64]="2cbcea1873ad76274c3f241ef175d204654e3aac3e73e6ec4504e5227015cb0a"
+            [v2.5.2/darwin-amd64]="0681abe20a482f4b9b3ed65b3debb8c6346591f2dc484b6bfa79609ff1318de4"
+            [v2.5.2/darwin-arm64]="51fdc6d8da8310d72df10065a52247b6bebfe990d4c946dd9f71e17588256011"
+          )
+          case "${RUNNER_OS_IN}" in
+            Linux)  plat_os="linux"  ;;
+            macOS)  plat_os="darwin" ;;
+            *) echo "::error::vendored install-cosign-verified: unsupported runner.os '${RUNNER_OS_IN}'"; exit 1 ;;
+          esac
+          case "${RUNNER_ARCH_IN}" in
+            X64)   plat_arch="amd64" ;;
+            ARM64) plat_arch="arm64" ;;
+            *) echo "::error::vendored install-cosign-verified: unsupported runner.arch '${RUNNER_ARCH_IN}'"; exit 1 ;;
+          esac
+          platform="${plat_os}-${plat_arch}"
+          key="${COSIGN_VERSION}/${platform}"
+          expected_sha256="${PINNED_SHA256[${key}]:-}"
+          if [[ -z "${expected_sha256}" ]]; then
+            echo "::error::vendored install-cosign-verified: no pinned digest for ${key}."
+            exit 1
+          fi
+          mkdir -p "${INSTALL_DIR}"
+          target="${INSTALL_DIR}/cosign"
+          verify_sha256() {
+            local actual
+            actual=$(sha256sum "$1" | cut -d' ' -f1)
+            [[ "${actual}" == "${expected_sha256}" ]]
+          }
+          if [[ -f "${target}" ]]; then
+            if verify_sha256 "${target}"; then
+              echo "cache hit: cosign ${COSIGN_VERSION} (${platform}) verified — no network fetch needed."
+              chmod +x "${target}"
+              echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
+              exit 0
+            fi
+            echo "::warning::vendored install-cosign-verified: cached binary failed digest verification — discarding."
+            rm -f "${target}"
+          fi
+          url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-${platform}"
+          echo "Fetching ${url} ..."
+          attempt=0
+          max_attempts=3
+          until curl \
+            --fail --show-error --silent --location \
+            --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 90 \
+            --connect-timeout 10 --max-time 60 \
+            -o "${target}.download" \
+            "${url}"; do
+            attempt=$((attempt + 1))
+            if [[ "${attempt}" -ge "${max_attempts}" ]]; then
+              echo "::error::vendored install-cosign-verified: exhausted ${max_attempts} outer attempts fetching ${url}"
+              exit 1
+            fi
+            backoff=$((10 * attempt))
+            echo "::warning::vendored install-cosign-verified: fetch attempt ${attempt} failed, backing off ${backoff}s..."
+            sleep "${backoff}"
+          done
+          if ! verify_sha256 "${target}.download"; then
+            echo "::error::vendored install-cosign-verified: downloaded cosign does NOT match the pinned sha256. Refusing to install. expected=${expected_sha256}"
+            rm -f "${target}.download"
+            exit 1
+          fi
+          mv "${target}.download" "${target}"
+          chmod +x "${target}"
+          echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
+          echo "cosign ${COSIGN_VERSION} (${platform}) fetched, verified, and installed at ${target}."
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -587,35 +695,32 @@ jobs:
           cat "${MANIFEST_FILE}"
 
       # ---------------------------------------------------------------------------
-      # Publish: upload to both versioned and current-pointer S3 paths, then
-      # invalidate CloudFront so both URLs reflect the new manifest immediately.
+      # ENS-5787: sign exact frozen bytes, conditional-create the content-addressed
+      # pair, verify stored bytes, then CAS the compatibility discovery copies.
+      # These aliases are mutable; only the pinsets/sha256/<digest>/ pair is
+      # append-only under this protocol (no S3 Object Lock claim).
       # ---------------------------------------------------------------------------
-      - name: Upload manifest.json to S3 (versioned + current pointer)
+      - name: Publish verified aggregate pin-set and advance discovery
         shell: bash
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          python3 scripts/publish_pinset.py \
+            --manifest /tmp/manifest-work/manifest.json \
+            --bucket "${S3_BUCKET}" \
+            --channel "${CHANNEL}" \
+            --version "${VERSION}" \
+            --receipt /tmp/manifest-work/pinset-publication.json
 
-          MANIFEST_FILE="/tmp/manifest-work/manifest.json"
-
-          # Versioned copy — immutable, keep forever
-          aws s3 cp \
-            "${MANIFEST_FILE}" \
-            "s3://${S3_BUCKET}/releases/${CHANNEL}/${VERSION}/manifest.json" \
-            --content-type "application/json" \
-            --cache-control "public, max-age=31536000, immutable"
-
-          # Current pointer — short TTL so consumers pick up new releases promptly
-          aws s3 cp \
-            "${MANIFEST_FILE}" \
-            "s3://${S3_BUCKET}/releases/${CHANNEL}/latest.json" \
-            --content-type "application/json" \
-            --cache-control "public, max-age=300"
-
-          echo "Manifest uploaded to:"
-          echo "  s3://${S3_BUCKET}/releases/${CHANNEL}/${VERSION}/manifest.json"
-          echo "  s3://${S3_BUCKET}/releases/${CHANNEL}/latest.json"
+      - name: Preserve aggregate publication evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: pinset-publication-${{ inputs.channel }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/manifest-work/manifest.json
+            /tmp/manifest-work/pinset-publication.json
+          if-no-files-found: error
 
       - name: Invalidate CloudFront cache (fire and forget)
         shell: bash
