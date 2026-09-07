@@ -287,7 +287,7 @@ def fixture(repo, evidence):
     expected = json.loads((scripts/'cli_auth_expected_tests.json').read_text())
     all_names = [n for group in expected.values() for n in group['names']]
     ordinary_names = [n for group in expected.values() if not group.get('ignored') for n in group['names']]
-    require(len(all_names) == len(set(all_names)) == 62 and len(ordinary_names) == 61, 'expected-inventory')
+    require(len(all_names) == len(set(all_names)) == 65 and len(ordinary_names) == 64, 'expected-inventory')
     require(expected['actual-esm']['names'] == [ACTUAL], 'ignored-inventory')
     ordinary_log = ANSI.sub('', (evidence/'ordinary-tests.log').read_text())
     passed = re.findall(r'^test (.+) \.\.\. ok$', ordinary_log, re.M)
@@ -342,7 +342,7 @@ def fixture(repo, evidence):
         require(digest(test) == binary_digest, 'test-binary-changed')
         (evidence/'actual-esm.log').write_bytes(data)
         write_json(evidence/'fixture-result.json', {'passed': True, 'ordinary_selected': ordinary_names,
-                   'ignored_selected': [ACTUAL], 'total': 62, 'esm': manifest,
+                   'ignored_selected': [ACTUAL], 'total': 65, 'esm': manifest,
                    'test_binary_sha256': binary_digest,
                    'helper_sha256': digest(scripts/'cli_auth_ci.py'),
                    'selection_manifest_sha256': digest(scripts/'cli_auth_expected_tests.json'),
