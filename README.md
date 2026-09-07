@@ -415,6 +415,6 @@ Accepted binaries and Developer site assets live in new private generation direc
 
 Explicit component overrides remain operator-trusted and are recorded separately from signed components. Supplying release-policy inputs when every component is overridden is rejected. Other platforms must use explicit operator binaries until an equally bounded release resolver is implemented. No unsigned production bypass is provided.
 
-Linux local validation covers 405 ordinary tests, a separately executed signed ESM compatibility fixture, and real-cosign aggregate acceptance and refusal cases. These checks do not prove a running self-managed stack or production readiness. This change remains stacked on the held service-authentication branch; merged-base reconciliation, hosted CI and coordinated release acceptance remain pending.
+Artifact verification authenticates the selected release bytes. It does not establish application correctness or validate a complete running self-managed stack; those require separate platform acceptance checks.
 
 Archive extraction accepts one complete gzip member, including trailer validation and compressed EOF. It requires two zero tar termination blocks and permits only zero padding afterward. The 8 GiB decoded limit includes headers, metadata, file bodies and padding. Concatenated gzip members, nonzero suffixes, malformed termination and damaged trailers are rejected. URL controls and surrounding whitespace are rejected before normalization.
