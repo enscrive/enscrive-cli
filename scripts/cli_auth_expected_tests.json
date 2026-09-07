@@ -1,0 +1,86 @@
+{
+  "legacy-local": {
+    "filter": "local::tests::",
+    "names": [
+      "local::tests::bootstrap_request_carries_the_project_tenant_name",
+      "local::tests::detect_container_runtime_errors_and_names_the_podman_fix_when_neither_present",
+      "local::tests::detect_container_runtime_falls_back_to_podman_when_docker_absent",
+      "local::tests::detect_container_runtime_prefers_docker_when_both_present",
+      "local::tests::detect_container_runtime_selects_docker_when_present",
+      "local::tests::detects_transient_local_postgres_errors",
+      "local::tests::ens5903_reinit_preserves_stored_paths_and_start_refuses_live_or_invalid_pid",
+      "local::tests::ensure_esm_vault_creates_workdir_as_a_real_directory",
+      "local::tests::ensure_valid_developer_env_rewrites_invalid_aes_key",
+      "local::tests::ensure_valid_developer_env_rewrites_stale_leptos_bundle_name",
+      "local::tests::esm_vault_path_resolves_to_a_directory_distinct_from_the_vault_file",
+      "local::tests::format_service_start_error_includes_recent_log_excerpt",
+      "local::tests::infer_leptos_output_name_prefers_css_bundle_name",
+      "local::tests::init_self_managed_accepts_custom_developer_port",
+      "local::tests::init_self_managed_fetches_binaries_from_file_manifest",
+      "local::tests::init_self_managed_preserves_existing_local_secrets",
+      "local::tests::init_self_managed_reports_platform_missing_error",
+      "local::tests::init_self_managed_wires_cross_service_onboard_contract",
+      "local::tests::init_self_managed_with_openai_flag_enables_embeddings_and_llm_inference",
+      "local::tests::init_self_managed_writes_runtime_files",
+      "local::tests::local_embedding_provider_requires_real_embedding_backend",
+      "local::tests::local_providers_deserialize_legacy_flat_shape",
+      "local::tests::local_providers_ignore_removed_bge_fields",
+      "local::tests::observe_and_developer_env_share_byte_identical_metering_hmac",
+      "local::tests::project_bootstrap_accepts_a_freshly_created_tenant",
+      "local::tests::project_bootstrap_allows_an_adopted_tenant",
+      "local::tests::project_bootstrap_detects_a_pre_multitenant_stack",
+      "local::tests::project_bootstrap_refuses_a_name_collision_by_default",
+      "local::tests::project_bootstrap_rejects_a_tenant_with_no_key",
+      "local::tests::recent_service_log_excerpt_returns_tail_lines",
+      "local::tests::render_developer_env_contains_absolute_esm_binary",
+      "local::tests::render_developer_env_writes_leptos_site_configuration",
+      "local::tests::render_embed_env_contains_absolute_esm_binary",
+      "local::tests::render_embed_env_contains_catalog_db_url_for_developer_database",
+      "local::tests::render_embed_env_contains_metering_outbox_path_under_runtime_dir",
+      "local::tests::render_observe_env_contains_absolute_esm_binary",
+      "local::tests::render_observe_env_contains_developer_base_url_from_configured_port",
+      "local::tests::resolve_api_context_prefers_profile",
+      "local::tests::resolve_compose_binary_errors_with_actionable_message_when_nothing_works",
+      "local::tests::resolve_compose_binary_falls_back_to_docker_compose_standalone",
+      "local::tests::resolve_compose_binary_falls_back_to_podman_compose_standalone",
+      "local::tests::resolve_compose_binary_falls_back_to_podman_plugin",
+      "local::tests::resolve_compose_binary_prefers_docker_plugin_when_available",
+      "local::tests::resolve_compose_binary_respects_probing_order_over_availability_order",
+      "local::tests::resolver_env_profile_beats_marker",
+      "local::tests::resolver_explicit_key_beats_marker",
+      "local::tests::resolver_explicit_profile_beats_marker",
+      "local::tests::resolver_marker_beats_default_profile",
+      "local::tests::resolver_marker_with_missing_profile_is_an_error",
+      "local::tests::resolver_without_marker_uses_default_profile",
+      "local::tests::save_and_load_profiles_round_trip",
+      "local::tests::stopped_stack_names_enscrive_start"
+    ]
+  },
+  "prepared": {
+    "filter": "local_auth::tests::",
+    "names": [
+      "local_auth::tests::ens5903_bounded_capture_overflow_deadline_and_held_pipe",
+      "local_auth::tests::ens5903_list_raw_shape_and_duplicate_derived",
+      "local_auth::tests::ens5903_paths_pid_and_executable_refuse_without_mutation",
+      "local_auth::tests::ens5903_protected_env_comments_and_typed_namespace",
+      "local_auth::tests::ens5903_real_gate_protocol_fake_and_immutable_inputs",
+      "local_auth::tests::ens5903_snapshot_pairs_rotation_and_redaction"
+    ]
+  },
+  "integration": {
+    "filter": "local::auth_tests::",
+    "names": [
+      "local::auth_tests::ens5903_actual_child_namespace_and_role_binding",
+      "local::auth_tests::ens5903_missing_gate_is_read_only",
+      "local::auth_tests::ens5903_setter_and_repair_protected_namespace"
+    ],
+    "skip": "local::auth_tests::ens5903_actual_esm_parser_and_synthesis_preserves_auth"
+  },
+  "actual-esm": {
+    "filter": "local::auth_tests::ens5903_actual_esm_parser_and_synthesis_preserves_auth",
+    "names": [
+      "local::auth_tests::ens5903_actual_esm_parser_and_synthesis_preserves_auth"
+    ],
+    "ignored": true
+  }
+}

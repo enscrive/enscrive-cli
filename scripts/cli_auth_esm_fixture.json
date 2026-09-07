@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "trust": "equality to exact bytes whose signature root previously verified; CI does not run cosign",
+  "decision": "governance2beea13 CLI-CI-FIXTURE-DECISION.md; original fbfd543 ESM-PROOF-ARTIFACT.md",
+  "original_receipt_sha256": "dafb9dae7fffe7deb7836ec404cf8666f0b7e1da61591e5abfeccf131ac7f883",
+  "url": "https://install.enscrive.io/releases/dev/v20260829-1622/x86_64-unknown-linux-gnu/esm",
+  "sha256": "b593e8d2d216515a63b140d85bf3e0276e5a08c970b62a398edcd0b718ffda2b",
+  "size": 10331544,
+  "source_commit": "bd1f308734b17e394b4231824a4dde2f5c8f6b80",
+  "tag": "v20260829-1622",
+  "release_run": "33262788344",
+  "signer": "https://github.com/enscrive/enscrive-secrets-manager/.github/workflows/release.yml@refs/tags/v20260829-1622",
+  "issuer": "https://token.actions.githubusercontent.com"
+}

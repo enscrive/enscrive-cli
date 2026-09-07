@@ -5,6 +5,7 @@ mod fetch_verify;
 mod jobs_polling;
 mod license;
 mod local;
+mod local_auth;
 mod output;
 mod preflight;
 mod project;
