@@ -1279,7 +1279,7 @@ method = "POST"
 path = "/v1/admin/metering/backfill"
 cli_command = "admin metering backfill"
 status = "implemented"
-note = "ENS-752 / Pillar 2 M3.2-5 — one-shot Loki -> metering_events backfill; infra-internal, kept managed-only"
+note = "ENS-5945 — command transport retained; write and dry-run unavailable pending provenance-complete recovery; server refusal is preserved, no recovery fallback"
 deployment_tier = "managed-only"
 required_plan = "enterprise"
 

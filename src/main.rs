@@ -2364,7 +2364,7 @@ enum AdminSubcommand {
         sub: admin_ops::AdminTelemetrySubcommand,
     },
 
-    /// Metering backfill commands
+    /// Legacy metering recovery commands (currently unavailable)
     Metering {
         #[command(subcommand)]
         sub: admin_ops::AdminMeteringSubcommand,
