@@ -18,6 +18,7 @@ pub fn current_target() -> &'static str {
 ///
 /// Lists the available platforms from the manifest (sorted) and points at
 /// the build-from-source docs for unsupported hosts.
+#[cfg(test)]
 pub fn format_platform_missing(url: &str, platform: &str, available: &[String]) -> String {
     let mut sorted: Vec<&str> = available.iter().map(|s| s.as_str()).collect();
     sorted.sort();

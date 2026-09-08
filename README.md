@@ -402,3 +402,19 @@ bounds the free grant to noncommercial dev/eval/exploration.
 
 Terms and pricing: [enscrive.io/pricing](https://enscrive.io/pricing). See
 [LICENSE](LICENSE) for the full PolyForm Noncommercial 1.0.0 text.
+
+### Signed artifacts for self-managed init
+
+The Linux release resolver verifies the exact aggregate manifest with an independently installed, operator-trusted `cosign`, then checks each downloaded component against that signed aggregate. Set `ENSCRIVE_COSIGN_BIN` to select the verifier explicitly; an invalid explicit selection fails without PATH fallback. The CLI never downloads its own verifier. This authenticates the aggregate publisher's selection, not separate component-workflow identities, freshness, antirollback, or application correctness.
+
+`--expected-manifest-sha256` (or `ENSCRIVE_EXPECTED_MANIFEST_SHA256`) requires an exact 64-character lowercase digest. Without `--manifest-url`, it directly selects the immutable pinset at `--pinset-origin` / `ENSCRIVE_PINSET_ORIGIN` (default `https://developer.enscrive.io`). An explicit manifest URL plus a digest must match. With neither supplied, the existing discovery URL selects a signed but independently unpinned aggregate. Production runbooks should supply an independently reviewed expected digest.
+
+HTTPS redirects and ambiguous URLs are refused. Explicit file roots receive the same signature checks; component file paths must stay within that operator-trusted root. The verifier's environment contains only explicit PATH, operator HOME, private temporary directory, and locale. Arbitrary remote/verifier diagnostics are not rendered.
+
+Accepted binaries and Developer site assets live in new private generation directories. Cached component bytes are checked against a freshly authenticated selection; archives are always extracted anew. A failed force-refetch leaves earlier generations and profile references intact. Old generations are retained without automatic garbage collection. This preservation covers artifact resolution, not rollback of subsequent local-stack initialization. Exclusive same-user operator ownership is required; this is not coordination against arbitrary concurrent local writers.
+
+Explicit component overrides remain operator-trusted and are recorded separately from signed components. Supplying release-policy inputs when every component is overridden is rejected. Other platforms must use explicit operator binaries until an equally bounded release resolver is implemented. No unsigned production bypass is provided.
+
+Artifact verification authenticates the selected release bytes. It does not establish application correctness or validate a complete running self-managed stack; those require separate platform acceptance checks.
+
+Archive extraction accepts one complete gzip member, including trailer validation and compressed EOF. It requires two zero tar termination blocks and permits only zero padding afterward. The 8 GiB decoded limit includes headers, metadata, file bodies and padding. Concatenated gzip members, nonzero suffixes, malformed termination and damaged trailers are rejected. URL controls and surrounding whitespace are rejected before normalization.

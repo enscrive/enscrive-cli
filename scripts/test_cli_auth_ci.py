@@ -140,7 +140,7 @@ class Boundary(unittest.TestCase):
                 + 'f._fetch(pathlib.Path(sys.argv[1]),url='+repr(URL)+',size='+str(len(BODY))+',expected='+repr(SHA)+',opener=opener)\n'
             )
             started = time.monotonic()
-            command = [sys.executable,str(script),str(self.path)]
+            command = [sys.executable,'-B',str(script),str(self.path)]
             if phase == 'success':
                 checked = fixture._worker_fetch(self.path,command,size=len(BODY),expected=SHA,seconds=3)
                 fixture.activate(self.path,checked,size=len(BODY),expected=SHA)
