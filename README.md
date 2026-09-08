@@ -369,6 +369,10 @@ With `--output json`, **stdout carries exactly one JSON document and nothing els
 
 ---
 
+## Local credential validation
+
+See [ENS5903 local authentication status and validation](docs/ENS5903-LOCAL-AUTH/README.md) for prepared-vault requirements, test evidence and the coordinated rollout hold.
+
 ## Contributing
 
 Issues and PRs welcome at [github.com/enscrive/enscrive-cli](https://github.com/enscrive/enscrive-cli). See the issue tracker for open work.

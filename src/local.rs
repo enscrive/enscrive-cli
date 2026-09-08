@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 
+use crate::local_auth::{self, EnvDocument, Prepared, Recipient};
 use crate::project;
 
 const DEFAULT_LOCAL_PROFILE: &str = "local";
@@ -538,9 +539,7 @@ fn resolve_api_context_with(
     }
 
     let endpoint = endpoint_override
-        .or_else(|| {
-            marker_in_effect.map(|marker| marker.project.endpoint.clone())
-        })
+        .or_else(|| marker_in_effect.map(|marker| marker.project.endpoint.clone()))
         .or_else(|| {
             selected_profile
                 .as_ref()
@@ -588,8 +587,7 @@ pub struct BootstrapOptions {
 /// `issue_key` forces a fresh one for rotation.
 pub async fn bootstrap(opts: BootstrapOptions) -> Result<Value, String> {
     let mut profiles = load_profiles()?;
-    let (profile_name, mut profile) =
-        load_local_profile(opts.profile_name.as_deref(), &profiles)?;
+    let (profile_name, mut profile) = load_local_profile(opts.profile_name.as_deref(), &profiles)?;
     let local = profile.local.clone().ok_or_else(|| {
         format!(
             "profile '{profile_name}' is a managed profile — bootstrap applies to a self-managed \
@@ -696,29 +694,27 @@ pub async fn bootstrap_project_tenant(
     let mut profiles = load_profiles()?;
     // Each cause gets its own message and its own next command; do not
     // reuse `load_local_profile`'s generic phrasing here.
-    let (stack_profile_name, stack_profile) = match selected_profile_name(
-        stack_profile_name,
-        &profiles,
-    ) {
-        None => {
-            return Err(
+    let (stack_profile_name, stack_profile) =
+        match selected_profile_name(stack_profile_name, &profiles) {
+            None => {
+                return Err(
                 "no Enscrive stack is configured yet. Run `enscrive init --mode self-managed`, \
                  then `enscrive start`, then re-run `enscrive project init`."
                     .to_string(),
             );
-        }
-        Some(name) => match profiles.profiles.get(&name).cloned() {
-            Some(profile) => (name, profile),
-            None => {
-                return Err(format!(
-                    "profile '{name}' is not in {}. Create it with \
+            }
+            Some(name) => match profiles.profiles.get(&name).cloned() {
+                Some(profile) => (name, profile),
+                None => {
+                    return Err(format!(
+                        "profile '{name}' is not in {}. Create it with \
                      `enscrive init --mode self-managed --profile-name {name}`, or select an \
                      existing profile with --profile.",
-                    profiles_path_for_display()
-                ));
-            }
-        },
-    };
+                        profiles_path_for_display()
+                    ));
+                }
+            },
+        };
     let local = stack_profile.local.clone().ok_or_else(|| {
         format!(
             "profile '{stack_profile_name}' is a managed profile — per-project tenants are a \
@@ -965,36 +961,75 @@ pub async fn init_managed(opts: ManagedInitOptions) -> Result<Value, String> {
 }
 
 pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, String> {
-    let mut profiles = load_profiles()?;
+    let mut profiles = load_profiles_raw()?;
     let home = cli_home()?;
-    fs::create_dir_all(&home.config_root).map_err(|e| format!("create config root: {e}"))?;
-    fs::create_dir_all(&home.data_root).map_err(|e| format!("create data root: {e}"))?;
-
     let profile_name = opts
         .profile_name
         .clone()
         .unwrap_or_else(|| DEFAULT_LOCAL_PROFILE.to_string());
-    let runtime_dir = home.data_root.join("runtime").join(&profile_name);
-    let config_dir = home.config_root.join("profiles").join(&profile_name);
-    let log_dir = runtime_dir.join("logs");
-    let data_dir = runtime_dir.join("data");
-    let infra_dir = runtime_dir.join("infra");
-    let infra_env_path = config_dir.join("infra.env");
-    let developer_env_path = config_dir.join("developer.env");
-    let observe_env_path = config_dir.join("observe.env");
-    let embed_env_path = config_dir.join("embed.env");
-    let docs_env_path = config_dir.join("docs.env");
     let existing_local = profiles
         .profiles
         .get(&profile_name)
-        .and_then(|profile| profile.local.as_ref())
+        .and_then(|p| p.local.as_ref())
         .cloned();
-
-    fs::create_dir_all(&runtime_dir).map_err(|e| format!("create runtime dir: {e}"))?;
-    fs::create_dir_all(&config_dir).map_err(|e| format!("create profile config dir: {e}"))?;
-    fs::create_dir_all(&log_dir).map_err(|e| format!("create log dir: {e}"))?;
-    fs::create_dir_all(&data_dir).map_err(|e| format!("create data dir: {e}"))?;
-    fs::create_dir_all(&infra_dir).map_err(|e| format!("create infra dir: {e}"))?;
+    let runtime_dir = existing_local
+        .as_ref()
+        .map(|l| PathBuf::from(&l.runtime_dir))
+        .unwrap_or_else(|| home.data_root.join("runtime").join(&profile_name));
+    let config_dir = existing_local
+        .as_ref()
+        .map(|l| PathBuf::from(&l.config_dir))
+        .unwrap_or_else(|| home.config_root.join("profiles").join(&profile_name));
+    let log_dir = existing_local
+        .as_ref()
+        .map(|l| PathBuf::from(&l.log_dir))
+        .unwrap_or_else(|| runtime_dir.join("logs"));
+    for p in [&runtime_dir, &config_dir, &log_dir] {
+        local_auth::path_text(p)?;
+    }
+    local_auth::stopped(&log_dir)?;
+    let executable = local_auth::Executable::resolve(opts.esm_bin.as_deref(), env::var_os("PATH"))?;
+    let prepared = Prepared::load(executable, &runtime_dir, chrono::Utc::now())?;
+    let mut opts = opts;
+    prepared.executable().verify()?;
+    opts.esm_bin = Some(prepared.executable().text().to_owned());
+    let data_dir = runtime_dir.join("data");
+    let infra_dir = runtime_dir.join("infra");
+    let infra_env_path = config_dir.join("infra.env");
+    let developer_env_path = existing_local
+        .as_ref()
+        .map(|l| PathBuf::from(&l.developer_env_file))
+        .unwrap_or_else(|| config_dir.join("developer.env"));
+    let observe_env_path = existing_local
+        .as_ref()
+        .map(|l| PathBuf::from(&l.observe_env_file))
+        .unwrap_or_else(|| config_dir.join("observe.env"));
+    let embed_env_path = existing_local
+        .as_ref()
+        .map(|l| PathBuf::from(&l.embed_env_file))
+        .unwrap_or_else(|| config_dir.join("embed.env"));
+    let docs_env_path = config_dir.join("docs.env");
+    // Parse all affected files before any mutation or legacy generation.
+    let mut developer_doc = EnvDocument::optional(&developer_env_path)?;
+    let mut observe_doc = EnvDocument::optional(&observe_env_path)?;
+    let mut embed_doc = EnvDocument::optional(&embed_env_path)?;
+    normalize_profiles(&mut profiles);
+    let existing_local = profiles
+        .profiles
+        .get(&profile_name)
+        .and_then(|p| p.local.as_ref())
+        .cloned();
+    for p in [
+        &home.config_root,
+        &home.data_root,
+        &runtime_dir,
+        &config_dir,
+        &log_dir,
+        &data_dir,
+        &infra_dir,
+    ] {
+        local_auth::protected_dir(p)?;
+    }
     prepare_local_data_dirs(&data_dir)?;
 
     let ports = LocalPorts {
@@ -1016,6 +1051,7 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
     let providers = resolve_local_provider_config(existing_local.as_ref(), &opts)?;
 
     let binaries = resolve_self_managed_binaries(&home, &opts).await?;
+    prepared.executable().verify()?;
 
     let lab_secret = read_env_value(&observe_env_path, "LAB_SERVICE_SECRET")
         .or_else(|| read_env_value(&embed_env_path, "LAB_SERVICE_SECRET"))
@@ -1026,9 +1062,7 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
     // the identical value into both developer.env and observe.env below.
     let observe_to_developer_metering_hmac =
         read_env_value(&developer_env_path, "OBSERVE_TO_DEVELOPER_METERING_HMAC")
-            .or_else(|| {
-                read_env_value(&observe_env_path, "OBSERVE_TO_DEVELOPER_METERING_HMAC")
-            })
+            .or_else(|| read_env_value(&observe_env_path, "OBSERVE_TO_DEVELOPER_METERING_HMAC"))
             .unwrap_or_else(|| generate_hex_secret(32));
     let local_bootstrap_secret = existing_local
         .as_ref()
@@ -1051,8 +1085,8 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
     // ENS-153 (4b): generate a stable docs API key. Persisted in docs.env so
     // the sidecar reads it as ENSCRIVE_API_KEY on every start. Reading back
     // from the existing env file makes re-init idempotent.
-    let docs_api_key = read_env_value(&docs_env_path, "ENSCRIVE_API_KEY")
-        .unwrap_or_else(|| generate_secret(48));
+    let docs_api_key =
+        read_env_value(&docs_env_path, "ENSCRIVE_API_KEY").unwrap_or_else(|| generate_secret(48));
     let docker_project = format!("enscrive-local-{}", sanitize_name(&profile_name));
 
     let keycloak = existing_local
@@ -1147,36 +1181,41 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
         &config_dir.join("infra.env"),
         &render_infra_env(&local, &postgres_password, &qdrant_api_key),
     )?;
-    write_text(
-        &config_dir.join("developer.env"),
-        &render_developer_env(
-            &local,
-            &postgres_password,
-            &lab_secret,
-            &hmac_pepper,
-            &aes_key,
-            &observe_to_developer_metering_hmac,
-            developer_site_root.as_deref(),
-            &leptos_output_name,
-        ),
-    )?;
-    write_text(
-        &config_dir.join("observe.env"),
-        &render_observe_env(
-            &local,
-            &postgres_password,
-            &lab_secret,
-            &observe_to_developer_metering_hmac,
-        ),
-    )?;
-    write_text(
-        &config_dir.join("embed.env"),
-        &render_embed_env(&local, &postgres_password, &qdrant_api_key, &lab_secret),
-    )?;
+    developer_doc.merge_rendered(&render_developer_env(
+        &local,
+        &postgres_password,
+        &lab_secret,
+        &hmac_pepper,
+        &aes_key,
+        &observe_to_developer_metering_hmac,
+        developer_site_root.as_deref(),
+        &leptos_output_name,
+    ))?;
+    prepared.developer().refresh(&mut developer_doc);
+    developer_doc.write(&developer_env_path)?;
+    observe_doc.merge_rendered(&render_observe_env(
+        &local,
+        &postgres_password,
+        &lab_secret,
+        &observe_to_developer_metering_hmac,
+    ))?;
+    prepared.observe().refresh(&mut observe_doc);
+    observe_doc.write(&observe_env_path)?;
+    embed_doc.merge_rendered(&render_embed_env(
+        &local,
+        &postgres_password,
+        &qdrant_api_key,
+        &lab_secret,
+    ))?;
+    prepared.embed().refresh(&mut embed_doc);
+    embed_doc.write(&embed_env_path)?;
     // ENS-153 (4b): write the enscrive-docs sidecar env and config files.
     // docs.env holds ENSCRIVE_API_KEY (never appears in the toml).
     // enscrive-docs.toml is the sidecar's main config.
-    write_text(&config_dir.join("docs.env"), &render_local_docs_env(&docs_api_key))?;
+    write_text(
+        &config_dir.join("docs.env"),
+        &render_local_docs_env(&docs_api_key),
+    )?;
     write_text(
         &config_dir.join("enscrive-docs.toml"),
         &render_local_docs_config(&local, &docs_api_key),
@@ -1184,7 +1223,9 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
     // Ensure the empty corpus directory exists. The sidecar serves its
     // built-in corpus via rust-embed; the on-disk dir satisfies the toml
     // path reference and is where v0.2 corpus extraction will land.
-    let corpus_dir = Path::new(&local.runtime_dir).join("data").join("docs-corpus");
+    let corpus_dir = Path::new(&local.runtime_dir)
+        .join("data")
+        .join("docs-corpus");
     std::fs::create_dir_all(&corpus_dir)
         .map_err(|e| format!("create docs-corpus dir '{}': {e}", corpus_dir.display()))?;
 
@@ -1193,7 +1234,14 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
     // via std::env::var); the vaults exist in parallel as the future
     // canonical config registry. Once each service migrates to
     // SecretsManager::get, the env-file copy can be pruned key-by-key.
-    synthesize_local_esm_vaults(&local.binaries.esm, &runtime_dir, &config_dir).await?;
+    prepared.executable().verify()?;
+    synthesize_local_esm_vaults(
+        &prepared,
+        &runtime_dir,
+        [&developer_env_path, &observe_env_path, &embed_env_path],
+    )
+    .await?;
+    prepared.executable().verify()?;
 
     profiles.version = PROFILE_VERSION;
     profiles.profiles.insert(
@@ -1237,13 +1285,33 @@ pub async fn init_self_managed(opts: SelfManagedInitOptions) -> Result<Value, St
 
 pub async fn start(opts: StartOptions) -> Result<Value, String> {
     let home = cli_home()?;
-    let mut profiles = load_profiles()?;
+    let mut profiles = load_profiles_raw()?;
     let (profile_name, mut profile) = load_local_profile(opts.profile_name.as_deref(), &profiles)?;
-    let local = profile
+    let mut local = profile
         .local
         .clone()
         .ok_or_else(|| format!("profile '{}' is not self-managed", profile_name))?;
 
+    local_auth::stopped(Path::new(&local.log_dir))?;
+    let executable = local_auth::Executable::at(Path::new(&local.binaries.esm))?;
+    let prepared = Prepared::load(
+        executable,
+        Path::new(&local.runtime_dir),
+        chrono::Utc::now(),
+    )?;
+    EnvDocument::read(Path::new(&local.developer_env_file))?;
+    let mut observe_doc = EnvDocument::read(Path::new(&local.observe_env_file))?;
+    let mut embed_doc = EnvDocument::read(Path::new(&local.embed_env_file))?;
+    normalize_profiles(&mut profiles);
+    profile = profiles
+        .profiles
+        .get(&profile_name)
+        .cloned()
+        .ok_or("selected profile disappeared")?;
+    local = profile
+        .local
+        .clone()
+        .ok_or("selected local profile disappeared")?;
     let developer_site_root = discover_developer_site_root(&home, &local.binaries);
     let leptos_output_name = developer_site_root
         .as_deref()
@@ -1256,6 +1324,13 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         developer_site_root.as_deref(),
         Some(&leptos_output_name),
     )?;
+    let mut developer_doc = EnvDocument::read(Path::new(&local.developer_env_file))?;
+    prepared.developer().refresh(&mut developer_doc);
+    prepared.observe().refresh(&mut observe_doc);
+    prepared.embed().refresh(&mut embed_doc);
+    developer_doc.write(Path::new(&local.developer_env_file))?;
+    observe_doc.write(Path::new(&local.observe_env_file))?;
+    embed_doc.write(Path::new(&local.embed_env_file))?;
     prepare_local_data_dirs(&Path::new(&local.runtime_dir).join("data"))?;
     let runtime = ensure_docker_available()?;
     let log_dir = Path::new(&local.log_dir);
@@ -1297,7 +1372,8 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
     let embed_vault_dir = esm_vault_dir(&runtime_path, "enscrive-embed");
     let observe_vault_dir = esm_vault_dir(&runtime_path, "enscrive-observe");
     let developer_vault_dir = esm_vault_dir(&runtime_path, "enscrive-developer");
-    let esm_binary_path = local.binaries.esm.clone();
+    prepared.executable().verify()?;
+    let esm_binary_path = prepared.executable().text().to_owned();
     let master_key_str = master_key_path.display().to_string();
 
     let embed_esm_env: Vec<(&str, String)> = vec![
@@ -1311,6 +1387,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         Path::new(&local.embed_env_file),
         log_dir,
         &embed_esm_env,
+        prepared.embed(),
     )?;
     if service_was_newly_started(&started_embed) {
         started_services.push("enscrive-embed");
@@ -1336,6 +1413,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         Path::new(&local.observe_env_file),
         log_dir,
         &observe_esm_env,
+        prepared.observe(),
     )?;
     if service_was_newly_started(&started_observe) {
         started_services.push("enscrive-observe");
@@ -1372,8 +1450,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
             let site_dir = archive_root.join("site");
             if site_dir.is_dir() {
                 developer_extra_env.push(("LEPTOS_SITE_ROOT", site_dir.display().to_string()));
-                developer_extra_env
-                    .push(("LEPTOS_OUTPUT_NAME", "enscrive-developer".to_string()));
+                developer_extra_env.push(("LEPTOS_OUTPUT_NAME", "enscrive-developer".to_string()));
                 developer_extra_env.push(("LEPTOS_SITE_PKG_DIR", "pkg".to_string()));
             }
         }
@@ -1384,6 +1461,7 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         Path::new(&local.developer_env_file),
         log_dir,
         &developer_extra_env,
+        prepared.developer(),
     )?;
     if service_was_newly_started(&started_developer) {
         started_services.push("enscrive-developer");
@@ -1429,15 +1507,9 @@ pub async fn start(opts: StartOptions) -> Result<Value, String> {
         if service_was_newly_started(&docs_result) {
             started_services.push("enscrive-docs");
         }
-        if let Err(error) =
-            wait_for_tcp("127.0.0.1", local.ports.docs, Duration::from_secs(30))
-        {
+        if let Err(error) = wait_for_tcp("127.0.0.1", local.ports.docs, Duration::from_secs(30)) {
             cleanup_started_services(&started_services, log_dir);
-            return Err(format_service_start_error(
-                error,
-                "enscrive-docs",
-                log_dir,
-            ));
+            return Err(format_service_start_error(error, "enscrive-docs", log_dir));
         }
         docs_result
     } else {
@@ -1621,17 +1693,17 @@ fn load_local_profile(
     Ok((selected_name, profile))
 }
 
-fn load_profiles() -> Result<ProfilesFile, String> {
+fn load_profiles_raw() -> Result<ProfilesFile, String> {
     let home = cli_home()?;
     let path = home.config_root.join("profiles.toml");
-    if !path.exists() {
+    if matches!(fs::symlink_metadata(&path), Err(e) if e.kind()==io::ErrorKind::NotFound) {
         return Ok(ProfilesFile {
             version: PROFILE_VERSION,
             default_profile: None,
             profiles: BTreeMap::new(),
         });
     }
-    let content = fs::read_to_string(&path).map_err(|e| format!("read profiles.toml: {e}"))?;
+    let content = fs::read_to_string(&path).map_err(|_| "profiles.toml unavailable".to_string())?;
     if content.trim().is_empty() {
         return Ok(ProfilesFile {
             version: PROFILE_VERSION,
@@ -1639,8 +1711,12 @@ fn load_profiles() -> Result<ProfilesFile, String> {
             profiles: BTreeMap::new(),
         });
     }
-    let mut profiles: ProfilesFile =
-        toml::from_str(&content).map_err(|e| format!("parse profiles.toml: {e}"))?;
+    let profiles: ProfilesFile =
+        toml::from_str(&content).map_err(|_| "invalid profiles.toml".to_string())?;
+    Ok(profiles)
+}
+
+fn normalize_profiles(profiles: &mut ProfilesFile) {
     for profile in profiles.profiles.values_mut() {
         if let Some(local) = profile.local.as_mut() {
             if local.bootstrap.secret.trim().is_empty() {
@@ -1664,6 +1740,11 @@ fn load_profiles() -> Result<ProfilesFile, String> {
             }
         }
     }
+}
+
+fn load_profiles() -> Result<ProfilesFile, String> {
+    let mut profiles = load_profiles_raw()?;
+    normalize_profiles(&mut profiles);
     Ok(profiles)
 }
 
@@ -1677,14 +1758,10 @@ fn save_profiles(profiles: &ProfilesFile) -> Result<(), String> {
 }
 
 fn cli_home() -> Result<CliHome, String> {
-    let home_dir = env::var("HOME").map_err(|_| "HOME is not set".to_string())?;
-    let config_root = env::var("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(&home_dir).join(".config"))
-        .join("enscrive");
-    let data_root = env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(&home_dir).join(".local/share"))
+    let home_dir = local_auth::xdg(env::var_os("HOME"), PathBuf::new())?;
+    let config_root =
+        local_auth::xdg(env::var_os("XDG_CONFIG_HOME"), home_dir.join(".config"))?.join("enscrive");
+    let data_root = local_auth::xdg(env::var_os("XDG_DATA_HOME"), home_dir.join(".local/share"))?
         .join("enscrive");
     Ok(CliHome {
         config_root,
@@ -2449,12 +2526,7 @@ fn esm_vault_dir(runtime_dir: &Path, service: &str) -> PathBuf {
     runtime_dir.join("secrets").join(service)
 }
 
-// No production call site today (ensure_esm_vault below computes the same
-// path inline against its own `workdir` parameter) — kept as the documented
-// counterpart to esm_vault_dir so the D4 directory-vs-file distinction has a
-// single named home, exercised directly by the D4 contract tests, and ready
-// for D7 (surfacing the vault file location in `enscrive status`).
-#[allow(dead_code)]
+// Explicit inspection file, distinct from the directory-valued runtime ESM path.
 fn esm_vault_file(runtime_dir: &Path, service: &str) -> PathBuf {
     esm_vault_dir(runtime_dir, service)
         .join(".esm")
@@ -2465,34 +2537,9 @@ fn esm_vault_file(runtime_dir: &Path, service: &str) -> PathBuf {
 /// record of the key; persist it with mode 0600 immediately on first
 /// generation. On re-init we reuse the existing key so previously-written
 /// vaults remain decryptable.
-fn ensure_esm_master_key(runtime_dir: &Path) -> Result<String, String> {
-    let path = esm_master_key_path(runtime_dir);
-    if let Ok(existing) = fs::read_to_string(&path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
-    }
-    let key = generate_hex_secret(32);
-    fs::create_dir_all(runtime_dir)
-        .map_err(|e| format!("create runtime dir for master key: {e}"))?;
-    fs::write(&path, format!("{key}\n"))
-        .map_err(|e| format!("write esm master key '{}': {e}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&path)
-            .map_err(|e| format!("stat master key '{}': {e}", path.display()))?
-            .permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&path, perms)
-            .map_err(|e| format!("chmod 0600 master key '{}': {e}", path.display()))?;
-    }
-    Ok(key)
-}
-
 /// Initialize a per-service ESM vault if it doesn't already exist.
 /// Idempotent: reruns cheaply when the vault is already there.
+#[cfg(test)]
 async fn ensure_esm_vault(
     esm_binary: &str,
     workdir: &Path,
@@ -2530,6 +2577,9 @@ async fn esm_set(
     key: &str,
     value: &str,
 ) -> Result<(), String> {
+    if local_auth::recognized(key) {
+        return Err("Observe credentials require explicit operator preparation".into());
+    }
     let output = Command::new(esm_binary)
         .arg("set")
         .arg("--key-file")
@@ -2556,26 +2606,13 @@ async fn esm_set(
 /// std::env::var to SecretsManager::get, the env-file copy can be
 /// pruned key-by-key without disrupting the vault path.
 async fn synthesize_local_esm_vaults(
-    esm_binary: &str,
+    prepared: &Prepared,
     runtime_dir: &Path,
-    config_dir: &Path,
+    env_files: [&Path; 3],
 ) -> Result<(), String> {
-    // Skip synthesis if the resolved esm binary isn't actually executable
-    // on disk. This keeps test fixtures green (they pass synthetic paths
-    // like `/tmp/esm`) and gives the founder a clear log line when the
-    // resolved path doesn't lead to a real binary in production.
-    let esm_path = Path::new(esm_binary);
-    if !esm_path.is_file() {
-        eprintln!(
-            "  [esm] note: synthesis skipped — '{esm_binary}' is not an executable file. \
-             Vaults will not be populated. Install esm from ENSCRIVE-SECRETS or pass --esm-bin <path>."
-        );
-        return Ok(());
-    }
-
+    prepared.executable().verify()?;
+    let esm_binary = prepared.executable().text();
     let master_key_path = esm_master_key_path(runtime_dir);
-    let _ = ensure_esm_master_key(runtime_dir)?;
-
     // Map each service to its rendered env file. Reading the env back
     // ensures the vault contents follow whatever the renderers wrote,
     // including any per-target overrides.
@@ -2585,11 +2622,13 @@ async fn synthesize_local_esm_vaults(
         ("enscrive-embed", "embed.env"),
     ];
 
-    for (service_name, env_filename) in services.iter() {
+    for ((service_name, _), env_path) in services.iter().zip(env_files) {
         let workdir = esm_vault_dir(runtime_dir, service_name);
-        ensure_esm_vault(esm_binary, &workdir, &master_key_path).await?;
-        let env_path = config_dir.join(env_filename);
-        let envs = parse_env_file(&env_path)?;
+        if !esm_vault_file(runtime_dir, service_name).is_file() {
+            return Err("prepared ESM vault disappeared".into());
+        }
+        prepared.executable().verify()?;
+        let envs = EnvDocument::read(env_path)?.entries();
         // Skip any keys already in bucket 1 (deployment topology) per
         // CONFIG-IN-ESM.md. RUST_LOG and bind addresses don't belong in
         // the vault. Do propagate everything else — services can pick
@@ -2621,7 +2660,7 @@ async fn synthesize_local_esm_vaults(
             "ESM_CACHE_TTL_SECS",
         ];
         for (key, value) in envs.iter() {
-            if SKIP_KEYS.contains(&key.as_str()) {
+            if SKIP_KEYS.contains(&key.as_str()) || local_auth::recognized(key) {
                 continue;
             }
             esm_set(esm_binary, &workdir, &master_key_path, key, value).await?;
@@ -2636,7 +2675,8 @@ fn ensure_valid_developer_env(
     leptos_site_root: Option<&Path>,
     leptos_output_name: Option<&str>,
 ) -> Result<(), String> {
-    let mut envs = parse_env_file(env_file)?;
+    let mut document = EnvDocument::read(env_file)?;
+    let mut envs = document.entries();
     let mut found_aes_key = false;
     let mut changed = false;
 
@@ -2685,12 +2725,10 @@ fn ensure_valid_developer_env(
     }
 
     if changed {
-        let content = envs
-            .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        write_text(env_file, &(content + "\n"))?;
+        for (key, value) in envs {
+            document.replace(&key, &value);
+        }
+        document.write(env_file)?;
     }
 
     Ok(())
@@ -2817,16 +2855,16 @@ async fn resolve_self_managed_binaries(
     fs::create_dir_all(&site_root)
         .map_err(|e| format!("create site root '{}': {e}", site_root.display()))?;
 
-    let resolve_one = async |binary_name: &'static str, override_path: Option<&String>| -> Result<String, String> {
+    let resolve_one = async |binary_name: &'static str,
+                             override_path: Option<&String>|
+           -> Result<String, String> {
         if let Some(path) = override_path {
             // Operator escape hatch: use the supplied path verbatim.
             return Ok(path.clone());
         }
 
         let entry = manifest.binaries.get(binary_name).ok_or_else(|| {
-            format!(
-                "release manifest '{manifest_url}' has no entry for '{binary_name}'"
-            )
+            format!("release manifest '{manifest_url}' has no entry for '{binary_name}'")
         })?;
 
         if !entry.platforms.contains_key(target) {
@@ -2856,8 +2894,9 @@ async fn resolve_self_managed_binaries(
                 // Spawning the service then sets LEPTOS_SITE_ROOT to that dir.
                 let archive_root = site_root.join(binary_name);
                 if opts.force_refetch && archive_root.exists() {
-                    fs::remove_dir_all(&archive_root)
-                        .map_err(|e| format!("force-refetch: remove '{}': {e}", archive_root.display()))?;
+                    fs::remove_dir_all(&archive_root).map_err(|e| {
+                        format!("force-refetch: remove '{}': {e}", archive_root.display())
+                    })?;
                 }
                 fs::create_dir_all(&archive_root).map_err(|e| {
                     format!("create archive_root '{}': {e}", archive_root.display())
@@ -3040,7 +3079,9 @@ fn podman_socket_path() -> Result<PathBuf, String> {
     let runtime_dir = env::var("XDG_RUNTIME_DIR").map_err(|_| {
         "XDG_RUNTIME_DIR is not set; rootless podman needs it to locate the user socket. Export it (e.g. `export XDG_RUNTIME_DIR=/run/user/$(id -u)`) and retry.".to_string()
     })?;
-    Ok(PathBuf::from(runtime_dir).join("podman").join("podman.sock"))
+    Ok(PathBuf::from(runtime_dir)
+        .join("podman")
+        .join("podman.sock"))
 }
 
 fn podman_socket_active() -> bool {
@@ -3308,8 +3349,9 @@ fn spawn_service(
     binary: &str,
     env_file: &Path,
     log_dir: &Path,
+    recipient: &Recipient,
 ) -> Result<Value, String> {
-    spawn_service_with_extra_env(service_name, binary, env_file, log_dir, &[])
+    spawn_service_with_extra_env(service_name, binary, env_file, log_dir, &[], recipient)
 }
 
 fn spawn_service_with_extra_env(
@@ -3318,8 +3360,19 @@ fn spawn_service_with_extra_env(
     env_file: &Path,
     log_dir: &Path,
     extra_env: &[(&str, String)],
+    recipient: &Recipient,
 ) -> Result<Value, String> {
-    spawn_service_full(service_name, binary, &[], env_file, log_dir, extra_env)
+    recipient.require_service(service_name)?;
+    local_auth::stopped_service(log_dir, service_name)?;
+    spawn_service_inner(
+        service_name,
+        binary,
+        &[],
+        env_file,
+        log_dir,
+        extra_env,
+        Some(recipient),
+    )
 }
 
 /// Same as spawn_service_with_extra_env but accepts CLI args for the spawned
@@ -3334,9 +3387,34 @@ fn spawn_service_full(
     log_dir: &Path,
     extra_env: &[(&str, String)],
 ) -> Result<Value, String> {
+    if ["enscrive-developer", "enscrive-observe", "enscrive-embed"].contains(&service_name) {
+        return Err("validated Observe recipient required".into());
+    }
+    spawn_service_inner(
+        service_name,
+        binary,
+        args,
+        env_file,
+        log_dir,
+        extra_env,
+        None,
+    )
+}
+fn spawn_service_inner(
+    service_name: &str,
+    binary: &str,
+    args: &[&str],
+    env_file: &Path,
+    log_dir: &Path,
+    extra_env: &[(&str, String)],
+    recipient: Option<&Recipient>,
+) -> Result<Value, String> {
     let pid_path = pid_file(log_dir, service_name);
     if let Some(pid) = read_pid(&pid_path)? {
         if pid_is_running(pid) {
+            if recipient.is_some() {
+                return Err("application running: stop and retry authenticated start".into());
+            }
             return Ok(json!({
                 "status": "already_running",
                 "pid": pid,
@@ -3346,7 +3424,11 @@ fn spawn_service_full(
         let _ = fs::remove_file(&pid_path);
     }
 
-    let envs = parse_env_file(env_file)?;
+    let envs = if recipient.is_some() {
+        EnvDocument::read(env_file)?.entries()
+    } else {
+        parse_env_file(env_file)?
+    };
     let log_path = log_dir.join(format!("{}.log", service_name));
     let stdout = File::create(&log_path)
         .map_err(|e| format!("create log file '{}': {e}", log_path.display()))?;
@@ -3362,6 +3444,11 @@ fn spawn_service_full(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
 
+    if recipient.is_some() {
+        for key in local_auth::NAMES {
+            cmd.env_remove(key);
+        }
+    }
     for (key, value) in envs {
         cmd.env(key, value);
     }
@@ -3372,6 +3459,9 @@ fn spawn_service_full(
         cmd.env(key, value);
     }
 
+    if let Some(recipient) = recipient {
+        recipient.apply(&mut cmd);
+    }
     let child = cmd
         .spawn()
         .map_err(|e| format!("spawn {} via '{}': {e}", service_name, binary))?;
@@ -3926,6 +4016,107 @@ mod tests {
         }
     }
 
+    async fn init_prepared_fixture(mut opts: SelfManagedInitOptions) -> Result<Value, String> {
+        let home = cli_home()?;
+        let profiles = load_profiles_raw()?;
+        let name = opts
+            .profile_name
+            .as_deref()
+            .unwrap_or(DEFAULT_LOCAL_PROFILE);
+        let runtime = profiles
+            .profiles
+            .get(name)
+            .and_then(|p| p.local.as_ref())
+            .map(|l| PathBuf::from(&l.runtime_dir))
+            .unwrap_or_else(|| home.data_root.join("runtime").join(name));
+        opts.esm_bin = Some(
+            local_auth::fixtures::prepare(&runtime)
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        );
+        super::init_self_managed(opts).await
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn ens5903_reinit_preserves_stored_paths_and_start_refuses_live_or_invalid_pid() {
+        let _guard = crate::test_support::lock_env();
+        let temp = TempDir::new().unwrap();
+        set_xdg(&temp);
+        let mut options = SelfManagedInitOptions {
+            profile_name: Some("local".into()),
+            with_grafana: false,
+            developer_port: None,
+            developer_bin: Some("/synthetic/developer".into()),
+            observe_bin: Some("/synthetic/observe".into()),
+            embed_bin: Some("/synthetic/embed".into()),
+            esm_bin: None,
+            docs_bin: Some("/synthetic/docs".into()),
+            openai_api_key: Some("synthetic-provider".into()),
+            anthropic_api_key: None,
+            voyage_api_key: None,
+            nebius_api_key: None,
+            set_default: true,
+            manifest_url: None,
+            force_refetch: false,
+        };
+        init_prepared_fixture(options.clone()).await.unwrap();
+        let mut profiles = load_profiles_raw().unwrap();
+        let local = profiles
+            .profiles
+            .get_mut("local")
+            .unwrap()
+            .local
+            .as_mut()
+            .unwrap();
+        let old = PathBuf::from(&local.runtime_dir);
+        let stored = temp.path().join("stored-runtime");
+        fs::rename(&old, &stored).unwrap();
+        local.runtime_dir = stored.to_str().unwrap().into();
+        local.log_dir = stored.join("custom-logs").to_str().unwrap().into();
+        local.binaries.esm = stored.join("fixture-esm").to_str().unwrap().into();
+        local.bootstrap.secret = String::new();
+        options.esm_bin = Some(local.binaries.esm.clone());
+        let log = PathBuf::from(&local.log_dir);
+        let cfg = PathBuf::from(&local.developer_env_file);
+        save_profiles(&profiles).unwrap();
+        fs::create_dir_all(&log).unwrap();
+        let pid = log.join("enscrive-developer.pid");
+        fs::write(&pid, "0").unwrap();
+        let before = fs::read(&cfg).unwrap();
+        let err = super::init_self_managed(options.clone()).await.unwrap_err();
+        assert!(err.contains("PID"));
+        assert_eq!(fs::read(&cfg).unwrap(), before);
+        assert!(!old.exists());
+        assert!(
+            super::start(StartOptions {
+                profile_name: Some("local".into())
+            })
+            .await
+            .unwrap_err()
+            .contains("PID")
+        );
+        fs::write(&pid, std::process::id().to_string()).unwrap();
+        assert!(
+            super::start(StartOptions {
+                profile_name: Some("local".into())
+            })
+            .await
+            .unwrap_err()
+            .contains("stop")
+        );
+        assert_eq!(fs::read(&cfg).unwrap(), before);
+        fs::remove_file(pid).unwrap();
+        super::init_self_managed(options).await.unwrap();
+        let profiles = load_profiles_raw().unwrap();
+        let local = profiles.profiles["local"].local.as_ref().unwrap();
+        assert_eq!(Path::new(&local.runtime_dir), stored);
+        assert_eq!(Path::new(&local.log_dir), log);
+        assert!(!local.bootstrap.secret.is_empty());
+        assert!(!old.exists());
+    }
+
     // ENS-3054: shared LocalProfile fixture for render_*_env contract tests
     // below. `esm` is deliberately an absolute path (`/tmp/esm`) — the whole
     // point of D6 is that render_*_env must propagate whatever absolute path
@@ -4426,14 +4617,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
 
-        init_self_managed(SelfManagedInitOptions {
+        init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
             developer_port: None,
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: Some("anth-test".to_string()),
@@ -4470,14 +4661,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
 
-        let result = init_self_managed(SelfManagedInitOptions {
+        let result = init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
             developer_port: None,
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
@@ -4533,14 +4724,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
 
-        let result = init_self_managed(SelfManagedInitOptions {
+        let result = init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
             developer_port: Some(4321),
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
@@ -4613,14 +4804,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
 
-        init_self_managed(SelfManagedInitOptions {
+        init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
             developer_port: None,
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: None,
             anthropic_api_key: None,
@@ -4665,14 +4856,14 @@ mod tests {
             .map(|local| local.keycloak.client_secret.clone())
             .unwrap();
 
-        init_self_managed(SelfManagedInitOptions {
+        init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
             developer_port: None,
             developer_bin: Some("/tmp/enscrive-developer-v2".to_string()),
             observe_bin: Some("/tmp/enscrive-observe-v2".to_string()),
             embed_bin: Some("/tmp/enscrive-embed-v2".to_string()),
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-second".to_string()),
             anthropic_api_key: None,
@@ -4737,14 +4928,14 @@ mod tests {
         let temp = TempDir::new().unwrap();
         set_xdg(&temp);
 
-        let result = init_self_managed(SelfManagedInitOptions {
+        let result = init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("custom".to_string()),
             with_grafana: false,
             developer_port: Some(36300),
             developer_bin: Some("/tmp/enscrive-developer".to_string()),
             observe_bin: Some("/tmp/enscrive-observe".to_string()),
             embed_bin: Some("/tmp/enscrive-embed".to_string()),
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
@@ -4867,14 +5058,14 @@ mod tests {
         let manifest_url = format!("file://{}", manifest_path.display());
 
         // First init: should fetch all three binaries from the manifest.
-        init_self_managed(SelfManagedInitOptions {
+        init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
             developer_port: None,
             developer_bin: None,
             observe_bin: None,
             embed_bin: None,
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
@@ -4925,14 +5116,14 @@ mod tests {
         // the existing hash matches — a corrupted file must be re-fetched
         // automatically.
         fs::write(&dev_dest, b"corrupted-on-disk").unwrap();
-        init_self_managed(SelfManagedInitOptions {
+        init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
             developer_port: None,
             developer_bin: None,
             observe_bin: None,
             embed_bin: None,
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
@@ -4954,14 +5145,14 @@ mod tests {
         // force_refetch=true, confirm the content is restored. (The same
         // invariant as above, but via the explicit operator flag.)
         fs::write(&dev_dest, b"corrupted-again").unwrap();
-        init_self_managed(SelfManagedInitOptions {
+        init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
             developer_port: None,
             developer_bin: None,
             observe_bin: None,
             embed_bin: None,
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
@@ -5011,21 +5202,17 @@ mod tests {
             }
         });
         let manifest_path = fixtures_dir.join("manifest.json");
-        fs::write(
-            &manifest_path,
-            serde_json::to_vec(&manifest).unwrap(),
-        )
-        .unwrap();
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         let manifest_url = format!("file://{}", manifest_path.display());
 
-        let err = init_self_managed(SelfManagedInitOptions {
+        let err = init_prepared_fixture(SelfManagedInitOptions {
             profile_name: Some("local".to_string()),
             with_grafana: false,
             developer_port: None,
             developer_bin: None,
             observe_bin: None,
             embed_bin: None,
-            esm_bin: Some("/tmp/enscrive-esm-test-stub-not-real".to_string()),
+            esm_bin: None,
             docs_bin: Some("/tmp/enscrive-docs-test-stub-not-real".to_string()),
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
@@ -5388,8 +5575,7 @@ mod tests {
         let local = sample_local_profile();
         let hmac = generate_hex_secret(32);
 
-        let observe_rendered =
-            render_observe_env(&local, "postgres-pass", "lab-secret", &hmac);
+        let observe_rendered = render_observe_env(&local, "postgres-pass", "lab-secret", &hmac);
         let developer_rendered = render_developer_env(
             &local,
             "postgres-pass",
@@ -5688,3 +5874,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "local_auth_integration_tests.rs"]
+mod auth_tests;
