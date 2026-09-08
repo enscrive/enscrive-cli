@@ -326,10 +326,10 @@ pub async fn run_telemetry_stats(client: &EnscriveClient, fmt: OutputFormat) {
 
 #[derive(Subcommand)]
 pub enum AdminMeteringSubcommand {
-    /// One-shot Loki -> metering_events backfill. `POST
-    /// /v1/admin/metering/backfill`. The handler reads its parameters from
-    /// the URL query string (not a JSON body) — this command sends them
-    /// that way.
+    /// Unavailable: legacy metering recovery requires a provenance-complete
+    /// recovery contract. Both write and dry-run are unsupported.
+    /// Retains POST /v1/admin/metering/backfill with URL query parameters;
+    /// server refusals are reported without a recovery fallback.
     Backfill(AdminMeteringBackfillArgs),
 }
 
@@ -347,8 +347,8 @@ pub struct AdminMeteringBackfillArgs {
     #[arg(long)]
     tenant: Option<String>,
 
-    /// Scan + synthesize rows but skip the INSERT (counts still reflect
-    /// what would have been written).
+    /// Request dry-run mode (currently unavailable, as is write mode).
+    /// No insertion-eligibility or deduplication preview is supported.
     #[arg(long = "dry-run", default_value_t = false)]
     dry_run: bool,
 }
