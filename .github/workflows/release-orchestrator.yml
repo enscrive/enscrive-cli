@@ -33,9 +33,12 @@ permissions:
   actions: write   # to dispatch manifest.yml
 
 concurrency:
-  # Serialize all dev.toml writes across all incoming notifications
+  # Serialize all dev.toml writes across incoming notifications. The default
+  # single-pending queue dropped ESM run 34770140127 during a three-release
+  # burst; retain up to GitHub Actions' documented maximum of 100 pending runs.
   group: dev-toml-write
   cancel-in-progress: false
+  queue: max
 
 jobs:
   bump-dev-toml:
