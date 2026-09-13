@@ -36,6 +36,8 @@ concurrency:
   # Serialize all dev.toml writes across incoming notifications. The default
   # single-pending queue dropped ESM run 34770140127 during a three-release
   # burst; retain up to GitHub Actions' documented maximum of 100 pending runs.
+  # Schema: https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency#queueing-multiple-pending-runs
+  # queue: max is valid with cancel-in-progress: false; true is incompatible.
   group: dev-toml-write
   cancel-in-progress: false
   queue: max
