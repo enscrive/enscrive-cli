@@ -369,6 +369,12 @@ With `--output json`, **stdout carries exactly one JSON document and nothing els
 
 ---
 
+## Delivery evidence
+
+Pull requests expose build, test, onboarding, secret-scan, and independent-review results in [GitHub Actions](https://github.com/enscrive/enscrive-cli/actions). Merges to `main` enter the automated development delivery path; published binaries, checksums, and release notes are recorded on the [Releases page](https://github.com/enscrive/enscrive-cli/releases).
+
+---
+
 ## Contributing
 
 Issues and PRs welcome at [github.com/enscrive/enscrive-cli](https://github.com/enscrive/enscrive-cli). See the issue tracker for open work.
