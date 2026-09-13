@@ -23,7 +23,7 @@ jobs:
     if: >-
       github.event.pull_request.draft == false &&
       (github.event_name == 'pull_request_target' ||
-       github.event.pull_request.number == 0)
+       github.event.pull_request.number == 82)
     runs-on: ubuntu-latest
     env:
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
