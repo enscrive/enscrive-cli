@@ -121,11 +121,9 @@ jobs:
   # Run it only from main with run_paid_onboarding=true. Its assertions and
   # failure behavior remain unchanged; routine pull requests use the cheap jobs.
   #
-  # D8 (no rate card ever seeded) and D9 (no wallet ever provisioned) —
-  # enscrive-developer PR #226, `5da221e`, tag v20260731-0144 — are fixed
-  # and released to the dev channel manifest this job fetches from. D1
-  # (native podman detection, this PR) is the last defect blocking a fully
-  # green podman leg; once it lands, both legs are expected to go green.
+  # D8 (no rate card ever seeded) and D9 (no wallet ever provisioned) were
+  # remediated in enscrive-developer PR #226, `5da221e`, tag v20260731-0144.
+  # The retained campaign is the authority for current end-to-end qualification.
   #
   # The 2026-09-13 delivery drill reached corpus creation and ingestion on both
   # runtimes, then failed at search [guards D10]. That unresolved result remains
