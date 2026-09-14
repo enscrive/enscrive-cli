@@ -26,7 +26,44 @@ format_review_body() {
   printf '%s\n\nThe Orchestrator is the final technical arbiter; this reviewer never merges.\n' "$rendered"
 }
 
+# Bound only inert diff bytes. A copy/read failure is an error, never approval.
+bound_diff() {
+  local input="$1" output="$2" limit="$3" input_bytes
+  [[ "$limit" =~ ^[0-9]+$ ]] || return 1
+  input_bytes=$(wc -c < "$input") || return 1
+  if [ "$input_bytes" -gt "$limit" ]; then
+    head -c "$limit" "$input" > "$output" || return 1
+    printf '%s\n' true
+  else
+    cp -- "$input" "$output" || return 1
+    printf '%s\n' false
+  fi
+}
+
+test_diff_boundary() {
+  local fixture_root limit truncated
+  fixture_root=$(mktemp -d) || return 1
+  for limit in 120000 200000; do
+    head -c "$limit" /dev/zero | tr '\0' x > "$fixture_root/input"
+    truncated=$(bound_diff "$fixture_root/input" "$fixture_root/bounded" "$limit")
+    test "$truncated" = false
+    cmp -s "$fixture_root/input" "$fixture_root/bounded"
+    test "$(resolve_decision approve 0 "$truncated")" = approve
+    cp -- "$fixture_root/input" "$fixture_root/expected"
+    printf x >> "$fixture_root/input"
+    truncated=$(bound_diff "$fixture_root/input" "$fixture_root/bounded" "$limit")
+    test "$truncated" = true
+    test "$(wc -c < "$fixture_root/bounded")" -eq "$limit"
+    cmp -s "$fixture_root/expected" "$fixture_root/bounded"
+    test "$(resolve_decision approve 0 "$truncated")" = request_changes
+  done
+  if bound_diff "$fixture_root/input" "$fixture_root/bounded" invalid; then return 1; fi
+  if bound_diff "$fixture_root/missing" "$fixture_root/bounded" 200000 2>/dev/null; then return 1; fi
+  rm -r -- "$fixture_root"
+}
+
 if [ "${TRUSTED_PR_REVIEW_SELFTEST:-}" = 1 ]; then
+  test_diff_boundary
   test "$(resolve_decision approve 0 false)" = approve
   test "$(resolve_decision request_changes 0 false)" = request_changes
   test "$(resolve_decision approve 1 false)" = request_changes
@@ -78,14 +115,7 @@ jq -R -s 'split("\n") | map(select(length > 0))' "$tmp_dir/files.txt" > "$tmp_di
 
 git diff --no-ext-diff --no-textconv --no-renames --unified=3 "$merge_base" "$HEAD_SHA" > "$tmp_dir/diff.txt"
 test -s "$tmp_dir/diff.txt"
-diff_bytes=$(wc -c < "$tmp_dir/diff.txt")
-truncated=false
-if [ "$diff_bytes" -gt "$CAP" ]; then
-  head -c "$CAP" "$tmp_dir/diff.txt" > "$tmp_dir/diff.bounded"
-  truncated=true
-else
-  cp "$tmp_dir/diff.txt" "$tmp_dir/diff.bounded"
-fi
+truncated=$(bound_diff "$tmp_dir/diff.txt" "$tmp_dir/diff.bounded" "$CAP")
 
 high_risk=false
 if grep -qiE '(^|/)(\.github|migrations|auth|billing|metering|ledger|rate-cards?|contracts?|crypto|secrets?)(/|$)|Cargo\.lock|package-lock\.json' "$tmp_dir/files.txt"; then
