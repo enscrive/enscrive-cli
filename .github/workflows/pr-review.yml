@@ -3,8 +3,6 @@ name: pr-review
 # The workflow and helper are loaded exclusively from the protected base
 # revision. Pull-request code is fetched only as inert diff data.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -20,10 +18,7 @@ concurrency:
 jobs:
   review-control:
     name: review-control
-    if: >-
-      github.event.pull_request.draft == false &&
-      (github.event_name == 'pull_request_target' ||
-       github.event.pull_request.number == 82)
+    if: github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     env:
       EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -31,9 +26,9 @@ jobs:
       PR: ${{ github.event.pull_request.number }}
     steps:
       - name: Check out the exact trusted base
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -70,7 +65,7 @@ jobs:
 
       - name: Mint reviewer App token
         id: app_token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.REVIEWER_APP_ID }}
           private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
