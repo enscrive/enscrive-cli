@@ -108,6 +108,48 @@ jobs:
           retention-days: 7
       - name: Reviewer input-boundary regression tests
         run: TRUSTED_PR_REVIEW_SELFTEST=1 bash .github/scripts/trusted-pr-review.sh
+      - name: Prepare pinned public signature fixtures
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          crypto_root="$(mktemp -d "$RUNNER_TEMP/ens5913-crypto-XXXXXXXX")"
+          mkdir "$crypto_root/inputs" "$crypto_root/output"
+          pin=f42a35577c824eff67254f640386b7d6b686297ee2213b6e088758d274db8c58
+          origin="https://developer.enscrive.io/pinsets/sha256/$pin"
+          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 30 --max-filesize 4194304 -o "$crypto_root/inputs/manifest.json" "$origin/manifest.json"
+          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 30 --max-filesize 4194304 -o "$crypto_root/inputs/manifest.bundle" "$origin/manifest.bundle"
+          # Existing consumer fixture uses independently trusted cosign3.1.1.
+          # This does not change the release pipeline's cosign2.5.2 signer.
+          curl --fail --silent --show-error --location --connect-timeout 10 --max-time 120 --max-filesize 150000000 -o "$crypto_root/cosign" https://github.com/sigstore/cosign/releases/download/v3.1.1/cosign-linux-amd64
+          printf '%s  %s\n' "$pin" "$crypto_root/inputs/manifest.json" | sha256sum --check --status
+          printf '%s  %s\n' 20291e9dbd552a2666b0fb191e1cc20c95392413e800055eca10a17f36c96a14 "$crypto_root/inputs/manifest.bundle" | sha256sum --check --status
+          printf '%s  %s\n' ae1ecd212663f3693ad9edf8b1a183900c9a52d3155ba6e354237f9a0f6463fc "$crypto_root/cosign" | sha256sum --check --status
+          chmod 0700 "$crypto_root/cosign"
+          printf 'ENS5913_REAL_INPUTS=%s\nENS5913_REAL_OUTPUT=%s\nENSCRIVE_COSIGN_BIN=%s\n' "$crypto_root/inputs" "$crypto_root/output" "$crypto_root/cosign" >> "$GITHUB_ENV"
+      - name: Real signed-aggregate positive and negative proof
+        timeout-minutes: 10
+        env:
+          CRYPTO_SOURCE_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/real_crypto_ci.py --self-test
+          crypto_test_report="$RUNNER_TEMP/ens5913-crypto-test.txt"
+          set +e
+          timeout --kill-after=10s 480s cargo test --locked artifact_trust::real_crypto_tests::real_cosign_aggregate_and_expected_signer_proof -- --exact --ignored --test-threads=1 --nocapture > "$crypto_test_report" 2>&1
+          crypto_test_status=$?
+          set -e
+          python3 scripts/real_crypto_ci.py "$ENS5913_REAL_OUTPUT" "$crypto_test_report" "$CRYPTO_SOURCE_HEAD" "$crypto_test_status"
+      - name: Retain safe real-crypto receipt
+        if: always() && env.ENS5913_REAL_OUTPUT != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-real-crypto-receipt
+          path: ${{ env.ENS5913_REAL_OUTPUT }}/crypto-ci-receipt.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Test aggregate publication protocol (offline)
         run: python3 -m unittest discover -s scripts -p test_publish_pinset.py -v
 
