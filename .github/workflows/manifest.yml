@@ -601,17 +601,13 @@ jobs:
           # developer.* is reserved for manifest-fetch internals.
           BASE_URL="https://install.enscrive.io"
 
-          # Derive channel label for the manifest's "channel" field.
-          # Tags like v0.1.0-beta.x map to "beta"; others to "internal" for now.
-          if [[ "${VERSION}" == *-beta* ]]; then
-            CHANNEL_LABEL="beta"
-          elif [[ "${VERSION}" == *-alpha* ]]; then
-            CHANNEL_LABEL="internal"
-          elif [[ "${VERSION}" == *-rc* ]]; then
-            CHANNEL_LABEL="beta"
-          else
-            CHANNEL_LABEL="stable"
-          fi
+          # The manifest field describes the selected publication channel,
+          # not a semantic-version suffix. Timestamp tags carry no channel
+          # suffix, so deriving this from VERSION mislabeled dev as stable.
+          case "${CHANNEL}" in
+            dev|stage|prod) CHANNEL_LABEL="${CHANNEL}" ;;
+            *) echo "unsupported release channel: ${CHANNEL}" >&2; exit 1 ;;
+          esac
 
           # ENS-507: source-of-truth declarations generated from
           # enscrive-deploy/channels/roster.toml + channels/${CHANNEL}.toml.
