@@ -1,8 +1,8 @@
 name: ci
 
-# PR-gating CI for the closed-loop dev pipeline (ENS-569). build/test/clippy are
-# the required status checks that gate auto-merge. Runs on ubuntu-latest (the
-# self-hosted enscrive-builder runners are offline by default).
+# Routine pull-request CI runs build, test, clippy, and secret scanning on
+# GitHub-hosted runners. Independent review is supplied by pr-review.yml.
+# The live self-managed qualification campaign is separately requested below.
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       run_paid_onboarding:
-        description: 'Run the paid Docker/Podman onboarding campaign with the configured provider test key'
+        description: Run the live Docker and Podman onboarding campaign with the configured provider test key
         type: boolean
         required: false
         default: false
@@ -120,7 +120,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets -- -D warnings
 
-  # ENS-3054 Wave 0: the clean-room onboard gate.
+  # ENS-3054 Wave 0: live clean-room onboarding qualification campaign.
   #
   # Root cause from the debrief (enscrive-governance
   # plans/SOLO-DEV-ONBOARD-REMEDIATION-2026-07-31/DEBRIEF.md §2): nothing
@@ -139,20 +139,20 @@ jobs:
   # Matrixed across a Docker host and a podman host per DEBRIEF §5 ("zero
   # hand-edited env files... on both a Docker host and a podman host").
   #
-  # INTENTIONALLY INFORMATIONAL / NOT REQUIRED. Do not add this job's checks
-  # to branch protection's required list — that stays founder-only.
+  # LIVE / CREDENTIALED / EXPLICITLY DISPATCHED. This campaign is excluded from
+  # pull requests, arbitrary branch dispatches, and default manual dispatches.
+  # Run it only from main with run_paid_onboarding=true. Its assertions and
+  # failure behavior remain unchanged; routine pull requests use the cheap jobs.
   #
-  # D8 (no rate card ever seeded) and D9 (no wallet ever provisioned) —
-  # enscrive-developer PR #226, `5da221e`, tag v20260731-0144 — are fixed
-  # and released to the dev channel manifest this job fetches from. D1
-  # (native podman detection, this PR) is the last defect blocking a fully
-  # green podman leg; once it lands, both legs are expected to go green.
+  # D8 (no rate card ever seeded) and D9 (no wallet ever provisioned) were
+  # remediated in enscrive-developer PR #226, `5da221e`, tag v20260731-0144.
+  # The retained campaign is the authority for current end-to-end qualification.
   #
-  # TODO(ENS-3054 Wave 4): once this job is consistently green on both
-  # legs, the founder can promote it to a required branch-protection check.
-  # Not done by this PR.
+  # The 2026-09-13 delivery drill reached corpus creation and ingestion on both
+  # runtimes, then failed at search [guards D10]. That unresolved result remains
+  # live qualification evidence; this routing change does not weaken the test.
   clean-room-onboard:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_paid_onboarding == true }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_paid_onboarding == true }}
     name: clean-room-onboard (${{ matrix.runtime }})
     runs-on: ubuntu-latest
     needs: [build, test, clippy]

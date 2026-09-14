@@ -369,9 +369,11 @@ With `--output json`, **stdout carries exactly one JSON document and nothing els
 
 ---
 
-## Local credential validation
+## Delivery evidence
 
-See [ENS5903 local authentication status and validation](docs/ENS5903-LOCAL-AUTH/README.md) for prepared-vault requirements, test evidence and the coordinated rollout hold.
+Pull requests expose build, test, onboarding, secret-scan, and independent-review results in [GitHub Actions](https://github.com/enscrive/enscrive-cli/actions). Merges to `main` enter the automated development delivery path; published binaries, checksums, and release notes are recorded on the [Releases page](https://github.com/enscrive/enscrive-cli/releases).
+
+---
 
 ## Contributing
 
