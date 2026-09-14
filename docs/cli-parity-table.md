@@ -309,7 +309,7 @@ Status: ✅ implemented (CLI command exists + wired to this endpoint) · ⛔ def
 | `admin incidents get` | GET `/v1/admin/incidents/{id}` | ✅ | enterprise | ENS-752 / ENS-298 Phase 3 |
 | `admin migrations status` | GET `/v1/admin/migrations` | ✅ | enterprise | ENS-752 / ENS-229 — applied vs pending vs failed sqlx migrations |
 | `admin telemetry stats` | GET `/v1/admin/telemetry/stats` | ✅ | enterprise | ENS-752 — aggregate-only wallet + incident + six-sigma stack counters |
-| `admin metering backfill` | POST `/v1/admin/metering/backfill` | ✅ | enterprise | ENS-752 / Pillar 2 M3.2-5 — one-shot Loki -> metering_events backfill; infra-internal, kept managed-only |
+| `admin metering backfill` | POST `/v1/admin/metering/backfill` | ✅ | enterprise | ENS-5945 — command transport retained; write and dry-run unavailable pending provenance-complete recovery; server refusal is preserved, no recovery fallback |
 | `admin tenants create` | POST `/v1/admin/tenants` | ✅ | enterprise | ENS-752 — idempotent on tenant name (migration 056 partial unique index) |
 | `admin tenants erase` | POST `/v1/admin/tenants/erase` | ✅ | enterprise | ENS-752 / ENS-652 / ENS-659 — DESTRUCTIVE + IRREVERSIBLE tenant backup erasure (GDPR Article 17); confirm-gated client- and server-side |
 | `admin api-keys create` | POST `/v1/admin/api-keys` | ✅ | enterprise | ENS-752 — cross-tenant API-key minting |
