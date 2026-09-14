@@ -25,11 +25,18 @@ def classify(raw):
         "unexpected end of json input", "unexpected eof", "proto: syntax error",
     )):
         return "malformed_bundle"
-    # sigstore-go v1.2.0 compatVerifier deliberately discards individual verifier
-    # errors. Require BOTH fixed diagnostics from that exact verification loop,
-    # not merely an ambiguous "no compatible verifier" failure.
-    if ("failed to verify signature with default verifier, trying compatibility verifier" in text
-            and "could not verify message: no compatible verifier found" in text):
+    # This pinned fixture is a legacy hashedrekord bundle, not a new Sigstore
+    # message bundle. cosign v3.1.1 pkg/cosign/verify.go:1316 rejects mismatched
+    # bundle/payload hashes before signature verification. Match BOTH exact
+    # public fixture digests, independently measured from original + one space.
+    mismatch = re.search(
+        r'matching bundle to payload: bundle="([0-9a-f]{64})", payload="([0-9a-f]{64})"',
+        text,
+    )
+    if mismatch and mismatch.groups() == (
+        "f42a35577c824eff67254f640386b7d6b686297ee2213b6e088758d274db8c58",
+        "1825649efffb415ee25a32ae138f0676c3e5e56888adda9fcfe28fb2c16261fd",
+    ):
         return "signature_or_digest_mismatch"
     if any(token in text for token in (
         "invalid signature", "unable to verify signature",
@@ -49,8 +56,11 @@ def self_test():
     assert classify(b"artifact digest does not match message digest") == "signature_or_digest_mismatch"
     assert classify(b"invalid signature; context deadline exceeded") == "infrastructure_failure"
     assert classify(b"unexpected successful process output") == "unclassified"
-    assert classify(b"no compatible verifier found") == "unclassified"
-    assert classify(b"Failed to verify signature with default verifier, trying compatibility verifier\\nError: could not verify message: no compatible verifier found") == "signature_or_digest_mismatch"
+    assert classify(b"matching bundle to payload: invalid") == "unclassified"
+    legacy = b'matching bundle to payload: bundle="f42a35577c824eff67254f640386b7d6b686297ee2213b6e088758d274db8c58", payload="1825649efffb415ee25a32ae138f0676c3e5e56888adda9fcfe28fb2c16261fd"'
+    assert classify(legacy) == "signature_or_digest_mismatch"
+    assert classify(legacy.replace(b"1825649", b"0000000")) == "unclassified"
+    assert classify(legacy + b"; context deadline exceeded") == "infrastructure_failure"
 
 def main(root, test_report, source_head, test_exit):
     if not re.fullmatch(r"[0-9a-f]{40}", source_head):
