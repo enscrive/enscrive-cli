@@ -15,7 +15,9 @@ fn opts() -> SelfManagedInitOptions {
         voyage_api_key: None,
         nebius_api_key: None,
         set_default: true,
-        manifest_url: Some("http://must-not-resolve.invalid".into()),
+        manifest_url: Some("https://must-not-resolve.invalid".into()),
+        expected_manifest_sha256: None,
+        pinset_origin: None,
         force_refetch: false,
     }
 }

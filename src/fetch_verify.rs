@@ -1,38 +1,20 @@
-//! Shared manifest fetch + verify utility.
-//!
-//! Consumed by:
-//! - `enscrive init --mode self-managed` (CLI-REL-014 / ENS-95) — via `src/local.rs`.
-//! - `enscrive deploy fetch`              (RB-008 / ENS-94)       — the legacy
-//!   copy in `src/deploy.rs` will be migrated here before DEPLOY-003 deletes it.
-//!
-//! Schema matches
-//! `enscrive-governance/plans/RELEASE-INDUSTRIALIZATION-2026-04-23/DESIGN.md §2.3`.
-//!
-//! Principles (per DESIGN.md §2.6):
-//! - Caller supplies `dest` explicitly; utility never writes outside `dest`.
-//! - Idempotent: if `dest` already exists with a matching SHA256 the binary is
-//!   not re-downloaded. Force re-fetch is the caller's responsibility.
-//! - No knowledge of orchestration: this module only fetches, verifies, and
-//!   places files on disk.
-//!
-//! `https://` and `file://` URLs are both accepted by `fetch_manifest` — the
-//! latter lets the test suite and offline harnesses point at a fixture manifest
-//! without hitting the network.
-//!
-//! TODO(ENS-82): verify cosign bundle signatures once the v0.1 GA signing
-//! pipeline lands. For now SHA256 is the only integrity signal.
-
+//! Manifest schema. Historical unsigned helpers compile only in tests.
 use std::collections::HashMap;
+#[cfg(test)]
 use std::fs;
+#[cfg(test)]
 use std::io::Write;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 use std::os::unix::fs::PermissionsExt;
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 use crate::release_channel;
 
 /// Highest manifest schema version this CLI understands.
@@ -102,6 +84,7 @@ pub struct Compat {
     pub min_cli_version: String,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 pub enum FetchError {
     ManifestRead(String),
@@ -118,6 +101,7 @@ pub enum FetchError {
     Io(String),
 }
 
+#[cfg(test)]
 impl std::fmt::Display for FetchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -148,8 +132,10 @@ impl std::fmt::Display for FetchError {
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for FetchError {}
 
+#[cfg(test)]
 impl From<FetchError> for String {
     fn from(e: FetchError) -> Self {
         e.to_string()
@@ -163,6 +149,7 @@ impl From<FetchError> for String {
 /// pass the dev-channel URL `https://developer.enscrive.io/releases/dev/latest.json`
 /// today, and a `https://enscrive.io/...` URL once the prod CloudFront is
 /// provisioned.
+#[cfg(test)]
 pub async fn fetch_manifest(manifest_url: &str) -> Result<Manifest, FetchError> {
     let body = read_url_bytes(manifest_url).await?;
     let manifest: Manifest = serde_json::from_slice(&body).map_err(|e| {
@@ -189,6 +176,7 @@ pub async fn fetch_manifest(manifest_url: &str) -> Result<Manifest, FetchError> 
 ///
 /// On SHA256 mismatch the partial download is deleted and a descriptive error
 /// is returned.
+#[cfg(test)]
 pub async fn fetch_and_verify(
     binary: &BinaryEntry,
     target: &str,
@@ -260,121 +248,11 @@ pub async fn fetch_and_verify(
     Ok(())
 }
 
-/// Download `binary.platforms[target]` (a tar.gz archive), verify SHA256 of
-/// the archive itself, and extract its contents into `dest_root`.
-///
-/// The archive is expected to contain at minimum a top-level executable named
-/// `<binary_basename>` and (optionally) a top-level `site/` directory of
-/// static assets. After extraction:
-///
-/// - `<dest_root>/<binary_basename>` is the executable (chmod 0755 set).
-/// - `<dest_root>/site/...` mirrors the archive's site tree.
-///
-/// `dest_root` is created if missing. Existing contents are preserved unless
-/// they conflict with archive entries, in which case the archive entry wins
-/// (overwritten in place). The caller is responsible for choosing whether to
-/// clear `dest_root` before calling this; idempotent re-runs against the same
-/// archive content are safe.
-///
-/// Mismatch on the archive's SHA256 deletes the temp tar.gz and errors;
-/// nothing is extracted in that case.
-pub async fn fetch_and_extract_archive(
-    binary: &BinaryEntry,
-    target: &str,
-    dest_root: &Path,
-    binary_basename: &str,
-) -> Result<(), FetchError> {
-    let platform = binary.platforms.get(target).ok_or_else(|| {
-        let available: Vec<String> = binary.platforms.keys().cloned().collect();
-        FetchError::PlatformMissing(release_channel::format_platform_missing(
-            "<manifest>",
-            target,
-            &available,
-        ))
-    })?;
-
-    let bytes = read_url_bytes(&platform.url)
-        .await
-        .map_err(|e| match e {
-            FetchError::ManifestRead(m) => FetchError::Download(m),
-            other => other,
-        })?;
-
-    let got = format!("{:x}", Sha256::digest(&bytes));
-    if !got.eq_ignore_ascii_case(&platform.sha256) {
-        return Err(FetchError::ChecksumMismatch {
-            artifact: platform.url.clone(),
-            expected: platform.sha256.clone(),
-            got,
-        });
-    }
-
-    fs::create_dir_all(dest_root).map_err(|e| {
-        FetchError::Io(format!(
-            "create dest_root '{}': {e}",
-            dest_root.display()
-        ))
-    })?;
-
-    // Decompress + untar in one shot. Refuse paths that escape dest_root
-    // (`..` traversal) — defensive belt-and-suspenders even though our own
-    // workflows produce well-formed archives.
-    let cursor = std::io::Cursor::new(&bytes);
-    let gz = flate2::read::GzDecoder::new(cursor);
-    let mut archive = tar::Archive::new(gz);
-    archive.set_preserve_mtime(false);
-
-    for entry in archive.entries().map_err(|e| {
-        FetchError::Io(format!("read tar entries from '{}': {e}", platform.url))
-    })? {
-        let mut entry = entry
-            .map_err(|e| FetchError::Io(format!("read tar entry: {e}")))?;
-        let entry_path = entry
-            .path()
-            .map_err(|e| FetchError::Io(format!("decode tar entry path: {e}")))?
-            .into_owned();
-        if entry_path.is_absolute()
-            || entry_path.components().any(|c| {
-                matches!(c, std::path::Component::ParentDir)
-            })
-        {
-            return Err(FetchError::Io(format!(
-                "refusing tar entry with traversal path: '{}'",
-                entry_path.display()
-            )));
-        }
-        let dst = dest_root.join(&entry_path);
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent).map_err(|e| {
-                FetchError::Io(format!(
-                    "create entry parent '{}': {e}",
-                    parent.display()
-                ))
-            })?;
-        }
-        entry
-            .unpack(&dst)
-            .map_err(|e| FetchError::Io(format!("unpack '{}': {e}", dst.display())))?;
-    }
-
-    // Ensure the binary at dest_root/<basename> is executable.
-    let bin_path = dest_root.join(binary_basename);
-    if bin_path.is_file() {
-        set_executable(&bin_path)?;
-    } else {
-        return Err(FetchError::Io(format!(
-            "archive at '{}' did not contain expected top-level binary '{}'",
-            platform.url,
-            binary_basename
-        )));
-    }
-    Ok(())
-}
-
 /// Formatted error for "binary entry exists but has no row for our target".
 ///
 /// Lists the platforms the manifest DOES ship for that binary so operators can
 /// eyeball whether they're on a supported host.
+#[cfg(test)]
 pub fn platform_missing_error(binary_name: &str, target: &str, entry: &BinaryEntry) -> String {
     let available: Vec<String> = entry.platforms.keys().cloned().collect();
     format!(
@@ -385,6 +263,7 @@ pub fn platform_missing_error(binary_name: &str, target: &str, entry: &BinaryEnt
 
 // --- helpers --------------------------------------------------------------
 
+#[cfg(test)]
 async fn read_url_bytes(url: &str) -> Result<Vec<u8>, FetchError> {
     if let Some(path) = url.strip_prefix("file://") {
         return fs::read(path)
@@ -431,6 +310,7 @@ async fn read_url_bytes(url: &str) -> Result<Vec<u8>, FetchError> {
     )))
 }
 
+#[cfg(test)]
 fn sha256_file(path: &Path) -> Result<String, FetchError> {
     let mut file = fs::File::open(path)
         .map_err(|e| FetchError::Io(format!("open '{}': {e}", path.display())))?;
@@ -440,6 +320,7 @@ fn sha256_file(path: &Path) -> Result<String, FetchError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+#[cfg(test)]
 fn temp_sibling(dest: &Path) -> PathBuf {
     let mut name = dest
         .file_name()
@@ -450,6 +331,7 @@ fn temp_sibling(dest: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn set_executable(path: &Path) -> Result<(), FetchError> {
     let mut perms = fs::metadata(path)
         .map_err(|e| FetchError::Io(format!("stat '{}': {e}", path.display())))?
@@ -460,15 +342,18 @@ fn set_executable(path: &Path) -> Result<(), FetchError> {
 }
 
 #[cfg(not(unix))]
+#[cfg(test)]
 fn set_executable(_path: &Path) -> Result<(), FetchError> {
     Ok(())
 }
 
+#[cfg(test)]
 fn snippet(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
     truncate(&s, 160).replace(char::is_control, " ")
 }
 
+#[cfg(test)]
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()

@@ -1,6 +1,11 @@
 mod admin_ops;
 mod client;
 mod evals2;
+#[cfg(target_os = "linux")]
+mod artifact_trust;
+#[cfg(not(target_os = "linux"))]
+#[path = "artifact_trust/unsupported.rs"]
+mod artifact_trust;
 mod fetch_verify;
 mod jobs_polling;
 mod license;
@@ -400,6 +405,14 @@ struct InitArgs {
     /// for offline harnesses. Also reads `ENSCRIVE_MANIFEST_URL`.
     #[arg(long = "manifest-url", env = "ENSCRIVE_MANIFEST_URL")]
     manifest_url: Option<String>,
+
+    /// Require the exact signed aggregate SHA256 (64 lowercase hex characters).
+    #[arg(long = "expected-manifest-sha256")]
+    expected_manifest_sha256: Option<String>,
+
+    /// Independent immutable pinset origin (HTTPS or explicitly trusted file root).
+    #[arg(long = "pinset-origin")]
+    pinset_origin: Option<String>,
 
     /// Re-download service binaries even if they already exist and match the
     /// manifest SHA256.
@@ -4599,6 +4612,8 @@ async fn main() {
                         nebius_api_key: args.nebius_api_key.clone(),
                         set_default: args.set_default,
                         manifest_url: args.manifest_url.clone(),
+                        expected_manifest_sha256: args.expected_manifest_sha256.clone(),
+                        pinset_origin: args.pinset_origin.clone(),
                         force_refetch: args.force_refetch,
                     })
                     .await
