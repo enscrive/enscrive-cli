@@ -25,6 +25,12 @@ def classify(raw):
         "unexpected end of json input", "unexpected eof", "proto: syntax error",
     )):
         return "malformed_bundle"
+    # sigstore-go v1.2.0 compatVerifier deliberately discards individual verifier
+    # errors. Require BOTH fixed diagnostics from that exact verification loop,
+    # not merely an ambiguous "no compatible verifier" failure.
+    if ("failed to verify signature with default verifier, trying compatibility verifier" in text
+            and "could not verify message: no compatible verifier found" in text):
+        return "signature_or_digest_mismatch"
     if any(token in text for token in (
         "invalid signature", "unable to verify signature",
         "artifact digest does not match", "artifact digest mismatch",
@@ -43,6 +49,8 @@ def self_test():
     assert classify(b"artifact digest does not match message digest") == "signature_or_digest_mismatch"
     assert classify(b"invalid signature; context deadline exceeded") == "infrastructure_failure"
     assert classify(b"unexpected successful process output") == "unclassified"
+    assert classify(b"no compatible verifier found") == "unclassified"
+    assert classify(b"Failed to verify signature with default verifier, trying compatibility verifier\\nError: could not verify message: no compatible verifier found") == "signature_or_digest_mismatch"
 
 def main(root, test_report, source_head, test_exit):
     if not re.fullmatch(r"[0-9a-f]{40}", source_head):
