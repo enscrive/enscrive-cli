@@ -29,6 +29,8 @@ def classify(raw):
         "invalid signature", "unable to verify signature",
         "artifact digest does not match", "artifact digest mismatch",
         "message digest does not match",
+        "artifact digest does not match message digest",
+        "artifact does not match digest",
     )):
         return "signature_or_digest_mismatch"
     return "unclassified"
@@ -37,6 +39,8 @@ def self_test():
     assert classify(b"invalid signature when validating ASN.1 encoded signature") == "signature_or_digest_mismatch"
     assert classify(b"no matching certificate identity found") == "signer_identity_mismatch"
     assert classify(b"unexpected end of JSON input") == "malformed_bundle"
+    assert classify(b"artifact does not match digest") == "signature_or_digest_mismatch"
+    assert classify(b"artifact digest does not match message digest") == "signature_or_digest_mismatch"
     assert classify(b"invalid signature; context deadline exceeded") == "infrastructure_failure"
     assert classify(b"unexpected successful process output") == "unclassified"
 
