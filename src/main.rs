@@ -21,7 +21,7 @@ mod segmentation;
 mod test_support;
 mod version;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -4116,6 +4116,89 @@ enum EnsureOutcome {
     Create,
 }
 
+const CORPUS_LIST_PAGE_SIZE: usize = 100;
+
+/// A paged server must prove completion explicitly. Only the first response
+/// may be the complete bare array returned by servers predating pagination.
+async fn fetch_complete_corpus_list(client: &client::EnscriveClient) -> Result<Value, client::ApiError> {
+    fetch_complete_corpus_list_with(|cursor| async move {
+        let mut query = vec![("limit", CORPUS_LIST_PAGE_SIZE.to_string())];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor));
+        }
+        client.get_json_with_query("/v1/corpora", &query).await
+    })
+    .await
+}
+
+fn invalid_corpus_page(message: &str) -> client::ApiError {
+    client::ApiError::InvalidResponse {
+        status: 200,
+        body: format!("invalid /v1/corpora pagination response: {message}"),
+    }
+}
+
+async fn fetch_complete_corpus_list_with<F, Fut>(mut fetch: F) -> Result<Value, client::ApiError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<Value, client::ApiError>>,
+{
+    let mut all = Vec::new();
+    let mut seen_ids = HashSet::new();
+    let mut seen_cursors = HashSet::new();
+    let mut cursor = None;
+    let mut first_page = true;
+
+    loop {
+        let body = fetch(cursor.clone()).await?;
+        let (page, next_cursor) = match body {
+            Value::Array(page) if first_page => (page, None),
+            Value::Object(mut envelope) => {
+                let page = match envelope.remove("corpora") {
+                    Some(Value::Array(page)) => page,
+                    _ => return Err(invalid_corpus_page("corpora must be an array")),
+                };
+                if page.len() > CORPUS_LIST_PAGE_SIZE {
+                    return Err(invalid_corpus_page("page exceeds requested limit"));
+                }
+                let next_cursor = match envelope.remove("next_cursor") {
+                    Some(Value::Null) => None,
+                    Some(Value::String(cursor)) if !cursor.trim().is_empty() => Some(cursor),
+                    _ => return Err(invalid_corpus_page("next_cursor must be a string or null")),
+                };
+                if next_cursor.is_some() && page.is_empty() {
+                    return Err(invalid_corpus_page("empty page has a continuation cursor"));
+                }
+                (page, next_cursor)
+            }
+            _ => return Err(invalid_corpus_page("expected a paged envelope")),
+        };
+
+        for corpus in page {
+            let id = corpus
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| invalid_corpus_page("corpus id is missing"))?;
+            if !seen_ids.insert(id.to_string()) {
+                return Err(invalid_corpus_page("duplicate corpus id across pages"));
+            }
+            all.push(corpus);
+        }
+
+        match next_cursor {
+            None => return Ok(Value::Array(all)),
+            Some(next_cursor) => {
+                if !seen_cursors.insert(next_cursor.clone()) {
+                    return Err(invalid_corpus_page("repeated next_cursor"));
+                }
+                cursor = Some(next_cursor);
+                first_page = false;
+            }
+        }
+    }
+}
+
 /// Extract the corpus array from a `GET /v1/corpora` body.
 ///
 /// `list_corpora` returns a bare JSON array today. The envelope keys are
@@ -5304,7 +5387,7 @@ async fn main() {
             let ctx = api_context.clone().unwrap();
             let client = make_client(ctx.endpoint, require_api_key(ctx.api_key, fmt));
             match sub {
-                CorpusSubcommand::List => match client.get_json("/v1/corpora").await {
+                CorpusSubcommand::List => match fetch_complete_corpus_list(&client).await {
                     Ok(data) => CliResponse::success("corpus list", data).emit(fmt),
                     Err(e) => request_failure("corpus list", e).emit(fmt),
                 },
@@ -5325,7 +5408,7 @@ async fn main() {
                     // name is genuinely absent. Two calls rather than one
                     // because /v1 has no upsert; the read is what makes
                     // re-running this every session a no-op.
-                    let listed = match client.get_json("/v1/corpora").await {
+                    let listed = match fetch_complete_corpus_list(&client).await {
                         Ok(data) => data,
                         Err(e) => request_failure("corpus ensure", e).emit(fmt),
                     };
@@ -8124,6 +8207,145 @@ mod tests {
             EnsureOutcome::Existing(corpus) => assert_eq!(corpus["id"], "c-1"),
             other => panic!("expected the existing corpus, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn corpus_list_collects_pages_in_order_before_ensure_decides() {
+        let mut pages = std::collections::VecDeque::from(vec![
+            Ok(json!({
+                "corpora": [
+                    corpus_entry("c-3", "dupe", "m1"),
+                    corpus_entry("c-2", "other", "m1")
+                ],
+                "next_cursor": "same-timestamp|c-2"
+            })),
+            Ok(json!({
+                "corpora": [corpus_entry("c-1", "dupe", "m1")],
+                "next_cursor": null
+            })),
+        ]);
+        let mut requested = Vec::new();
+        let listed = fetch_complete_corpus_list_with(|cursor| {
+            requested.push(cursor);
+            std::future::ready(pages.pop_front().expect("each requested page has a fixture"))
+        })
+        .await
+        .expect("both pages complete");
+        assert_eq!(requested, vec![None, Some("same-timestamp|c-2".to_string())]);
+        assert_eq!(
+            corpus_list_entries(&listed)
+                .unwrap()
+                .iter()
+                .map(|entry| entry["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["c-3", "c-2", "c-1"]
+        );
+        let err = decide_corpus_ensure(&listed, "dupe", "m1").unwrap_err();
+        assert!(err.contains("2 corpora"), "cross-page ambiguity must be visible");
+    }
+
+    #[tokio::test]
+    async fn corpus_list_preserves_first_page_legacy_complete_array() {
+        let mut calls = 0;
+        let listed = fetch_complete_corpus_list_with(|cursor| {
+            calls += 1;
+            assert!(cursor.is_none());
+            std::future::ready(Ok(json!([corpus_entry("c-1", "mem", "m1")])))
+        })
+        .await
+        .expect("current server returns a complete bare array");
+        assert_eq!(calls, 1);
+        assert_eq!(listed[0]["id"], "c-1");
+        assert!(matches!(
+            decide_corpus_ensure(&listed, "mem", "m1").unwrap(),
+            EnsureOutcome::Existing(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn corpus_list_uses_all_pages_for_model_check() {
+        let mut pages = std::collections::VecDeque::from(vec![
+            Ok(json!({"corpora": [corpus_entry("c-2", "other", "m1")], "next_cursor": "next"})),
+            Ok(json!({"corpora": [corpus_entry("c-1", "mem", "m2")], "next_cursor": null})),
+        ]);
+        let listed = fetch_complete_corpus_list_with(|_| {
+            std::future::ready(pages.pop_front().expect("page fixture"))
+        })
+        .await
+        .unwrap();
+        let err = decide_corpus_ensure(&listed, "mem", "m1").unwrap_err();
+        assert!(err.contains("m2") && err.contains("m1"));
+    }
+
+    #[tokio::test]
+    async fn corpus_list_rejects_missing_or_invalid_terminal_signal() {
+        for body in [
+            json!({"corpora": []}),
+            json!({"corpora": [], "next_cursor": false}),
+            json!({"corpora": [], "next_cursor": ""}),
+            json!({"corpora": [], "next_cursor": "another"}),
+            json!({"corpora": "not an array", "next_cursor": null}),
+        ] {
+            let err = fetch_complete_corpus_list_with(|_| {
+                std::future::ready(Ok(body.clone()))
+            })
+            .await
+            .unwrap_err();
+            assert!(matches!(err, client::ApiError::InvalidResponse { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn corpus_list_never_accepts_legacy_array_after_continuation() {
+        let mut pages = std::collections::VecDeque::from(vec![
+            Ok(json!({"corpora": [corpus_entry("c-2", "other", "m1")], "next_cursor": "next"})),
+            Ok(json!([corpus_entry("c-1", "mem", "m1")])),
+        ]);
+        let err = fetch_complete_corpus_list_with(|_| {
+            std::future::ready(pages.pop_front().expect("page fixture"))
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("expected a paged envelope"));
+    }
+
+    #[tokio::test]
+    async fn corpus_list_rejects_repeated_cursor_and_duplicate_id() {
+        let mut repeated = std::collections::VecDeque::from(vec![
+            Ok(json!({"corpora": [corpus_entry("c-2", "other", "m1")], "next_cursor": "next"})),
+            Ok(json!({"corpora": [corpus_entry("c-1", "mem", "m1")], "next_cursor": "next"})),
+        ]);
+        let err = fetch_complete_corpus_list_with(|_| {
+            std::future::ready(repeated.pop_front().expect("page fixture"))
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("repeated next_cursor"));
+
+        let mut duplicate = std::collections::VecDeque::from(vec![
+            Ok(json!({"corpora": [corpus_entry("c-1", "other", "m1")], "next_cursor": "next"})),
+            Ok(json!({"corpora": [corpus_entry("c-1", "mem", "m1")], "next_cursor": null})),
+        ]);
+        let err = fetch_complete_corpus_list_with(|_| {
+            std::future::ready(duplicate.pop_front().expect("page fixture"))
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("duplicate corpus id"));
+    }
+
+    #[tokio::test]
+    async fn corpus_list_fails_without_partial_success_after_page_error() {
+        let mut pages = std::collections::VecDeque::from(vec![
+            Ok(json!({"corpora": [corpus_entry("c-1", "mem", "m1")], "next_cursor": "next"})),
+            Err(client::ApiError::Timeout),
+        ]);
+        let err = fetch_complete_corpus_list_with(|_| {
+            std::future::ready(pages.pop_front().expect("page fixture"))
+        })
+        .await
+        .unwrap_err();
+        assert!(matches!(err, client::ApiError::Timeout));
     }
 
     #[test]
