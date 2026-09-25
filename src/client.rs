@@ -832,7 +832,9 @@ fn map_reqwest_err(e: reqwest::Error) -> ApiError {
 
 /// Best-effort host extracted from a 3xx response's `Location` header,
 /// for error messages only. Handles both absolute and relative
-/// `Location` values. Never returns the query string or full URL.
+/// `Location` values. Never returns the query string or full URL, and
+/// never a host that itself looks like it carries a credential (see
+/// [`redact_if_secret_like`]) — `Location` is attacker-controlled.
 fn redirect_location_host(response: &reqwest::Response) -> Option<String> {
     let raw = response
         .headers()
@@ -842,7 +844,38 @@ fn redirect_location_host(response: &reqwest::Response) -> Option<String> {
     let url = reqwest::Url::parse(raw)
         .or_else(|_| response.url().join(raw))
         .ok()?;
-    url.host_str().map(str::to_string)
+    Some(redact_if_secret_like(url.host_str()?))
+}
+
+/// If `host` looks like it embeds a credential or any other long
+/// secret-like token, return a fixed placeholder instead of the real
+/// string. `host` is extracted from a 3xx response's `Location` header,
+/// which is attacker-controlled (or, on a redirect FROM our own edge,
+/// could echo something it shouldn't) — this is defense in depth so a
+/// redirect error can never itself become the leak it's reporting on.
+///
+/// Matches the known Enscrive API key shape (`enscrive_<8 hex>_<32
+/// alnum>`, e.g. `enscrive_a1b2c3d4_...`; see
+/// `enscrive-deploy/benchmarks/blackbox_dev_suite.py`'s `API_KEY_PATTERN`
+/// for the same shape used elsewhere), common provider-key prefixes
+/// (`sk-`, e.g. OpenAI/Anthropic), and — as a catch-all — any dot-label
+/// that is at least 20 characters of identifier-shaped text (letters,
+/// digits, `_`, `-`), which no ordinary hostname label is.
+pub(crate) fn redact_if_secret_like(host: &str) -> String {
+    fn looks_like_token(label: &str) -> bool {
+        if label.starts_with("enscrive_") || label.starts_with("sk-") {
+            return true;
+        }
+        label.len() >= 20
+            && label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+    if host.split('.').any(looks_like_token) {
+        "<redacted host>".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 /// Build the typed error for a 3xx response this client refuses to
@@ -1247,5 +1280,68 @@ mod redirect_tests {
             .await
             .expect("plain 200 must still succeed");
         assert_eq!(value["total"], 0);
+    }
+
+    #[test]
+    fn redact_if_secret_like_leaves_an_ordinary_host_alone() {
+        assert_eq!(redact_if_secret_like("attacker.example"), "attacker.example");
+        assert_eq!(redact_if_secret_like("127.0.0.1"), "127.0.0.1");
+        assert_eq!(
+            redact_if_secret_like("some-legit-long-subdomain-name.example.com"),
+            "some-legit-long-subdomain-name.example.com",
+            "a long but non-identifier-shaped hostname label is not a token"
+        );
+    }
+
+    #[test]
+    fn redact_if_secret_like_redacts_an_enscrive_key_shaped_host() {
+        assert_eq!(
+            redact_if_secret_like("enscrive_a1b2c3d4_thisisafakethirtytwocharkey1234.attacker.example"),
+            "<redacted host>"
+        );
+    }
+
+    #[test]
+    fn redact_if_secret_like_redacts_a_provider_key_prefix() {
+        assert_eq!(
+            redact_if_secret_like("sk-ant-fake0123456789abcdefghijklmnop.attacker.example"),
+            "<redacted host>"
+        );
+    }
+
+    #[test]
+    fn redact_if_secret_like_redacts_any_long_token_shaped_label() {
+        assert_eq!(
+            redact_if_secret_like("aVeryLongRandomLookingToken1234567890.example.com"),
+            "<redacted host>"
+        );
+    }
+
+    #[tokio::test]
+    async fn redirect_to_a_key_shaped_host_is_redacted_in_the_error() {
+        let port = one_shot_server(
+            "HTTP/1.1 302 Found".to_string(),
+            "Location: https://enscrive_a1b2c3d4_thisisafakethirtytwocharkey1234.example/\r\n"
+                .to_string(),
+            String::new(),
+        );
+        let client = EnscriveClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "fixture-only-key".to_string(),
+            None,
+        );
+        let err = client
+            .get_json("/v1/corpora")
+            .await
+            .expect_err("a 3xx must never be treated as success");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("redacted host"),
+            "a key-shaped Location host must be redacted: {rendered}"
+        );
+        assert!(
+            !rendered.contains("thisisafakethirtytwocharkey1234"),
+            "must never print the key-shaped host text itself: {rendered}"
+        );
     }
 }

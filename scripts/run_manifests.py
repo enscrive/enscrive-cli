@@ -14,6 +14,12 @@ from pathlib import Path
 
 import yaml
 
+import no_redirect
+
+# ENS-6483: refuse redirects before run_api (below) ever sends X-API-Key /
+# X-Embedding-Provider-Key.
+no_redirect.install()
+
 ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 EXPORT_PATTERN = re.compile(r'^export\s+([A-Z0-9_]+)="(.*)"$')
 MANIFEST_SUFFIXES = {".json", ".yaml", ".yml"}

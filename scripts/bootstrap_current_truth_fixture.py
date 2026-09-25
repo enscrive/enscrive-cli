@@ -10,6 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
+import no_redirect
+
+# ENS-6483: refuse redirects before request() (below) ever sends X-API-Key /
+# X-Embedding-Provider-Key.
+no_redirect.install()
+
 SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[2]
 

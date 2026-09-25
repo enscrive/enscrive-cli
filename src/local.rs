@@ -884,6 +884,7 @@ async fn bootstrap_local_stack_named(
 ) -> Result<LocalBootstrapResponse, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("build local bootstrap client: {e}"))?;
 
@@ -910,6 +911,10 @@ async fn bootstrap_local_stack_named(
                  Run `enscrive start` and check `enscrive status`."
             )
         })?;
+
+    if response.status().is_redirection() {
+        return Err(redirect_error(&response, "create project tenant"));
+    }
 
     if !response.status().is_success() {
         let status = response.status();
@@ -3635,6 +3640,7 @@ async fn bootstrap_local_stack(
 ) -> Result<LocalBootstrapResponse, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("build local bootstrap client: {e}"))?;
 
@@ -3657,6 +3663,10 @@ async fn bootstrap_local_stack(
         .await
         .map_err(|e| format!("call local bootstrap endpoint: {e}"))?;
 
+    if response.status().is_redirection() {
+        return Err(redirect_error(&response, "local bootstrap"));
+    }
+
     if !response.status().is_success() {
         let body = response
             .text()
@@ -3671,10 +3681,38 @@ async fn bootstrap_local_stack(
         .map_err(|e| format!("parse local bootstrap response: {e}"))
 }
 
+/// Fail closed on a 3xx from `response`, naming only the status and the
+/// (redaction-aware) `Location` host — never the full URL, its query
+/// string, or any credential. Every call in this function and
+/// `request_keycloak_admin_token` below carries a credential — the local
+/// bootstrap secret, an admin/developer password, a Keycloak client
+/// secret, or a bearer token obtained from one of these — and must check
+/// this immediately after `.send()`, before the response body is read.
+fn redirect_error(response: &reqwest::Response, what: &str) -> String {
+    let host = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|raw| {
+            reqwest::Url::parse(raw)
+                .or_else(|_| response.url().join(raw))
+                .ok()
+        })
+        .and_then(|u| u.host_str().map(str::to_string))
+        .map(|h| crate::client::redact_if_secret_like(&h))
+        .unwrap_or_else(|| "an unspecified host".to_string());
+    format!(
+        "{what}: HTTP {} redirected to {host} — refusing to resend credentials to a \
+         different host (redirects are disabled)",
+        response.status().as_u16()
+    )
+}
+
 async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, String> {
     let base = format!("http://127.0.0.1:{}", local.ports.keycloak);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("build keycloak client: {e}"))?;
 
@@ -3690,6 +3728,9 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .send()
         .await
         .map_err(|e| format!("check keycloak realm: {e}"))?;
+    if realm_resp.status().is_redirection() {
+        return Err(redirect_error(&realm_resp, "check keycloak realm"));
+    }
     if realm_resp.status() == reqwest::StatusCode::NOT_FOUND {
         // ENS-153: verifyEmail=false on local realm. The seeded
         // developer/developer end-user (ENS-145) needs to log in
@@ -3711,6 +3752,9 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
             .send()
             .await
             .map_err(|e| format!("create keycloak realm: {e}"))?;
+        if create.status().is_redirection() {
+            return Err(redirect_error(&create, "create keycloak realm"));
+        }
         if !create.status().is_success() {
             let body = create.text().await.unwrap_or_default();
             return Err(format!("create keycloak realm failed: {}", body));
@@ -3737,6 +3781,9 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .send()
         .await
         .map_err(|e| format!("update keycloak realm: {e}"))?;
+    if realm_put.status().is_redirection() {
+        return Err(redirect_error(&realm_put, "update keycloak realm"));
+    }
     if !realm_put.status().is_success() {
         let body = realm_put.text().await.unwrap_or_default();
         return Err(format!("update keycloak realm failed: {}", body));
@@ -3751,6 +3798,9 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .send()
         .await
         .map_err(|e| format!("query keycloak client: {e}"))?;
+    if clients_resp.status().is_redirection() {
+        return Err(redirect_error(&clients_resp, "query keycloak client"));
+    }
     let clients_json: Value = clients_resp
         .json()
         .await
@@ -3776,6 +3826,9 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
             .send()
             .await
             .map_err(|e| format!("create keycloak client: {e}"))?;
+        if create.status().is_redirection() {
+            return Err(redirect_error(&create, "create keycloak client"));
+        }
         if !create.status().is_success() {
             let body = create.text().await.unwrap_or_default();
             return Err(format!("create keycloak client failed: {}", body));
@@ -3791,6 +3844,9 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .send()
         .await
         .map_err(|e| format!("query keycloak users: {e}"))?;
+    if users_resp.status().is_redirection() {
+        return Err(redirect_error(&users_resp, "query keycloak users"));
+    }
     let users_json: Value = users_resp
         .json()
         .await
@@ -3816,6 +3872,9 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
             .send()
             .await
             .map_err(|e| format!("create keycloak user: {e}"))?;
+        if create.status().is_redirection() {
+            return Err(redirect_error(&create, "create keycloak user"));
+        }
         if !create.status().is_success() {
             let body = create.text().await.unwrap_or_default();
             return Err(format!("create keycloak user failed: {}", body));
@@ -3829,6 +3888,9 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
             .send()
             .await
             .map_err(|e| format!("reload keycloak user: {e}"))?;
+        if users_resp.status().is_redirection() {
+            return Err(redirect_error(&users_resp, "reload keycloak user"));
+        }
         let users_json: Value = users_resp
             .json()
             .await
@@ -3856,6 +3918,9 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .send()
         .await
         .map_err(|e| format!("reset local developer password: {e}"))?;
+    if reset.status().is_redirection() {
+        return Err(redirect_error(&reset, "reset local developer password"));
+    }
     if !reset.status().is_success() {
         let body = reset.text().await.unwrap_or_default();
         return Err(format!("reset local developer password failed: {}", body));
@@ -3912,6 +3977,9 @@ async fn request_keycloak_admin_token(
         .send()
         .await
         .map_err(|e| format!("keycloak admin login failed: {e}"))?;
+    if token_resp.status().is_redirection() {
+        return Err(redirect_error(&token_resp, "keycloak admin login"));
+    }
     if !token_resp.status().is_success() {
         let body = token_resp
             .text()
@@ -4515,6 +4583,65 @@ mod tests {
 
         assert_eq!(response.tenant_name, "my-app");
         assert_eq!(response.api_key.as_deref(), Some("issued-project-key"));
+    }
+
+    /// ENS-6483 KEYREDIRECT: `bootstrap_local_stack_named` POSTs
+    /// `local.bootstrap.secret` in its JSON body. A 302 from the local
+    /// stack must never be followed — that would resend the secret to
+    /// whatever host `Location` names — and the redirect target must
+    /// never receive a connection.
+    #[tokio::test]
+    async fn bootstrap_named_refuses_a_redirect_and_never_contacts_the_target() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let attacker = TcpListener::bind("127.0.0.1:0").unwrap();
+        attacker.set_nonblocking(true).unwrap();
+        let attacker_addr = attacker.local_addr().unwrap();
+
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = origin.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{attacker_addr}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let local = sample_local_profile();
+        let keycloak_user = LocalKeycloakUser {
+            subject: "kc-subject-1".to_string(),
+            email: "developer@local.enscrive".to_string(),
+        };
+
+        let err = bootstrap_local_stack_named(
+            &format!("http://127.0.0.1:{origin_port}"),
+            &local,
+            &keycloak_user,
+            "my-app",
+            "project-my-app-cli",
+        )
+        .await
+        .expect_err("a 3xx must never be treated as success");
+        assert!(
+            err.contains("redirected") && err.contains("302"),
+            "must name the redirect: {err}"
+        );
+        assert!(
+            !err.contains("bootstrap-secret"),
+            "must never print the bootstrap secret: {err}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        match attacker.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {} // expected
+            Ok(_) => panic!("the redirect target received a connection — the secret was resent"),
+            Err(e) => panic!("unexpected accept error: {e}"),
+        }
     }
 
     /// A marker pointing at a profile the key store lost must fail loudly:
