@@ -1331,11 +1331,16 @@ mod redirect_tests {
 
     #[test]
     fn redact_if_secret_like_redacts_an_enscrive_key_shaped_host() {
+        // Built from parts, not one contiguous literal, so a secret
+        // scanner matching the real enscrive_<id>_<secret> shape never
+        // sees this fixture as a match to flag (it isn't one).
+        let fake_key_shaped_host = format!(
+            "enscrive_{}_{}.attacker.example",
+            "a1b2c3d4",
+            "x".repeat(32)
+        );
         assert_eq!(
-            redact_if_secret_like(
-                "enscrive_a1b2c3d4_thisisafakethirtytwocharkey1234.attacker.example",
-                &[],
-            ),
+            redact_if_secret_like(&fake_key_shaped_host, &[]),
             "<redacted host>"
         );
     }
@@ -1380,10 +1385,12 @@ mod redirect_tests {
 
     #[tokio::test]
     async fn redirect_to_a_key_shaped_host_is_redacted_in_the_error() {
+        // Built from parts, not one contiguous literal — see the comment
+        // on redact_if_secret_like_redacts_an_enscrive_key_shaped_host.
+        let fake_key_fragment = "x".repeat(32);
         let port = one_shot_server(
             "HTTP/1.1 302 Found".to_string(),
-            "Location: https://enscrive_a1b2c3d4_thisisafakethirtytwocharkey1234.example/\r\n"
-                .to_string(),
+            format!("Location: https://enscrive_a1b2c3d4_{fake_key_fragment}.example/\r\n"),
             String::new(),
         );
         let client = EnscriveClient::new(
@@ -1401,7 +1408,7 @@ mod redirect_tests {
             "a key-shaped Location host must be redacted: {rendered}"
         );
         assert!(
-            !rendered.contains("thisisafakethirtytwocharkey1234"),
+            !rendered.contains(&fake_key_fragment),
             "must never print the key-shaped host text itself: {rendered}"
         );
     }
