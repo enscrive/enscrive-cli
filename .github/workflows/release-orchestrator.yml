@@ -49,17 +49,52 @@ jobs:
       - name: Resolve inputs
         id: input
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PAYLOAD_REPO: ${{ github.event.client_payload.repo }}
+          PAYLOAD_VERSION: ${{ github.event.client_payload.version }}
+          DISPATCH_REPO: ${{ github.event.inputs.repo }}
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            REPO="${{ github.event.client_payload.repo }}"
-            VERSION="${{ github.event.client_payload.version }}"
+          export LC_ALL=C
+
+          # Every payload-derived value arrives via `env:` above, never
+          # spliced with ${{ }} into this script body — repository_dispatch
+          # client_payload and workflow_dispatch inputs are caller-controlled
+          # text, and ${{ }} expansion happens before the shell parses this
+          # script, which is the classic GitHub Actions script-injection
+          # vector. This step runs before the PAT-holding checkout step, so
+          # everything below must fail closed before any git or PAT use.
+          if [ "$EVENT_NAME" = "repository_dispatch" ]; then
+            REPO="$PAYLOAD_REPO"
+            VERSION="$PAYLOAD_VERSION"
           else
-            REPO="${{ github.event.inputs.repo }}"
-            VERSION="${{ github.event.inputs.version }}"
+            REPO="$DISPATCH_REPO"
+            VERSION="$DISPATCH_VERSION"
           fi
+
           [ -n "$REPO" ] || { echo "::error::missing repo"; exit 1; }
           [ -n "$VERSION" ] || { echo "::error::missing version"; exit 1; }
+
+          # Explicit allowlist, derived from (and kept in sync with) the
+          # roster this workflow's own "Update channels/dev.toml override"
+          # step maps to ROSTER_KEY for bump-dev-toml.py below. Reject
+          # anything else before the PAT-holding checkout step runs.
+          case "$REPO" in
+            enscrive-secrets-manager|enscrive-bootstrap-authority|enscrive-control-tower-tui|enscrive-cli|enscrive-developer|enscrive-observe|enscrive-embed|enscrive-metering-sentinel|enscrive-docs)
+              ;;
+            *)
+              echo "::error::repo '$REPO' is not an allowed release-orchestrator caller"
+              exit 1 ;;
+          esac
+
+          # vYYYYMMDD-HHMM, optionally suffixed with -<7 hex chars> (short SHA).
+          if ! [[ "$VERSION" =~ ^v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7})?$ ]]; then
+            echo "::error::version '$VERSION' does not match the expected vYYYYMMDD-HHMM[-<sha7>] shape"
+            exit 1
+          fi
+
           echo "repo=$REPO" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Triggered by: repo=$REPO version=$VERSION"
