@@ -60,9 +60,9 @@ jobs:
           export LC_ALL=C
 
           # Every payload-derived value arrives via `env:` above, never
-          # spliced with ${{ }} into this script body — repository_dispatch
+          # spliced as a GitHub expression into this script body — repository_dispatch
           # client_payload and workflow_dispatch inputs are caller-controlled
-          # text, and ${{ }} expansion happens before the shell parses this
+          # text, and GitHub expression expansion happens before the shell parses this
           # script, which is the classic GitHub Actions script-injection
           # vector. This step runs before the PAT-holding checkout step, so
           # everything below must fail closed before any git or PAT use.
