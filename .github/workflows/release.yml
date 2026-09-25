@@ -126,7 +126,7 @@ jobs:
         shell: bash
         env:
           # The dispatch input reaches the shell only through env, never
-          # through ${{ }} expansion inside the script (script injection).
+          # through GitHub expression expansion inside the script (script injection).
           INPUT_REF_NAME: ${{ github.event.inputs.ref_name }}
           LC_ALL: C
         run: |
