@@ -8,7 +8,7 @@ CI-checked source of truth (`tests/surface_contract.rs` +
 `python3 scripts/gen_parity_table.py`; do not hand-edit rows. Last reconciled:
 **2026-07-10** (CLI 100%-parity workstream).
 
-**Totals: 147 endpoints — 144 `implemented`, 3 `deferred`, 0 `missing`.** Tiers: 142 any-mode / 5 managed-only. Plans: 66 free / 61 professional / 20 enterprise.
+**Totals: 148 endpoints — 145 `implemented`, 3 `deferred`, 0 `missing`.** Tiers: 143 any-mode / 5 managed-only. Plans: 67 free / 61 professional / 20 enterprise.
 
 Status: ✅ implemented (CLI command exists + wired to this endpoint) · ⛔ deferred (explicit `reason` in the contract; not silently missing).
 
@@ -33,6 +33,7 @@ Status: ✅ implemented (CLI command exists + wired to this endpoint) · ⛔ def
 | `corpus stats` | GET `/v1/corpora/{id}/stats` | ✅ | free |  |
 | `corpus documents` | GET `/v1/corpora/{id}/documents` | ✅ | free |  |
 | `corpus chunks` | GET `/v1/corpora/{id}/documents/{doc_id}/chunks` | ✅ | free |  |
+| `corpus document delete` | DELETE `/v1/corpora/{id}/documents/{doc_id}` | ✅ | free | app-memory epic P3 (ADR ENSCRIVE-CLI-APP-MEMORY-2026-07-31 §3/§6-P3) — retire a memory |
 
 ## Corpus Staging
 
@@ -83,7 +84,7 @@ Status: ✅ implemented (CLI command exists + wired to this endpoint) · ⛔ def
 
 | Command | Verb · `/v1` path | Status | Plan | Notes |
 |---|---|---|---|---|
-| `analyze content` | POST `/v1/analyze-content` | ✅ | free |  |
+| `analyze content` | POST `/v1/analyze-content` | ✅ | free | D1 — billed at the ratified managed reasoning rate (enscrive-developer #341), same reasoning.managed.consumed event/debit path as /v1/complete; see `ratecard show` for the current price |
 
 ## Models
 
@@ -204,9 +205,9 @@ Status: ✅ implemented (CLI command exists + wired to this endpoint) · ⛔ def
 
 | Command | Verb · `/v1` path | Status | Plan | Notes |
 |---|---|---|---|---|
-| `eval-defs publish` | POST `/v1/eval-defs/{id}/publish` | ✅ | professional | EV-017 — publish a completed full-scope run as canonical |
+| `eval-defs publish` | POST `/v1/eval-defs/{id}/publish` | ✅ | professional | EV-017 — publish a completed full-scope run as canonical; requires Admin-capability API key (D7, Founder-gated leaderboard) |
 | `eval-defs publications` | GET `/v1/eval-defs/{id}/publications` | ✅ | professional | EV-017 — list active publications for an eval |
-| `eval-defs unpublish` | DELETE `/v1/eval-publications/{id}` | ✅ | professional | EV-017 — unpublish (soft delete, audit row remains) |
+| `eval-defs unpublish` | DELETE `/v1/eval-publications/{id}` | ✅ | professional | EV-017 — unpublish (soft delete, audit row remains); requires Admin-capability API key (D7, Founder-gated leaderboard) |
 
 ## Logs & Observability
 

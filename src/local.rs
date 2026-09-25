@@ -2159,8 +2159,7 @@ fn render_observe_env(
     observe_to_developer_metering_hmac: &str,
 ) -> String {
     format!(
-        "LISTEN_ADDR=127.0.0.1:{observe_rest_port}\nLOKI_URL=http://127.0.0.1:{loki_port}\nEMBED_URL=http://127.0.0.1:{embed_grpc_port}\nDATABASE_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_observe\nDEVELOPER_BASE_URL=http://127.0.0.1:{developer_port}\nLAB_SERVICE_SECRET={lab_secret}\nOBSERVE_TO_DEVELOPER_METERING_HMAC={hmac}\nESM_BINARY={esm_binary}\nRUST_LOG=info\n",
-        observe_rest_port = local.ports.observe_rest,
+        "LOKI_URL=http://127.0.0.1:{loki_port}\nEMBED_URL=http://127.0.0.1:{embed_grpc_port}\nDATABASE_URL=postgresql://enscrive:{postgres_password}@127.0.0.1:{postgres_port}/enscrive_observe\nDEVELOPER_BASE_URL=http://127.0.0.1:{developer_port}\nLAB_SERVICE_SECRET={lab_secret}\nOBSERVE_TO_DEVELOPER_METERING_HMAC={hmac}\nESM_BINARY={esm_binary}\nRUST_LOG=info\n",
         loki_port = local.ports.loki,
         embed_grpc_port = local.ports.embed_grpc,
         postgres_password = postgres_password,
