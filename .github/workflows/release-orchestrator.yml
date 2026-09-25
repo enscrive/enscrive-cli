@@ -65,10 +65,10 @@ jobs:
           echo "Triggered by: repo=$REPO version=$VERSION"
 
       - name: Checkout enscrive-cli (for the bump generator script)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Checkout enscrive-deploy main (PAT for cross-repo write)
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: enscrive/enscrive-deploy
           ref: main
