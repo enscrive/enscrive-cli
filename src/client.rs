@@ -59,6 +59,18 @@ pub enum ApiError {
 
     /// Request timed out (reqwest timeout fires before a response arrives).
     Timeout,
+
+    /// Server responded with an HTTP 3xx redirect. `EnscriveClient`'s http
+    /// client is built with `redirect::Policy::none()` so a redirect is
+    /// never silently followed — doing so would resend `X-API-Key` (and, if
+    /// set, `X-Embedding-Provider-Key`) to whatever host `Location` names.
+    Redirected {
+        status: u16,
+        /// Host only — see `redirect_location_host`. Never the full URL or
+        /// query string, which could itself carry sensitive data, and never
+        /// any credential.
+        location_host: Option<String>,
+    },
 }
 
 impl fmt::Display for ApiError {
@@ -135,6 +147,19 @@ impl fmt::Display for ApiError {
                  `enscrive status`; otherwise check `--endpoint` / ENSCRIVE_BASE_URL \
                  and your profile."
             ),
+            ApiError::Redirected {
+                status,
+                location_host,
+            } => {
+                let host = location_host.as_deref().unwrap_or("an unspecified host");
+                write!(
+                    f,
+                    "HTTP {status}: the server redirected this request to {host}. \
+                     Enscrive credentials (X-API-Key / X-Embedding-Provider-Key) are never \
+                     resent to a redirect target; check --endpoint / ENSCRIVE_BASE_URL and \
+                     your profile."
+                )
+            }
         }
     }
 }
@@ -423,6 +448,7 @@ impl EnscriveClient {
     pub fn new(base_url: String, api_key: String, embedding_provider_key: Option<String>) -> Self {
         let http = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("build http client");
         Self {
@@ -465,6 +491,10 @@ impl EnscriveClient {
             .await
             .map_err(map_reqwest_err)?;
 
+        if response.status().is_redirection() {
+            return Err(redirect_error(&response));
+        }
+
         let status = response.status().as_u16();
         let body_text = response
             .text()
@@ -493,6 +523,10 @@ impl EnscriveClient {
             .send()
             .await
             .map_err(|e| format!("request failed: {e}"))?;
+
+        if response.status().is_redirection() {
+            return Err(redirect_error(&response).to_string());
+        }
 
         let status = response.status();
         let content_type = response
@@ -547,6 +581,10 @@ impl EnscriveClient {
             .send()
             .await
             .map_err(|e| format!("request failed: {e}"))?;
+
+        if response.status().is_redirection() {
+            return Err(redirect_error(&response).to_string());
+        }
 
         let status = response.status();
         if let Some(timeout_secs) = timeout_secs {
@@ -625,6 +663,10 @@ impl EnscriveClient {
             .await
             .map_err(map_reqwest_err)?;
 
+        if response.status().is_redirection() {
+            return Err(redirect_error(&response));
+        }
+
         let status = response.status().as_u16();
         let body_text = response.text().await.map_err(map_reqwest_err)?;
 
@@ -645,6 +687,10 @@ impl EnscriveClient {
             .send()
             .await
             .map_err(|e| format!("request failed: {e}"))?;
+
+        if response.status().is_redirection() {
+            return Err(redirect_error(&response).to_string());
+        }
 
         let status = response.status();
         let body_text = response
@@ -734,6 +780,10 @@ impl EnscriveClient {
             .await
             .map_err(map_reqwest_err)?;
 
+        if response.status().is_redirection() {
+            return Err(redirect_error(&response));
+        }
+
         let status = response.status().as_u16();
         let body_text = response.text().await.map_err(map_reqwest_err)?;
 
@@ -760,6 +810,10 @@ impl EnscriveClient {
 
         let response = request.send().await.map_err(map_reqwest_err)?;
 
+        if response.status().is_redirection() {
+            return Err(redirect_error(&response));
+        }
+
         let status = response.status().as_u16();
         let body_text = response.text().await.map_err(map_reqwest_err)?;
 
@@ -773,6 +827,30 @@ fn map_reqwest_err(e: reqwest::Error) -> ApiError {
         ApiError::Timeout
     } else {
         ApiError::Network(e)
+    }
+}
+
+/// Best-effort host extracted from a 3xx response's `Location` header,
+/// for error messages only. Handles both absolute and relative
+/// `Location` values. Never returns the query string or full URL.
+fn redirect_location_host(response: &reqwest::Response) -> Option<String> {
+    let raw = response
+        .headers()
+        .get(reqwest::header::LOCATION)?
+        .to_str()
+        .ok()?;
+    let url = reqwest::Url::parse(raw)
+        .or_else(|_| response.url().join(raw))
+        .ok()?;
+    url.host_str().map(str::to_string)
+}
+
+/// Build the typed error for a 3xx response this client refuses to
+/// follow. Call this BEFORE reading the response body.
+fn redirect_error(response: &reqwest::Response) -> ApiError {
+    ApiError::Redirected {
+        status: response.status().as_u16(),
+        location_host: redirect_location_host(response),
     }
 }
 
@@ -791,6 +869,7 @@ mod tests {
         match err {
             ApiError::NotYetAvailable { .. } => FailureClass::Unsupported,
             ApiError::Timeout => FailureClass::Config,
+            ApiError::Redirected { .. } => FailureClass::Config,
             ApiError::Network(e) if e.is_connect() => FailureClass::Config,
             ApiError::Network(_) => FailureClass::Bug,
             ApiError::InvalidResponse { .. } => FailureClass::Bug,
@@ -1081,5 +1160,92 @@ mod tests {
         for e in &cases {
             assert!(!e.to_string().is_empty(), "empty Display for {e:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::*;
+
+    fn one_shot_server(status_line: String, extra_headers: String, body: String) -> u16 {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "{status_line}\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn cross_host_redirect_is_refused_and_never_followed() {
+        use std::net::TcpListener;
+
+        let attacker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        attacker_listener.set_nonblocking(true).unwrap();
+        let attacker_addr = attacker_listener.local_addr().unwrap();
+
+        let origin_port = one_shot_server(
+            "HTTP/1.1 302 Found".to_string(),
+            format!("Location: http://localhost:{}/steal\r\n", attacker_addr.port()),
+            String::new(),
+        );
+        let client = EnscriveClient::new(
+            format!("http://127.0.0.1:{origin_port}"),
+            "fixture-only-key".to_string(),
+            None,
+        );
+        let result = client.get_json("/v1/corpora").await;
+
+        let err = result.expect_err("a 3xx must never be treated as success");
+        assert!(
+            matches!(err, ApiError::Redirected { status: 302, .. }),
+            "expected Redirected{{status:302}}, got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("localhost") || rendered.contains("unspecified host"),
+            "must name the redirect target host: {rendered}"
+        );
+        assert!(
+            !rendered.contains("fixture-only-key"),
+            "must never print the API key: {rendered}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        match attacker_listener.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Ok(_) => panic!("the redirect target received a connection — the API key was resent"),
+            Err(e) => panic!("unexpected accept error: {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_redirect_response_still_succeeds() {
+        let port = one_shot_server(
+            "HTTP/1.1 200 OK".to_string(),
+            "Content-Type: application/json\r\n".to_string(),
+            r#"{"corpora":[],"total":0}"#.to_string(),
+        );
+        let client = EnscriveClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "fixture-only-key".to_string(),
+            None,
+        );
+        let value = client
+            .get_json("/v1/corpora")
+            .await
+            .expect("plain 200 must still succeed");
+        assert_eq!(value["total"], 0);
     }
 }
