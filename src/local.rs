@@ -913,7 +913,11 @@ async fn bootstrap_local_stack_named(
         })?;
 
     if response.status().is_redirection() {
-        return Err(redirect_error(&response, "create project tenant"));
+        return Err(redirect_error(
+            &response,
+            "create project tenant",
+            &[&local.bootstrap.secret],
+        ));
     }
 
     if !response.status().is_success() {
@@ -3664,7 +3668,11 @@ async fn bootstrap_local_stack(
         .map_err(|e| format!("call local bootstrap endpoint: {e}"))?;
 
     if response.status().is_redirection() {
-        return Err(redirect_error(&response, "local bootstrap"));
+        return Err(redirect_error(
+            &response,
+            "local bootstrap",
+            &[&local.bootstrap.secret],
+        ));
     }
 
     if !response.status().is_success() {
@@ -3688,7 +3696,10 @@ async fn bootstrap_local_stack(
 /// bootstrap secret, an admin/developer password, a Keycloak client
 /// secret, or a bearer token obtained from one of these — and must check
 /// this immediately after `.send()`, before the response body is read.
-fn redirect_error(response: &reqwest::Response, what: &str) -> String {
+/// `credentials` is every secret THIS request sent, so a `Location` host
+/// that echoes one back gets redacted (see
+/// `crate::client::redact_if_secret_like`).
+fn redirect_error(response: &reqwest::Response, what: &str, credentials: &[&str]) -> String {
     let host = response
         .headers()
         .get(reqwest::header::LOCATION)
@@ -3699,7 +3710,7 @@ fn redirect_error(response: &reqwest::Response, what: &str) -> String {
                 .ok()
         })
         .and_then(|u| u.host_str().map(str::to_string))
-        .map(|h| crate::client::redact_if_secret_like(&h))
+        .map(|h| crate::client::redact_if_secret_like(&h, credentials))
         .unwrap_or_else(|| "an unspecified host".to_string());
     format!(
         "{what}: HTTP {} redirected to {host} — refusing to resend credentials to a \
@@ -3729,7 +3740,11 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .await
         .map_err(|e| format!("check keycloak realm: {e}"))?;
     if realm_resp.status().is_redirection() {
-        return Err(redirect_error(&realm_resp, "check keycloak realm"));
+        return Err(redirect_error(
+            &realm_resp,
+            "check keycloak realm",
+            &[&access_token],
+        ));
     }
     if realm_resp.status() == reqwest::StatusCode::NOT_FOUND {
         // ENS-153: verifyEmail=false on local realm. The seeded
@@ -3753,7 +3768,11 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
             .await
             .map_err(|e| format!("create keycloak realm: {e}"))?;
         if create.status().is_redirection() {
-            return Err(redirect_error(&create, "create keycloak realm"));
+            return Err(redirect_error(
+                &create,
+                "create keycloak realm",
+                &[&access_token],
+            ));
         }
         if !create.status().is_success() {
             let body = create.text().await.unwrap_or_default();
@@ -3782,7 +3801,11 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .await
         .map_err(|e| format!("update keycloak realm: {e}"))?;
     if realm_put.status().is_redirection() {
-        return Err(redirect_error(&realm_put, "update keycloak realm"));
+        return Err(redirect_error(
+            &realm_put,
+            "update keycloak realm",
+            &[&access_token],
+        ));
     }
     if !realm_put.status().is_success() {
         let body = realm_put.text().await.unwrap_or_default();
@@ -3799,7 +3822,11 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .await
         .map_err(|e| format!("query keycloak client: {e}"))?;
     if clients_resp.status().is_redirection() {
-        return Err(redirect_error(&clients_resp, "query keycloak client"));
+        return Err(redirect_error(
+            &clients_resp,
+            "query keycloak client",
+            &[&access_token],
+        ));
     }
     let clients_json: Value = clients_resp
         .json()
@@ -3827,7 +3854,11 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
             .await
             .map_err(|e| format!("create keycloak client: {e}"))?;
         if create.status().is_redirection() {
-            return Err(redirect_error(&create, "create keycloak client"));
+            return Err(redirect_error(
+                &create,
+                "create keycloak client",
+                &[&access_token, &local.keycloak.client_secret],
+            ));
         }
         if !create.status().is_success() {
             let body = create.text().await.unwrap_or_default();
@@ -3845,7 +3876,11 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .await
         .map_err(|e| format!("query keycloak users: {e}"))?;
     if users_resp.status().is_redirection() {
-        return Err(redirect_error(&users_resp, "query keycloak users"));
+        return Err(redirect_error(
+            &users_resp,
+            "query keycloak users",
+            &[&access_token],
+        ));
     }
     let users_json: Value = users_resp
         .json()
@@ -3873,7 +3908,11 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
             .await
             .map_err(|e| format!("create keycloak user: {e}"))?;
         if create.status().is_redirection() {
-            return Err(redirect_error(&create, "create keycloak user"));
+            return Err(redirect_error(
+                &create,
+                "create keycloak user",
+                &[&access_token],
+            ));
         }
         if !create.status().is_success() {
             let body = create.text().await.unwrap_or_default();
@@ -3889,7 +3928,11 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
             .await
             .map_err(|e| format!("reload keycloak user: {e}"))?;
         if users_resp.status().is_redirection() {
-            return Err(redirect_error(&users_resp, "reload keycloak user"));
+            return Err(redirect_error(
+                &users_resp,
+                "reload keycloak user",
+                &[&access_token],
+            ));
         }
         let users_json: Value = users_resp
             .json()
@@ -3919,7 +3962,11 @@ async fn bootstrap_keycloak(local: &LocalProfile) -> Result<LocalKeycloakUser, S
         .await
         .map_err(|e| format!("reset local developer password: {e}"))?;
     if reset.status().is_redirection() {
-        return Err(redirect_error(&reset, "reset local developer password"));
+        return Err(redirect_error(
+            &reset,
+            "reset local developer password",
+            &[&access_token, &local.keycloak.developer_password],
+        ));
     }
     if !reset.status().is_success() {
         let body = reset.text().await.unwrap_or_default();
@@ -3978,7 +4025,11 @@ async fn request_keycloak_admin_token(
         .await
         .map_err(|e| format!("keycloak admin login failed: {e}"))?;
     if token_resp.status().is_redirection() {
-        return Err(redirect_error(&token_resp, "keycloak admin login"));
+        return Err(redirect_error(
+            &token_resp,
+            "keycloak admin login",
+            &[&local.keycloak.admin_password],
+        ));
     }
     if !token_resp.status().is_success() {
         let body = token_resp
@@ -4642,6 +4693,277 @@ mod tests {
             Ok(_) => panic!("the redirect target received a connection — the secret was resent"),
             Err(e) => panic!("unexpected accept error: {e}"),
         }
+    }
+
+    /// Positive control for the redirect-refusal tests in this module: a
+    /// client with the library DEFAULT (following) redirect policy, given
+    /// a 307 POST-with-body redirect, DOES reach the second listener WITH
+    /// the same body. Proves the origin+attacker fixture used below is
+    /// capable of detecting a followed redirect — so "never contacted" in
+    /// those tests is a real refusal, not a fixture that can't tell either
+    /// way. Bound to 127.0.0.1 explicitly (not `localhost`).
+    #[tokio::test]
+    async fn redirect_fixture_sanity_a_following_client_does_reach_the_attacker() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let attacker = TcpListener::bind("127.0.0.1:0").unwrap();
+        let attacker_addr = attacker.local_addr().unwrap();
+        let attacker_request = std::thread::spawn(move || {
+            let (mut stream, _) = attacker.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            String::from_utf8_lossy(&buf[..n]).to_string()
+        });
+
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = origin.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{attacker_addr}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        // The library DEFAULT builder — no Policy::none() — deliberately,
+        // since this test's whole point is to prove a follow IS detectable.
+        let following = reqwest::Client::builder().build().unwrap();
+        let _ = following
+            .post(format!("http://127.0.0.1:{origin_port}/local/bootstrap"))
+            .body("{\"secret\":\"fixture-only-secret\"}")
+            .send()
+            .await;
+
+        let request = tokio::task::spawn_blocking(move || attacker_request.join().unwrap())
+            .await
+            .unwrap();
+        assert!(
+            request.starts_with("POST /steal"),
+            "the fixture must be ABLE to detect a followed redirect: {request}"
+        );
+        assert!(
+            request.contains("fixture-only-secret"),
+            "a followed 307 POST must resend its body verbatim — this is exactly \
+             the body-resend risk the production code refuses: {request}"
+        );
+    }
+
+    /// ENS-6483 KEYREDIRECT fix round 3 item 2: production-constructor
+    /// test for `bootstrap_local_stack` (not `_named`). A 307 (not 302)
+    /// preserves the POST method and body, so this exercises the
+    /// body-resend path specifically. The attacker listener answers
+    /// normally rather than hanging, so an unprotected implementation
+    /// would show up as a real hit, not a test timeout.
+    #[tokio::test]
+    async fn bootstrap_stack_refuses_a_307_and_never_contacts_the_target() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let attacker_hit = Arc::new(AtomicBool::new(false));
+        let hit = attacker_hit.clone();
+        let attacker = TcpListener::bind("127.0.0.1:0").unwrap();
+        let attacker_addr = attacker.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = attacker.accept() {
+                hit.store(true, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = origin.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{attacker_addr}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let local = sample_local_profile();
+        let keycloak_user = LocalKeycloakUser {
+            subject: "kc-subject-1".to_string(),
+            email: "developer@local.enscrive".to_string(),
+        };
+        let err = bootstrap_local_stack(
+            &format!("http://127.0.0.1:{origin_port}"),
+            &local,
+            &keycloak_user,
+            true,
+        )
+        .await
+        .expect_err("a 3xx must never be treated as success");
+        assert!(
+            err.contains("307") || err.contains("redirected"),
+            "must name the redirect: {err}"
+        );
+        assert!(
+            !err.contains("bootstrap-secret"),
+            "must never print the bootstrap secret: {err}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !attacker_hit.load(Ordering::SeqCst),
+            "the redirect target received a connection — the secret was resent"
+        );
+    }
+
+    /// Production-constructor test for `request_keycloak_admin_token`
+    /// directly (not through `bootstrap_keycloak`'s 90s retry wrapper,
+    /// `wait_for_keycloak_admin_login`, which treats every error —
+    /// including this one — as retryable). Uses the real
+    /// `Policy::none()`-configured client shape a caller would build.
+    #[tokio::test]
+    async fn request_keycloak_admin_token_refuses_a_307_and_never_contacts_the_target() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let attacker_hit = Arc::new(AtomicBool::new(false));
+        let hit = attacker_hit.clone();
+        let attacker = TcpListener::bind("127.0.0.1:0").unwrap();
+        let attacker_addr = attacker.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = attacker.accept() {
+                hit.store(true, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_port = origin.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = origin.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{attacker_addr}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let local = sample_local_profile();
+        let base = format!("http://127.0.0.1:{origin_port}");
+        let err = request_keycloak_admin_token(&client, &base, &local)
+            .await
+            .expect_err("a 3xx must never be treated as success");
+        assert!(
+            err.contains("307") || err.contains("redirected"),
+            "must name the redirect: {err}"
+        );
+        assert!(
+            !err.contains(&local.keycloak.admin_password),
+            "must never print the admin password: {err}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !attacker_hit.load(Ordering::SeqCst),
+            "the redirect target received a connection — the admin password was resent"
+        );
+    }
+
+    /// Production-constructor test for `bootstrap_keycloak` end to end:
+    /// the mock Keycloak answers the admin token exchange successfully
+    /// (so `wait_for_keycloak_admin_login` returns on its first attempt,
+    /// no 90s retry), then 307s the very next call (the realm check),
+    /// which carries the bearer token this function just obtained.
+    #[tokio::test]
+    async fn bootstrap_keycloak_refuses_a_redirect_after_admin_login_and_never_contacts_the_target()
+    {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let attacker_hit = Arc::new(AtomicBool::new(false));
+        let hit = attacker_hit.clone();
+        let attacker = TcpListener::bind("127.0.0.1:0").unwrap();
+        let attacker_addr = attacker.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = attacker.accept() {
+                hit.store(true, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+
+        let keycloak = TcpListener::bind("127.0.0.1:0").unwrap();
+        let keycloak_port = keycloak.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            // 1st connection: the admin token POST. Answer with a valid token.
+            if let Ok((mut stream, _)) = keycloak.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"access_token":"fixture-admin-token"}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+            // 2nd connection: the realm-check GET, carrying that token —
+            // 307 it to the attacker.
+            if let Ok((mut stream, _)) = keycloak.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{attacker_addr}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+
+        let mut local = sample_local_profile();
+        local.ports.keycloak = keycloak_port;
+
+        let err = bootstrap_keycloak(&local)
+            .await
+            .expect_err("a 3xx must never be treated as success");
+        assert!(
+            err.contains("307") || err.contains("redirected"),
+            "must name the redirect: {err}"
+        );
+        assert!(
+            !err.contains("fixture-admin-token"),
+            "must never print the bearer token: {err}"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !attacker_hit.load(Ordering::SeqCst),
+            "the redirect target received a connection — a credential was resent"
+        );
     }
 
     /// A marker pointing at a profile the key store lost must fail loudly:

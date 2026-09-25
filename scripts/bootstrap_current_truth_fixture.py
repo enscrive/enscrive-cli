@@ -111,7 +111,12 @@ def request(
         status = exc.code
         text = exc.read().decode("utf-8")
 
-    if status >= 400:
+    if status >= 300:
+        # >= 300, not >= 400: a refused redirect (see no_redirect.py) comes
+        # back as a 3xx whose body is a plain-text refusal message, not
+        # JSON. Catching only >= 400 let a 3xx fall through to
+        # `json.loads(text)` below and fail as an opaque JSONDecodeError
+        # instead of naming the actual problem.
         raise RuntimeError(f"{method} {path} returned {status}: {text}")
 
     if not text:

@@ -95,6 +95,13 @@ jobs:
       - name: Provider-free CLI fixture helper controls
         timeout-minutes: 2
         run: python3 -m unittest discover -s scripts -p test_cli_auth_ci.py -v
+      - name: No-redirect urllib scripts (ENS-6483)
+        timeout-minutes: 2
+        # run_manifests.py (exercised by test_no_redirect.py) imports
+        # PyYAML at module level; nothing earlier in this job installs it.
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 -m unittest discover -s scripts -p test_no_redirect.py -v
       - name: Exact signed-byte ESM compatibility fixture
         timeout-minutes: 15
         run: python3 scripts/cli_auth_ci.py fixture --repo "$GITHUB_WORKSPACE" --evidence "$CLI_FIXTURE_EVIDENCE"

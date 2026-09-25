@@ -492,7 +492,7 @@ impl EnscriveClient {
             .map_err(map_reqwest_err)?;
 
         if response.status().is_redirection() {
-            return Err(redirect_error(&response));
+            return Err(self.redirect_error(&response));
         }
 
         let status = response.status().as_u16();
@@ -525,7 +525,7 @@ impl EnscriveClient {
             .map_err(|e| format!("request failed: {e}"))?;
 
         if response.status().is_redirection() {
-            return Err(redirect_error(&response).to_string());
+            return Err(self.redirect_error(&response).to_string());
         }
 
         let status = response.status();
@@ -583,7 +583,7 @@ impl EnscriveClient {
             .map_err(|e| format!("request failed: {e}"))?;
 
         if response.status().is_redirection() {
-            return Err(redirect_error(&response).to_string());
+            return Err(self.redirect_error(&response).to_string());
         }
 
         let status = response.status();
@@ -664,7 +664,7 @@ impl EnscriveClient {
             .map_err(map_reqwest_err)?;
 
         if response.status().is_redirection() {
-            return Err(redirect_error(&response));
+            return Err(self.redirect_error(&response));
         }
 
         let status = response.status().as_u16();
@@ -689,7 +689,7 @@ impl EnscriveClient {
             .map_err(|e| format!("request failed: {e}"))?;
 
         if response.status().is_redirection() {
-            return Err(redirect_error(&response).to_string());
+            return Err(self.redirect_error(&response).to_string());
         }
 
         let status = response.status();
@@ -781,7 +781,7 @@ impl EnscriveClient {
             .map_err(map_reqwest_err)?;
 
         if response.status().is_redirection() {
-            return Err(redirect_error(&response));
+            return Err(self.redirect_error(&response));
         }
 
         let status = response.status().as_u16();
@@ -811,7 +811,7 @@ impl EnscriveClient {
         let response = request.send().await.map_err(map_reqwest_err)?;
 
         if response.status().is_redirection() {
-            return Err(redirect_error(&response));
+            return Err(self.redirect_error(&response));
         }
 
         let status = response.status().as_u16();
@@ -833,9 +833,11 @@ fn map_reqwest_err(e: reqwest::Error) -> ApiError {
 /// Best-effort host extracted from a 3xx response's `Location` header,
 /// for error messages only. Handles both absolute and relative
 /// `Location` values. Never returns the query string or full URL, and
-/// never a host that itself looks like it carries a credential (see
-/// [`redact_if_secret_like`]) — `Location` is attacker-controlled.
-fn redirect_location_host(response: &reqwest::Response) -> Option<String> {
+/// never a host that itself carries a live credential or matches a known
+/// key shape (see [`redact_if_secret_like`]) — `Location` is
+/// attacker-controlled. `credentials` is every secret THIS request sent
+/// (the API key, and the embedding provider key if set).
+fn redirect_location_host(response: &reqwest::Response, credentials: &[&str]) -> Option<String> {
     let raw = response
         .headers()
         .get(reqwest::header::LOCATION)?
@@ -844,46 +846,50 @@ fn redirect_location_host(response: &reqwest::Response) -> Option<String> {
     let url = reqwest::Url::parse(raw)
         .or_else(|_| response.url().join(raw))
         .ok()?;
-    Some(redact_if_secret_like(url.host_str()?))
+    Some(redact_if_secret_like(url.host_str()?, credentials))
 }
 
-/// If `host` looks like it embeds a credential or any other long
-/// secret-like token, return a fixed placeholder instead of the real
-/// string. `host` is extracted from a 3xx response's `Location` header,
-/// which is attacker-controlled (or, on a redirect FROM our own edge,
-/// could echo something it shouldn't) — this is defense in depth so a
-/// redirect error can never itself become the leak it's reporting on.
+/// If `host` contains any of `credentials` verbatim, or matches a known
+/// API-key shape, return a fixed placeholder instead of the real string.
+/// `host` is extracted from a 3xx response's `Location` header, which is
+/// attacker-controlled (or, on a redirect FROM our own edge, could echo
+/// something it shouldn't) — this is defense in depth so a redirect
+/// error can never itself become the leak it's reporting on.
 ///
-/// Matches the known Enscrive API key shape (`enscrive_<8 hex>_<32
-/// alnum>`, e.g. `enscrive_a1b2c3d4_...`; see
-/// `enscrive-deploy/benchmarks/blackbox_dev_suite.py`'s `API_KEY_PATTERN`
-/// for the same shape used elsewhere), common provider-key prefixes
-/// (`sk-`, e.g. OpenAI/Anthropic), and — as a catch-all — any dot-label
-/// that is at least 20 characters of identifier-shaped text (letters,
-/// digits, `_`, `-`), which no ordinary hostname label is.
-pub(crate) fn redact_if_secret_like(host: &str) -> String {
-    fn looks_like_token(label: &str) -> bool {
-        if label.starts_with("enscrive_") || label.starts_with("sk-") {
-            return true;
-        }
-        label.len() >= 20
-            && label
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    }
-    if host.split('.').any(looks_like_token) {
+/// Key shapes: the known Enscrive API key shape (`enscrive_<8 hex>_<32
+/// alnum>`, e.g. `enscrive_a1b2c3d4_...` — matched by its `enscrive_`
+/// prefix; see `enscrive-deploy/benchmarks/blackbox_dev_suite.py`'s
+/// `API_KEY_PATTERN` for the same shape used elsewhere) and common
+/// provider-key prefixes (`sk-`, which also covers `sk-ant-`, e.g.
+/// OpenAI/Anthropic). Deliberately NOT a generic "long token-shaped
+/// label" rule — that redacted ordinary long hostnames too (AWS ELB
+/// names, other long service hosts), which must stay visible.
+pub(crate) fn redact_if_secret_like(host: &str, credentials: &[&str]) -> String {
+    let contains_a_live_credential = credentials
+        .iter()
+        .any(|c| !c.is_empty() && host.contains(c));
+    let matches_a_known_key_shape = host
+        .split('.')
+        .any(|label| label.starts_with("enscrive_") || label.starts_with("sk-"));
+    if contains_a_live_credential || matches_a_known_key_shape {
         "<redacted host>".to_string()
     } else {
         host.to_string()
     }
 }
 
-/// Build the typed error for a 3xx response this client refuses to
-/// follow. Call this BEFORE reading the response body.
-fn redirect_error(response: &reqwest::Response) -> ApiError {
-    ApiError::Redirected {
-        status: response.status().as_u16(),
-        location_host: redirect_location_host(response),
+impl EnscriveClient {
+    /// Build the typed error for a 3xx response this client refuses to
+    /// follow. Call this BEFORE reading the response body.
+    fn redirect_error(&self, response: &reqwest::Response) -> ApiError {
+        let credentials: [&str; 2] = [
+            self.api_key.as_str(),
+            self.embedding_provider_key.as_deref().unwrap_or(""),
+        ];
+        ApiError::Redirected {
+            status: response.status().as_u16(),
+            location_host: redirect_location_host(response, &credentials),
+        }
     }
 }
 
@@ -1230,7 +1236,7 @@ mod redirect_tests {
 
         let origin_port = one_shot_server(
             "HTTP/1.1 302 Found".to_string(),
-            format!("Location: http://localhost:{}/steal\r\n", attacker_addr.port()),
+            format!("Location: http://{attacker_addr}/steal\r\n"),
             String::new(),
         );
         let client = EnscriveClient::new(
@@ -1247,7 +1253,7 @@ mod redirect_tests {
         );
         let rendered = err.to_string();
         assert!(
-            rendered.contains("localhost") || rendered.contains("unspecified host"),
+            rendered.contains("127.0.0.1") || rendered.contains("unspecified host"),
             "must name the redirect target host: {rendered}"
         );
         assert!(
@@ -1284,19 +1290,52 @@ mod redirect_tests {
 
     #[test]
     fn redact_if_secret_like_leaves_an_ordinary_host_alone() {
-        assert_eq!(redact_if_secret_like("attacker.example"), "attacker.example");
-        assert_eq!(redact_if_secret_like("127.0.0.1"), "127.0.0.1");
         assert_eq!(
-            redact_if_secret_like("some-legit-long-subdomain-name.example.com"),
+            redact_if_secret_like("attacker.example", &[]),
+            "attacker.example"
+        );
+        assert_eq!(redact_if_secret_like("127.0.0.1", &[]), "127.0.0.1");
+        assert_eq!(
+            redact_if_secret_like("some-legit-long-subdomain-name.example.com", &[]),
             "some-legit-long-subdomain-name.example.com",
-            "a long but non-identifier-shaped hostname label is not a token"
+            "a long hyphenated hostname label (AWS ELB names, other long \
+             service hosts) is not, by itself, a credential"
+        );
+        assert_eq!(
+            redact_if_secret_like(
+                "aVeryLongRandomLookingToken1234567890.example.com",
+                &["fixture-only-key"],
+            ),
+            "aVeryLongRandomLookingToken1234567890.example.com",
+            "a long host that does NOT contain the live credential and does \
+             not match a known key shape must stay visible"
+        );
+    }
+
+    #[test]
+    fn redact_if_secret_like_redacts_a_host_containing_the_live_credential() {
+        assert_eq!(
+            redact_if_secret_like("fixture-only-key.attacker.example", &["fixture-only-key"],),
+            "<redacted host>"
+        );
+        // A second, unrelated credential slot (e.g. no embedding provider
+        // key set) must never itself defeat the check for the one that IS set.
+        assert_eq!(
+            redact_if_secret_like(
+                "fixture-only-key.attacker.example",
+                &["", "fixture-only-key"]
+            ),
+            "<redacted host>"
         );
     }
 
     #[test]
     fn redact_if_secret_like_redacts_an_enscrive_key_shaped_host() {
         assert_eq!(
-            redact_if_secret_like("enscrive_a1b2c3d4_thisisafakethirtytwocharkey1234.attacker.example"),
+            redact_if_secret_like(
+                "enscrive_a1b2c3d4_thisisafakethirtytwocharkey1234.attacker.example",
+                &[],
+            ),
             "<redacted host>"
         );
     }
@@ -1304,16 +1343,38 @@ mod redirect_tests {
     #[test]
     fn redact_if_secret_like_redacts_a_provider_key_prefix() {
         assert_eq!(
-            redact_if_secret_like("sk-ant-fake0123456789abcdefghijklmnop.attacker.example"),
+            redact_if_secret_like(
+                "sk-ant-fake0123456789abcdefghijklmnop.attacker.example",
+                &[]
+            ),
             "<redacted host>"
         );
     }
 
-    #[test]
-    fn redact_if_secret_like_redacts_any_long_token_shaped_label() {
-        assert_eq!(
-            redact_if_secret_like("aVeryLongRandomLookingToken1234567890.example.com"),
-            "<redacted host>"
+    #[tokio::test]
+    async fn redirect_to_a_host_containing_the_live_key_is_redacted_in_the_error() {
+        let port = one_shot_server(
+            "HTTP/1.1 302 Found".to_string(),
+            "Location: https://fixture-only-key.attacker.example/\r\n".to_string(),
+            String::new(),
+        );
+        let client = EnscriveClient::new(
+            format!("http://127.0.0.1:{port}"),
+            "fixture-only-key".to_string(),
+            None,
+        );
+        let err = client
+            .get_json("/v1/corpora")
+            .await
+            .expect_err("a 3xx must never be treated as success");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("redacted host"),
+            "a Location host carrying the live key must be redacted: {rendered}"
+        );
+        assert!(
+            !rendered.contains("fixture-only-key"),
+            "must never print the key itself: {rendered}"
         );
     }
 
