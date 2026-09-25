@@ -40,10 +40,10 @@ jobs:
             cross: false
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -93,7 +93,7 @@ jobs:
           cat "${BINARY_NAME}-${{ matrix.target }}.sha256"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -114,7 +114,7 @@ jobs:
             --cache-control "public, max-age=31536000, immutable"
 
       - name: Upload artifact for aggregation
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: enscrive-${{ matrix.target }}
           path: |
@@ -129,10 +129,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
@@ -153,7 +153,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -190,7 +190,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
@@ -223,7 +223,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # VENDORED from enscrive-runners/.github/actions/install-cosign-verified
       # (2026-07-18): enscrive-cli is a PUBLIC repo and GitHub never resolves
@@ -232,20 +232,14 @@ jobs:
       # it (v20260711-1523 → v20260714-1954, "Unable to resolve action"),
       # leaving the shipped CLI binary a week stale (ENS-1608 + ~40 dupes).
       # Behavior below is byte-faithful to the canonical action (retry +
-      # digest-pin + verified cache); keep the digest table in sync with the
+      # digest-pin + verified install); keep the digest table in sync with the
       # canonical copy via reviewed PRs. ENS-857 (no fleet workflow sync)
       # tracks the drift class.
-      - name: Restore cached cosign binary (unverified at this point)
-        id: cache-restore
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.cosign-verified/cosign
-          key: cosign-verified-v2.5.2-${{ runner.os }}-${{ runner.arch }}
-      - name: "Install cosign (ENS-1177 pattern, vendored: verify cache or fetch with retries + digest pin)"
+      - name: "Install cosign (ENS-1177 pattern, vendored: fetch with retries + digest pin)"
         shell: bash
         env:
           COSIGN_VERSION: v2.5.2
-          INSTALL_DIR: ${{ github.workspace }}/.cosign-verified
+          INSTALL_DIR: ${{ runner.temp }}/cosign-verified
           RUNNER_OS_IN: ${{ runner.os }}
           RUNNER_ARCH_IN: ${{ runner.arch }}
         run: |
@@ -280,16 +274,8 @@ jobs:
             actual=$(sha256sum "$1" | cut -d' ' -f1)
             [[ "${actual}" == "${expected_sha256}" ]]
           }
-          if [[ -f "${target}" ]]; then
-            if verify_sha256 "${target}"; then
-              echo "cache hit: cosign ${COSIGN_VERSION} (${platform}) verified — no network fetch needed."
-              chmod +x "${target}"
-              echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
-              exit 0
-            fi
-            echo "::warning::vendored install-cosign-verified: cached binary failed digest verification — discarding."
-            rm -f "${target}"
-          fi
+          download=$(mktemp "${INSTALL_DIR}/.cosign-download.XXXXXX")
+          trap 'rm -f "${download}"' EXIT
           url="https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-${platform}"
           echo "Fetching ${url} ..."
           attempt=0
@@ -298,7 +284,7 @@ jobs:
             --fail --show-error --silent --location \
             --retry 5 --retry-all-errors --retry-delay 3 --retry-max-time 90 \
             --connect-timeout 10 --max-time 60 \
-            -o "${target}.download" \
+            -o "${download}" \
             "${url}"; do
             attempt=$((attempt + 1))
             if [[ "${attempt}" -ge "${max_attempts}" ]]; then
@@ -309,18 +295,17 @@ jobs:
             echo "::warning::vendored install-cosign-verified: fetch attempt ${attempt} failed, backing off ${backoff}s..."
             sleep "${backoff}"
           done
-          if ! verify_sha256 "${target}.download"; then
+          if ! verify_sha256 "${download}"; then
             echo "::error::vendored install-cosign-verified: downloaded cosign does NOT match the pinned sha256. Refusing to install. expected=${expected_sha256}"
-            rm -f "${target}.download"
             exit 1
           fi
-          mv "${target}.download" "${target}"
+          mv -T "${download}" "${target}"
           chmod +x "${target}"
           echo "${INSTALL_DIR}" >> "${GITHUB_PATH}"
           echo "cosign ${COSIGN_VERSION} (${platform}) fetched, verified, and installed at ${target}."
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -417,10 +402,10 @@ jobs:
       INSTALLER_CACHE_CONTROL: "public, max-age=300"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
