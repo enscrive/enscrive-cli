@@ -2,7 +2,10 @@
   "legacy-local": {
     "filter": "local::tests::",
     "names": [
+      "local::tests::bootstrap_keycloak_refuses_a_redirect_after_admin_login_and_never_contacts_the_target",
+      "local::tests::bootstrap_named_refuses_a_redirect_and_never_contacts_the_target",
       "local::tests::bootstrap_request_carries_the_project_tenant_name",
+      "local::tests::bootstrap_stack_refuses_a_307_and_never_contacts_the_target",
       "local::tests::detect_container_runtime_errors_and_names_the_podman_fix_when_neither_present",
       "local::tests::detect_container_runtime_falls_back_to_podman_when_docker_absent",
       "local::tests::detect_container_runtime_prefers_docker_when_both_present",
@@ -35,6 +38,7 @@
       "local::tests::project_bootstrap_refuses_a_name_collision_by_default",
       "local::tests::project_bootstrap_rejects_a_tenant_with_no_key",
       "local::tests::recent_service_log_excerpt_returns_tail_lines",
+      "local::tests::redirect_fixture_sanity_a_following_client_does_reach_the_attacker",
       "local::tests::render_developer_env_contains_absolute_esm_binary",
       "local::tests::render_developer_env_writes_leptos_site_configuration",
       "local::tests::render_embed_env_contains_absolute_esm_binary",
@@ -42,6 +46,7 @@
       "local::tests::render_embed_env_contains_metering_outbox_path_under_runtime_dir",
       "local::tests::render_observe_env_contains_absolute_esm_binary",
       "local::tests::render_observe_env_contains_developer_base_url_from_configured_port",
+      "local::tests::request_keycloak_admin_token_refuses_a_307_and_never_contacts_the_target",
       "local::tests::resolve_api_context_prefers_profile",
       "local::tests::resolve_compose_binary_errors_with_actionable_message_when_nothing_works",
       "local::tests::resolve_compose_binary_falls_back_to_docker_compose_standalone",
