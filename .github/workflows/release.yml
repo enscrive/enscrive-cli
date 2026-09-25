@@ -158,9 +158,12 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          # The download must be flat: a hidden entry or subdirectory could
-          # carry a file that the dist/* checks below never see.
-          UNEXPECTED="$(find dist -mindepth 1 \( -type d -o -name '.*' -o ! -type f \) -print)"
+          # The download must be flat, and every entry name restricted to a
+          # safe character set: a hidden entry, subdirectory, or a name
+          # containing e.g. a newline could carry a file the dist/* checks
+          # below never see, or could defeat the `grep -xF` membership check
+          # further down by embedding a line break inside a filename.
+          UNEXPECTED="$(find dist -mindepth 1 \( -type d -o -name '.*' -o ! -type f -o -name '*[!A-Za-z0-9._-]*' \) -print)"
           if [ -n "${UNEXPECTED}" ]; then
             echo "::error::unexpected directory, hidden or non-regular entry in dist: ${UNEXPECTED}"
             exit 1
@@ -296,11 +299,10 @@ jobs:
       VERIFIED_SHA256: ${{ needs.publish.outputs.verified_sha256 }}
       LC_ALL: C
     steps:
-      - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-
+      # No checkout: this job only ever reads publish's verified digests and
+      # the downloaded build artifact. Skipping it also means there is no
+      # repo-tracked path that could pre-populate `dist/` before it is
+      # created below.
       - name: Download build artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -398,7 +400,7 @@ jobs:
 
             Checksums: `curl -fsSL https://developer.enscrive.io/releases/dev/${{ needs.publish.outputs.ref_name }}/SHA256SUMS | sha256sum -c --ignore-missing`
 
-            Signatures: `cosign verify-blob --bundle <artifact>.bundle --certificate-identity-regexp 'https://github.com/enscrive/enscrive-cli' --certificate-oidc-issuer https://token.actions.githubusercontent.com <artifact>`
+            Signatures: `cosign verify-blob --bundle <artifact>.bundle --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/tags/v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7})?$' --certificate-oidc-issuer https://token.actions.githubusercontent.com <artifact>`
           files: |
             dist/enscrive-*
             dist/SHA256SUMS
@@ -549,7 +551,7 @@ jobs:
             "${BINARY_LOCAL}"
           cosign verify-blob \
             --bundle "${BINARY_LOCAL}.bundle" \
-            --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/' \
+            --certificate-identity-regexp "^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/tags/${REF_NAME}\$" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${BINARY_LOCAL}"
           aws s3 cp \
@@ -569,7 +571,7 @@ jobs:
             "${SUMS_LOCAL}"
           cosign verify-blob \
             --bundle "${SUMS_LOCAL}.bundle" \
-            --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/' \
+            --certificate-identity-regexp "^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/tags/${REF_NAME}\$" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${SUMS_LOCAL}"
           aws s3 cp \
@@ -595,7 +597,11 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-installer:
     name: publish installer (install.sh + /install alias)
-    needs: aggregate
+    # Waits on publish, aggregate AND sign (not just aggregate) so install.sh
+    # never advances in a run that sign later rejects: a publish that failed
+    # its digest re-check, or a signing failure, must not leave a fresh
+    # installer live while the binary it points at is unsigned or unverified.
+    needs: [publish, aggregate, sign]
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # required for OIDC role assumption
@@ -608,6 +614,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
@@ -619,6 +627,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          [ -f installer/install.sh ] && [ ! -L installer/install.sh ] || {
+            echo "::error::installer/install.sh is missing or not a regular file"
+            exit 1
+          }
           aws s3 cp \
             installer/install.sh \
             "s3://${S3_BUCKET}/install.sh" \
