@@ -11,8 +11,9 @@ name: workflow-lint
 # tests/fixtures/workflow-lint/bad-empty-expression.yml reproduces that
 # exact shape so this job proves actionlint actually rejects it, rather
 # than trusting the tool blindly. tests/fixtures/workflow-lint/
-# bad-queue-value.yml is a second regression test -- see
-# .github/scripts/workflow-lint-prepare-copy.sh for what it guards.
+# bad-queue-value.yml and bad-queue-max-placement.yml are two more
+# regression tests -- see .github/scripts/workflow-lint-prepare-copy.py
+# for what they guard.
 
 on:
   pull_request:
@@ -34,6 +35,19 @@ env:
   # published checksums file for this release:
   # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
   ACTIONLINT_SHA256_LINUX_AMD64: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+  # Pinned so workflow-lint-prepare-copy.py's YAML-structure parsing is
+  # reproducible. actions/runner-images' ubuntu-latest does NOT ship
+  # PyYAML by default (verified against the image's own software list --
+  # it ships yamllint and libyaml-dev, neither of which is `import
+  # yaml`-able), so it's installed explicitly below from the official
+  # PyPI index over TLS. Unlike the actionlint binary, this isn't also
+  # sha256-pinned: PyPI releases are immutable once published, and pip's
+  # own index metadata already carries a per-file hash it verifies against
+  # on download, so pinning the version gives the same reproducibility
+  # actionlint's sha256 pin gives, without hard-coding a wheel filename
+  # that would break the moment the runner's default Python minor version
+  # changes.
+  PYYAML_VERSION: "6.0.3"
 
 jobs:
   workflow-lint:
@@ -54,6 +68,12 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
           chmod +x actionlint
           ./actionlint -version
+
+      - name: Install PyYAML
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user --no-input --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
+          python3 -c "import yaml; assert yaml.__version__ == '${PYYAML_VERSION}', yaml.__version__; print('PyYAML', yaml.__version__, 'OK')"
 
       - name: Probe for shellcheck on the runner image
         id: shellcheck_probe
@@ -103,7 +123,7 @@ jobs:
           fi
           echo "Fixture self-test OK: actionlint rejected $fixture with the expected expression-syntax error."
 
-      # Proves the queue:max stripping in workflow-lint-prepare-copy.sh
+      # Proves the queue:max stripping in workflow-lint-prepare-copy.py
       # (used below to work around actionlint v1.7.12 not yet recognizing
       # GitHub's concurrency.queue key) is narrowly scoped: a queue value
       # that is NOT "max" must reach actionlint completely untouched by
@@ -119,10 +139,10 @@ jobs:
           src_dir="$(mktemp -d)"
           cp "$fixture" "$src_dir/bad-queue-value.yml"
           dst_dir="$(mktemp -d)"
-          bash .github/scripts/workflow-lint-prepare-copy.sh "$src_dir" "$dst_dir"
+          python3 .github/scripts/workflow-lint-prepare-copy.py "$src_dir" "$dst_dir"
 
           if ! diff -u "$fixture" "$dst_dir/bad-queue-value.yml"; then
-            echo "::error::workflow-lint-prepare-copy.sh modified a queue value other than 'max'; that must never happen" >&2
+            echo "::error::workflow-lint-prepare-copy.py modified a queue value other than 'max'; that must never happen" >&2
             exit 1
           fi
 
@@ -143,6 +163,45 @@ jobs:
           fi
           echo "Fixture self-test OK: queue: bogus was left untouched by the copy step and still rejected by actionlint."
 
+      # Proves workflow-lint-prepare-copy.py refuses to blank a `queue:
+      # max` that is NOT a legitimate top-level or job-level
+      # concurrency.queue -- here it's a stray key directly under a job,
+      # which GitHub rejects outright. Without this, a PR that
+      # accidentally (or maliciously) added `queue: max` in the wrong
+      # place would have it silently commented out of the lint copy and
+      # the gate would pass on an actually-invalid workflow.
+      - name: Fixture self-test - a misplaced queue:max must not be blanked
+        run: |
+          set -euo pipefail
+          fixture="tests/fixtures/workflow-lint/bad-queue-max-placement.yml"
+          fixture_basename="$(basename "$fixture")"
+          test -f "$fixture" || { echo "::error::missing fixture $fixture" >&2; exit 1; }
+
+          src_dir="$(mktemp -d)"
+          cp "$fixture" "$src_dir/$fixture_basename"
+          dst_dir="$(mktemp -d)"
+
+          set +e
+          output="$(python3 .github/scripts/workflow-lint-prepare-copy.py "$src_dir" "$dst_dir" 2>&1)"
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "::error::workflow-lint-prepare-copy.py accepted $fixture (queue: max under a job, not concurrency); it must refuse to blank a misplaced queue: max" >&2
+            echo "$output"
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -qF "$fixture_basename"; then
+            echo "::error::workflow-lint-prepare-copy.py failed on $fixture but its error didn't name the file; got:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+          if [ -e "$dst_dir/$fixture_basename" ]; then
+            echo "::error::workflow-lint-prepare-copy.py wrote a copy of $fixture despite failing validation on it" >&2
+            exit 1
+          fi
+          echo "Fixture self-test OK: a misplaced queue: max made workflow-lint-prepare-copy.py fail, and no copy was written."
+
       - name: Lint workflow files
         env:
           SHELLCHECK_PRESENT: ${{ steps.shellcheck_probe.outputs.present }}
@@ -152,12 +211,15 @@ jobs:
 
           # Lint a throwaway copy, not .github/workflows itself: the copy
           # has the one known actionlint false positive (queue: max)
-          # commented out line-for-line (see
-          # .github/scripts/workflow-lint-prepare-copy.sh), with no
-          # -ignore flag, so any OTHER "unexpected key" finding --
-          # including a bad queue value -- still fails the gate.
+          # commented out line-for-line, ONLY where
+          # workflow-lint-prepare-copy.py's YAML-structure check confirms
+          # it's a legitimate top-level or job-level concurrency.queue
+          # (see that script and the three fixtures above). No -ignore
+          # flag is used anywhere, so any other "unexpected key" finding
+          # -- including a bad or misplaced queue value -- still fails
+          # the gate.
           lint_dir="$(mktemp -d)"
-          bash .github/scripts/workflow-lint-prepare-copy.sh .github/workflows "$lint_dir"
+          python3 .github/scripts/workflow-lint-prepare-copy.py .github/workflows "$lint_dir"
 
           cd "$lint_dir"
           shopt -s nullglob
