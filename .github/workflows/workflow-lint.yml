@@ -10,7 +10,9 @@ name: workflow-lint
 #
 # tests/fixtures/workflow-lint/bad-empty-expression.yml reproduces that
 # exact shape so this job proves actionlint actually rejects it, rather
-# than trusting the tool blindly.
+# than trusting the tool blindly. tests/fixtures/workflow-lint/
+# bad-queue-value.yml is a second regression test -- see
+# .github/scripts/workflow-lint-prepare-copy.sh for what it guards.
 
 on:
   pull_request:
@@ -32,17 +34,6 @@ env:
   # published checksums file for this release:
   # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
   ACTIONLINT_SHA256_LINUX_AMD64: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
-  # Known false positive: GitHub shipped the `queue:` sub-key of
-  # `concurrency` on 2026-05-07
-  # (https://github.blog/changelog/2026-05-07-github-actions-concurrency-groups-now-allow-larger-queues/),
-  # after actionlint v1.7.12 was released (2026-03-30), so actionlint does
-  # not yet recognize it and flags release-orchestrator.yml's
-  # `queue: max` as an unexpected key. `queue: max` is real, documented
-  # GitHub Actions syntax; do not "fix" it by deleting the key. Narrow
-  # this to the exact message so any other, real "unexpected key" finding
-  # still fails the gate. Remove this once actionlint ships support and
-  # ACTIONLINT_VERSION is bumped past that release.
-  ACTIONLINT_IGNORE_KNOWN_FALSE_POSITIVES: 'unexpected key "queue" for "concurrency" section'
 
 jobs:
   workflow-lint:
@@ -79,22 +70,103 @@ jobs:
       # below, actually rejects the cli#90 failure shape before we trust
       # it to guard the real workflow files. Without this, a broken
       # invocation (wrong flags, wrong path, tool silently no-op'ing)
-      # could make the gate pass vacuously.
+      # could make the gate pass vacuously. Also asserts the fixture file
+      # itself exists (a missing file must not be mistaken for "rejected
+      # as expected" just because some unrelated error also exits
+      # nonzero) and that actionlint's failure is actually the expected
+      # expression-syntax error, not some other unrelated failure.
       - name: Fixture self-test - actionlint must reject the known-bad workflow
         run: |
           set -euo pipefail
           fixture="tests/fixtures/workflow-lint/bad-empty-expression.yml"
-          if ./actionlint -shellcheck= "$fixture"; then
+          test -f "$fixture" || { echo "::error::missing fixture $fixture" >&2; exit 1; }
+
+          set +e
+          output="$(./actionlint -shellcheck= "$fixture" 2>&1)"
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
             echo "::error::actionlint did not flag $fixture; the workflow-lint gate would pass vacuously" >&2
+            echo "$output"
             exit 1
           fi
-          echo "Fixture self-test OK: actionlint rejected $fixture as expected."
+          if ! printf '%s\n' "$output" | grep -qF 'unexpected end of input'; then
+            echo "::error::actionlint rejected $fixture but not with the expected expression-syntax error; got:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -qF '[expression]'; then
+            echo "::error::actionlint rejected $fixture but the [expression] rule tag is missing from its output; got:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+          echo "Fixture self-test OK: actionlint rejected $fixture with the expected expression-syntax error."
+
+      # Proves the queue:max stripping in workflow-lint-prepare-copy.sh
+      # (used below to work around actionlint v1.7.12 not yet recognizing
+      # GitHub's concurrency.queue key) is narrowly scoped: a queue value
+      # that is NOT "max" must reach actionlint completely untouched by
+      # the copy step and must still fail. Without this, a too-broad
+      # stripping rule could silently hide a genuinely invalid queue
+      # value in any workflow file.
+      - name: Fixture self-test - an invalid queue value must still be rejected
+        run: |
+          set -euo pipefail
+          fixture="tests/fixtures/workflow-lint/bad-queue-value.yml"
+          test -f "$fixture" || { echo "::error::missing fixture $fixture" >&2; exit 1; }
+
+          src_dir="$(mktemp -d)"
+          cp "$fixture" "$src_dir/bad-queue-value.yml"
+          dst_dir="$(mktemp -d)"
+          bash .github/scripts/workflow-lint-prepare-copy.sh "$src_dir" "$dst_dir"
+
+          if ! diff -u "$fixture" "$dst_dir/bad-queue-value.yml"; then
+            echo "::error::workflow-lint-prepare-copy.sh modified a queue value other than 'max'; that must never happen" >&2
+            exit 1
+          fi
+
+          set +e
+          output="$(./actionlint -shellcheck= "$dst_dir/bad-queue-value.yml" 2>&1)"
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "::error::actionlint did not flag $fixture (queue: bogus); an invalid queue value must not pass" >&2
+            echo "$output"
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -qF 'unexpected key "queue" for "concurrency" section'; then
+            echo "::error::actionlint rejected $fixture but not with the expected queue/concurrency message; got:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+          echo "Fixture self-test OK: queue: bogus was left untouched by the copy step and still rejected by actionlint."
 
       - name: Lint workflow files
         env:
           SHELLCHECK_PRESENT: ${{ steps.shellcheck_probe.outputs.present }}
         run: |
           set -euo pipefail
+          actionlint_bin="$PWD/actionlint"
+
+          # Lint a throwaway copy, not .github/workflows itself: the copy
+          # has the one known actionlint false positive (queue: max)
+          # commented out line-for-line (see
+          # .github/scripts/workflow-lint-prepare-copy.sh), with no
+          # -ignore flag, so any OTHER "unexpected key" finding --
+          # including a bad queue value -- still fails the gate.
+          lint_dir="$(mktemp -d)"
+          bash .github/scripts/workflow-lint-prepare-copy.sh .github/workflows "$lint_dir"
+
+          cd "$lint_dir"
+          shopt -s nullglob
+          copies=(*.yml *.yaml)
+          if [ "${#copies[@]}" -eq 0 ]; then
+            echo "::error::no workflow files found to lint (checked *.yml and *.yaml)" >&2
+            exit 1
+          fi
+
           # The primary goal of this gate is expression/YAML syntax
           # validity (the cli#90 shape), not shell style. shellcheck only
           # runs when the runner image actually has it; if it starts
@@ -103,8 +175,8 @@ jobs:
           # findings in the PR that changes it, rather than letting shell
           # style noise block merges on syntax/expression validity.
           if [ "$SHELLCHECK_PRESENT" = "true" ]; then
-            ./actionlint -color -ignore "$ACTIONLINT_IGNORE_KNOWN_FALSE_POSITIVES" .github/workflows/*.yml
+            "$actionlint_bin" -color "${copies[@]}"
           else
             echo "::warning::shellcheck not found on this runner image; running actionlint with shellcheck disabled (-shellcheck=)"
-            ./actionlint -color -shellcheck= -ignore "$ACTIONLINT_IGNORE_KNOWN_FALSE_POSITIVES" .github/workflows/*.yml
+            "$actionlint_bin" -color -shellcheck= "${copies[@]}"
           fi
