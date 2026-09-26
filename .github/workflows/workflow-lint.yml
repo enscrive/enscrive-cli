@@ -1,0 +1,98 @@
+name: workflow-lint
+
+# Regression gate for the cli#90 outage: a `run:` block held an empty
+# ${{ }} expression inside release-orchestrator.yml, GitHub rejected the
+# whole workflow file as invalid, and every repository_dispatch
+# release-published event from the component repos silently failed for
+# about 11 hours before cli#94 fixed it. Nothing in CI caught it at the
+# time. actionlint validates GitHub Actions expression/YAML syntax and
+# would have caught this before merge.
+#
+# tests/fixtures/workflow-lint/bad-empty-expression.yml reproduces that
+# exact shape so this job proves actionlint actually rejects it, rather
+# than trusting the tool blindly.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACTIONLINT_VERSION: "1.7.12"
+  # sha256 of actionlint_1.7.12_linux_amd64.tar.gz, taken from the
+  # published checksums file for this release:
+  # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+  ACTIONLINT_SHA256_LINUX_AMD64: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+
+jobs:
+  workflow-lint:
+    name: workflow-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download and verify actionlint
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSfLo actionlint.tar.gz "$url"
+          echo "${ACTIONLINT_SHA256_LINUX_AMD64}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
+          ./actionlint -version
+
+      - name: Probe for shellcheck on the runner image
+        id: shellcheck_probe
+        run: |
+          set -euo pipefail
+          if command -v shellcheck >/dev/null 2>&1; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            shellcheck --version | head -2
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Proves actionlint, invoked the same way as the real lint step
+      # below, actually rejects the cli#90 failure shape before we trust
+      # it to guard the real workflow files. Without this, a broken
+      # invocation (wrong flags, wrong path, tool silently no-op'ing)
+      # could make the gate pass vacuously.
+      - name: Fixture self-test - actionlint must reject the known-bad workflow
+        run: |
+          set -euo pipefail
+          fixture="tests/fixtures/workflow-lint/bad-empty-expression.yml"
+          if ./actionlint -shellcheck= "$fixture"; then
+            echo "::error::actionlint did not flag $fixture; the workflow-lint gate would pass vacuously" >&2
+            exit 1
+          fi
+          echo "Fixture self-test OK: actionlint rejected $fixture as expected."
+
+      - name: Lint workflow files
+        env:
+          SHELLCHECK_PRESENT: ${{ steps.shellcheck_probe.outputs.present }}
+        run: |
+          set -euo pipefail
+          # The primary goal of this gate is expression/YAML syntax
+          # validity (the cli#90 shape), not shell style. shellcheck only
+          # runs when the runner image actually has it, and is left
+          # disabled here if it would otherwise surface a large pile of
+          # pre-existing findings unrelated to this gate -- see the PR
+          # description for the current disposition and any follow-up.
+          if [ "$SHELLCHECK_PRESENT" = "true" ]; then
+            ./actionlint -color .github/workflows/*.yml
+          else
+            echo "::warning::shellcheck not found on this runner image; running actionlint with shellcheck disabled (-shellcheck=)"
+            ./actionlint -color -shellcheck= .github/workflows/*.yml
+          fi

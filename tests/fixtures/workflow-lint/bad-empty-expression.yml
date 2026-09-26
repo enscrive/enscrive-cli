@@ -1,0 +1,28 @@
+name: bad-empty-expression-fixture
+
+# Known-bad fixture for the workflow-lint gate's self-test
+# (.github/workflows/workflow-lint.yml). It reproduces the exact failure
+# shape from cli#90: an empty ${{ }} expression written inside what looks
+# like a shell comment in a `run:` block. Inside a YAML block scalar `#` is
+# not a YAML comment, so GitHub Actions still substitutes the ${{ }}
+# expression before the script reaches the shell -- and an empty
+# expression is a syntax error, which made GitHub reject the entire
+# release-orchestrator.yml as invalid for about 11 hours until cli#94.
+#
+# This file is intentionally kept outside .github/workflows/ and must
+# never be moved there or wired into any real trigger: it exists only so
+# the workflow-lint gate can prove actionlint actually catches this class
+# of bug (a real regression test), rather than passing vacuously.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Step with an invalid empty expression in a run comment
+        run: |
+          echo "about to run"
+          # ${{ }}
+          echo "done"
