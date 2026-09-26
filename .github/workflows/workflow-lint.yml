@@ -87,13 +87,19 @@ jobs:
             exit 1
           fi
 
-          curl -sSfLo pyyaml.whl "$PYYAML_WHEEL_URL"
-          echo "${PYYAML_WHEEL_SHA256}  pyyaml.whl" | sha256sum -c -
+          # pip validates that a wheel's filename matches the packaging
+          # spec (distribution-version-pytag-abitag-platformtag.whl)
+          # before it will install it, so the downloaded file must keep
+          # its real name -- a generic name like "pyyaml.whl" is rejected
+          # even once its sha256 has been verified.
+          wheel_file="$(basename "$PYYAML_WHEEL_URL")"
+          curl -sSfLo "$wheel_file" "$PYYAML_WHEEL_URL"
+          echo "${PYYAML_WHEEL_SHA256}  ${wheel_file}" | sha256sum -c -
 
           # --no-index --no-deps: install exactly this verified local
           # file, with no further trust placed in pip's live index
           # resolution (PyYAML has no runtime dependencies).
-          python3 -m pip install --user --no-input --disable-pip-version-check --no-index --no-deps pyyaml.whl
+          python3 -m pip install --user --no-input --disable-pip-version-check --no-index --no-deps "$wheel_file"
           python3 -c "import yaml; assert yaml.__version__ == '${PYYAML_VERSION}', yaml.__version__; print('PyYAML', yaml.__version__, 'OK')"
 
       - name: Probe for shellcheck on the runner image
