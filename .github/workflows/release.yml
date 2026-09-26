@@ -400,7 +400,7 @@ jobs:
 
             Checksums: `curl -fsSL https://developer.enscrive.io/releases/dev/${{ needs.publish.outputs.ref_name }}/SHA256SUMS | sha256sum -c --ignore-missing`
 
-            Signatures: `cosign verify-blob --bundle <artifact>.bundle --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/tags/v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7})?$' --certificate-oidc-issuer https://token.actions.githubusercontent.com <artifact>`
+            Signatures: `cosign verify-blob --bundle <artifact>.bundle --certificate-identity-regexp '^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/tags/${{ needs.publish.outputs.ref_name }}$' --certificate-oidc-issuer https://token.actions.githubusercontent.com <artifact>`
           files: |
             dist/enscrive-*
             dist/SHA256SUMS

@@ -347,18 +347,27 @@ echo "SHA256 OK."
 #
 # The identity regexp below is the same pin enscrive-deploy applies when it
 # verifies fleet components (src/signature.rs::identity_regexp) — anchored at
-# `^`, dots escaped, and pinned to the release.yml workflow file rather than
-# the repo alone. All three matter: cosign matches the identity regexp
-# unanchored, so an unanchored pattern can match a substring of some other
-# signer's identity; and a repo-only pin (`.../enscrive-cli/.*`) would accept
-# a certificate minted by ANY workflow in this repo that holds
+# `^` and `$`, dots escaped, and pinned to the release.yml workflow file
+# rather than the repo alone. All these matter: cosign matches the identity
+# regexp unanchored, so an unanchored pattern can match a substring of some
+# other signer's identity; and a repo-only pin (`.../enscrive-cli/.*`) would
+# accept a certificate minted by ANY workflow in this repo that holds
 # `id-token: write`, not just the release pipeline. Verified against the
 # published v20260710-2039 bundle, whose SAN is
 # `https://github.com/enscrive/enscrive-cli/.github/workflows/release.yml@refs/tags/v20260710-2039`.
-# The trailing `@refs/` (not `@refs/tags/`) is deliberate: release.yml also
-# runs via workflow_dispatch, which signs from `@refs/heads/<branch>`.
+#
+# Anchored to `@refs/tags/` (security wave 3, ENS-6471): release.yml's
+# `publish` job now requires `GITHUB_REF == refs/tags/<ref_name>` for EVERY
+# successful run, tag-push or workflow_dispatch alike, so no run of the
+# hardened pipeline can ever sign from `@refs/heads/<branch>` again — a
+# dispatch against a branch now fails before anything is built, let alone
+# signed. Before landing this, confirm the CURRENTLY LIVE/pinned dev release
+# (enscrive-deploy's channels/dev.toml override for this component) was
+# itself signed by the hardened, tag-only pipeline; a still-live release
+# signed under the old `@refs/heads/<branch>` identity would fail this
+# installer's verification the moment this regexp tightens.
 # ---------------------------------------------------------------------------
-COSIGN_IDENTITY_REGEXP='^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/'
+COSIGN_IDENTITY_REGEXP='^https://github\.com/enscrive/enscrive-cli/\.github/workflows/release\.yml@refs/tags/'
 COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 BUNDLE_URL="${BINARY_URL}.bundle"
 BUNDLE_TMP="$TMPDIR_WORK/enscrive.bundle"
