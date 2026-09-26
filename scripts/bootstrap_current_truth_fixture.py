@@ -12,9 +12,8 @@ from urllib.parse import urlparse, urlunparse
 
 import no_redirect
 
-# ENS-6483: refuse redirects before request() (below) ever sends X-API-Key /
-# X-Embedding-Provider-Key.
-no_redirect.install()
+# ENS-6483: request() (below) calls no_redirect.urlopen() instead of
+# urllib.request.urlopen() directly.
 
 SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = SCRIPT_PATH.parents[2]
@@ -104,7 +103,7 @@ def request(
         headers=headers,
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with no_redirect.urlopen(req) as response:
             status = response.status
             text = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:

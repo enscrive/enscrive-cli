@@ -10,8 +10,19 @@ to wherever `Location` points, including across hosts. Unlike
 misconfigured or MITM'd `--base-url` would resend the key to whatever host
 `Location` names.
 
-`install()` replaces urllib's process-wide default opener with one that
-refuses every redirect outright.
+`urlopen()` is a drop-in replacement for `urllib.request.urlopen()` that
+sends the request through a MODULE-LEVEL opener built once here, not
+urllib's process-wide default. Each script that authenticates with
+`X-API-Key` calls `no_redirect.urlopen(...)` instead of
+`urllib.request.urlopen(...)` at its own send sites. This (rather than a
+single `install()` mutating the global default) is deliberate: a global
+opener can't be probed per script — removing the protection from one
+script would leave every OTHER script's tests still green, since they'd
+all still route through whatever the last `install()` call configured.
+Routing each script's own calls through its own reference to `_OPENER`
+makes each script's protection independently testable, with a plain
+`urllib.request.urlopen` (or a client built with the library default) as
+a valid negative control that DOES follow.
 """
 from __future__ import annotations
 
@@ -21,25 +32,38 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-_installed = False
+
+def credential_header_values(req) -> list:
+    """Every value of a header on `req` whose name looks like an API-key
+    credential (`X-API-Key`, `X-Embedding-Provider-Key`, or any other
+    `*-Key` header) — read directly off the request that is actually
+    being sent, not a hardcoded, easily-stale header-name list. urllib
+    normalizes header names via `str.capitalize()` (e.g. `X-API-Key` is
+    stored as `X-api-key`), so this matches case-insensitively."""
+    return [
+        value
+        for name, value in req.header_items()
+        if name.lower() == "x-api-key" or name.lower().endswith("-key")
+    ]
 
 
-def redact_if_secret_like(host: str) -> str:
-    """If `host` matches a known API-key shape, return a fixed placeholder
-    instead of the real string — parity with
-    `client.rs::redact_if_secret_like`'s key-shape rule. `host` is
-    extracted from a 3xx response's `Location` header, which is
-    attacker-controlled.
+def redact_if_secret_like(host: str, credentials=()) -> str:
+    """If `host` contains any of `credentials` verbatim (case-insensitively
+    — an attacker-controlled `Location` host is not guaranteed to
+    preserve the credential's original casing), or matches a known
+    API-key shape, return a fixed placeholder instead of the real string
+    — parity with `client.rs::redact_if_secret_like`. `host` is extracted
+    from a 3xx response's `Location` header, which is attacker-controlled.
 
-    Deliberately NOT a generic "long token-shaped label" rule — that
-    would also redact ordinary long hostnames (AWS ELB names, other long
-    service hosts). Unlike the Rust client, no single "live credential"
-    value is threaded through here (this opener is process-global, shared
-    by every caller, not tied to one client's key) — this rule is the key
-    shapes only."""
+    Deliberately NOT a generic "long token-shaped label" rule for the key
+    shape — that would also redact ordinary long hostnames (AWS ELB
+    names, other long service hosts)."""
+    host_lower = host.lower()
+    if any(c and c.lower() in host_lower for c in credentials):
+        return "<redacted host>"
     return (
         "<redacted host>"
-        if any(label.startswith(("enscrive_", "sk-")) for label in host.split("."))
+        if any(label.startswith(("enscrive_", "sk-")) for label in host_lower.split("."))
         else host
     )
 
@@ -69,7 +93,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
             host = urllib.parse.urlsplit(location).hostname or "an unspecified host"
         except ValueError:
             host = "an unspecified host"
-        host = redact_if_secret_like(host)
+        host = redact_if_secret_like(host, credential_header_values(req))
         try:
             fp.close()
         except Exception:  # noqa: BLE001 — best-effort; we're already failing closed
@@ -83,11 +107,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         )
 
 
-def install() -> None:
-    """Idempotent: make the no-redirect opener urllib's process-wide
-    default. Call once, at import time, before any real network request."""
-    global _installed
-    if _installed:
-        return
-    urllib.request.install_opener(urllib.request.build_opener(NoRedirect))
-    _installed = True
+_OPENER = urllib.request.build_opener(NoRedirect)
+
+
+def urlopen(request, timeout=None):
+    """Drop-in replacement for `urllib.request.urlopen(request,
+    timeout=timeout)`: same return value and exceptions, except a 3xx is
+    refused (see `NoRedirect`) instead of followed."""
+    return _OPENER.open(request, timeout=timeout)

@@ -849,9 +849,11 @@ fn redirect_location_host(response: &reqwest::Response, credentials: &[&str]) ->
     Some(redact_if_secret_like(url.host_str()?, credentials))
 }
 
-/// If `host` contains any of `credentials` verbatim, or matches a known
-/// API-key shape, return a fixed placeholder instead of the real string.
-/// `host` is extracted from a 3xx response's `Location` header, which is
+/// If `host` contains any of `credentials` verbatim (case-insensitively —
+/// an attacker-controlled `Location` host is not guaranteed to preserve
+/// the credential's original casing), or matches a known API-key shape,
+/// return a fixed placeholder instead of the real string. `host` is
+/// extracted from a 3xx response's `Location` header, which is
 /// attacker-controlled (or, on a redirect FROM our own edge, could echo
 /// something it shouldn't) — this is defense in depth so a redirect
 /// error can never itself become the leak it's reporting on.
@@ -865,10 +867,11 @@ fn redirect_location_host(response: &reqwest::Response, credentials: &[&str]) ->
 /// label" rule — that redacted ordinary long hostnames too (AWS ELB
 /// names, other long service hosts), which must stay visible.
 pub(crate) fn redact_if_secret_like(host: &str, credentials: &[&str]) -> String {
+    let host_lower = host.to_lowercase();
     let contains_a_live_credential = credentials
         .iter()
-        .any(|c| !c.is_empty() && host.contains(c));
-    let matches_a_known_key_shape = host
+        .any(|c| !c.is_empty() && host_lower.contains(&c.to_lowercase()));
+    let matches_a_known_key_shape = host_lower
         .split('.')
         .any(|label| label.starts_with("enscrive_") || label.starts_with("sk-"));
     if contains_a_live_credential || matches_a_known_key_shape {
@@ -1228,11 +1231,25 @@ mod redirect_tests {
 
     #[tokio::test]
     async fn cross_host_redirect_is_refused_and_never_followed() {
+        use std::io::{Read, Write};
         use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
+        let target_calls = Arc::new(AtomicUsize::new(0));
+        let calls = target_calls.clone();
         let attacker_listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        attacker_listener.set_nonblocking(true).unwrap();
         let attacker_addr = attacker_listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = attacker_listener.accept() {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
 
         let origin_port = one_shot_server(
             "HTTP/1.1 302 Found".to_string(),
@@ -1262,11 +1279,11 @@ mod redirect_tests {
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        match attacker_listener.accept() {
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Ok(_) => panic!("the redirect target received a connection — the API key was resent"),
-            Err(e) => panic!("unexpected accept error: {e}"),
-        }
+        assert_eq!(
+            target_calls.load(Ordering::SeqCst),
+            0,
+            "the redirect target received a connection — the API key was resent"
+        );
     }
 
     #[tokio::test]
@@ -1325,6 +1342,20 @@ mod redirect_tests {
                 "fixture-only-key.attacker.example",
                 &["", "fixture-only-key"]
             ),
+            "<redacted host>"
+        );
+    }
+
+    #[test]
+    fn redact_if_secret_like_matches_the_live_credential_case_insensitively() {
+        // A Location host is attacker-controlled and not guaranteed to
+        // preserve the credential's original casing.
+        assert_eq!(
+            redact_if_secret_like("pa-AbCd1234.attacker.example", &["PA-abcd1234"]),
+            "<redacted host>"
+        );
+        assert_eq!(
+            redact_if_secret_like("PA-ABCD1234.attacker.example", &["pa-abcd1234"]),
             "<redacted host>"
         );
     }

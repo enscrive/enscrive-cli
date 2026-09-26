@@ -4637,18 +4637,34 @@ mod tests {
     }
 
     /// ENS-6483 KEYREDIRECT: `bootstrap_local_stack_named` POSTs
-    /// `local.bootstrap.secret` in its JSON body. A 302 from the local
-    /// stack must never be followed — that would resend the secret to
-    /// whatever host `Location` names — and the redirect target must
-    /// never receive a connection.
+    /// `local.bootstrap.secret` in its JSON body. A 307 (preserves the
+    /// POST method AND body — the actual resend risk, unlike a 302/303)
+    /// from the local stack must never be followed — that would resend
+    /// the secret to whatever host `Location` names. The redirect target
+    /// ACCEPTS, RECORDS and REPLIES 200 rather than hanging, so an
+    /// unprotected implementation shows up as a real hit, not a test
+    /// timeout.
     #[tokio::test]
     async fn bootstrap_named_refuses_a_redirect_and_never_contacts_the_target() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
+        let target_calls = Arc::new(AtomicUsize::new(0));
+        let calls = target_calls.clone();
         let attacker = TcpListener::bind("127.0.0.1:0").unwrap();
-        attacker.set_nonblocking(true).unwrap();
         let attacker_addr = attacker.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = attacker.accept() {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
 
         let origin = TcpListener::bind("127.0.0.1:0").unwrap();
         let origin_port = origin.local_addr().unwrap().port();
@@ -4657,7 +4673,7 @@ mod tests {
                 let mut buf = [0u8; 4096];
                 let _ = stream.read(&mut buf);
                 let resp = format!(
-                    "HTTP/1.1 302 Found\r\nLocation: http://{attacker_addr}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{attacker_addr}/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 );
                 let _ = stream.write_all(resp.as_bytes());
             }
@@ -4679,7 +4695,7 @@ mod tests {
         .await
         .expect_err("a 3xx must never be treated as success");
         assert!(
-            err.contains("redirected") && err.contains("302"),
+            err.contains("redirected") && err.contains("307"),
             "must name the redirect: {err}"
         );
         assert!(
@@ -4688,11 +4704,11 @@ mod tests {
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        match attacker.accept() {
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {} // expected
-            Ok(_) => panic!("the redirect target received a connection — the secret was resent"),
-            Err(e) => panic!("unexpected accept error: {e}"),
-        }
+        assert_eq!(
+            target_calls.load(Ordering::SeqCst),
+            0,
+            "the redirect target received a connection — the secret was resent"
+        );
     }
 
     /// Positive control for the redirect-refusal tests in this module: a
