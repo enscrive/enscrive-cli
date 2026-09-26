@@ -613,6 +613,11 @@ jobs:
             # Column layout: REPO TARGET BINARY KIND SUFFIX SHA256 SIZE SOURCE_VERSION
             PLATFORMS_JSON="{}"
             SOURCE_VER=""
+            # ROW_BINARY/ROW_KIND are positional placeholders naming the TSV
+            # columns above; this loop uses the outer per-repo BINARY/KIND
+            # instead, but the row still has to be read into named fields to
+            # reach ROW_SUFFIX/ROW_SHA256/etc.
+            # shellcheck disable=SC2034
             while IFS=$'\t' read -r ROW_REPO ROW_TARGET ROW_BINARY ROW_KIND ROW_SUFFIX ROW_SHA256 ROW_SIZE ROW_SRC_VER; do
               [[ "${ROW_REPO}" != "${REPO}" ]] && continue
               SOURCE_VER="${ROW_SRC_VER}"
