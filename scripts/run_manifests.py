@@ -14,6 +14,11 @@ from pathlib import Path
 
 import yaml
 
+import no_redirect
+
+# ENS-6483: run_api (below) calls no_redirect.urlopen() instead of
+# urllib.request.urlopen() directly.
+
 ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 EXPORT_PATTERN = re.compile(r'^export\s+([A-Z0-9_]+)="(.*)"$')
 MANIFEST_SUFFIXES = {".json", ".yaml", ".yml"}
@@ -456,7 +461,7 @@ def run_api(base_url: str, api_key: str, spec: dict):
     )
 
     try:
-        with urllib.request.urlopen(request) as response:
+        with no_redirect.urlopen(request) as response:
             status = response.status
             text = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:

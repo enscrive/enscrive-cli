@@ -880,6 +880,7 @@ fn request_failure(command: &'static str, e: ApiError) -> CliResponse {
         // script happened to call.
         ApiError::Timeout => (FailureClass::Config, EXIT_CONFIG),
         ApiError::Network(e) if e.is_connect() => (FailureClass::Config, EXIT_CONFIG),
+        ApiError::Redirected { .. } => (FailureClass::Config, EXIT_CONFIG),
         ApiError::Network(_) | ApiError::InvalidResponse { .. }
         | ApiError::Http4xx { .. } | ApiError::Http5xx { .. } => (FailureClass::Bug, EXIT_FAILURE),
         ApiError::ServerClassified { class, .. } => {

@@ -2597,6 +2597,7 @@ fn request_failure(command: &str, error: client::ApiError) -> CliResponse {
         // (TLS, malformed response, body read) stays FAIL_BUG.
         ApiError::Timeout => (FailureClass::Config, EXIT_CONFIG),
         ApiError::Network(e) if e.is_connect() => (FailureClass::Config, EXIT_CONFIG),
+        ApiError::Redirected { .. } => (FailureClass::Config, EXIT_CONFIG),
         ApiError::Network(_) => (FailureClass::Bug, EXIT_FAILURE),
         ApiError::InvalidResponse { .. } => (FailureClass::Bug, EXIT_FAILURE),
         ApiError::Http4xx { .. } => (FailureClass::Bug, EXIT_FAILURE),
