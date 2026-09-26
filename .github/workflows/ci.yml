@@ -469,10 +469,10 @@ jobs:
             --description "Wave 4a clean-room memory loop" \
             --output json | tee /tmp/ensure.json
           corpus_id="$(jq -r '.data.id // .data.corpus_id' /tmp/ensure.json)"
-          # shellcheck disable=SC2015 -- both sides of && are plain `test`
-          # conditions with no side effects, so `A && B || C` here is exactly
-          # `if ! (A && B); then C; fi`, not the A-succeeds-but-B-fails footgun
-          # SC2015 warns about.
+          # Both sides of && are plain `test` conditions with no side effects,
+          # so `A && B || C` here is exactly `if ! (A && B); then C; fi`, not
+          # the A-succeeds-but-B-fails footgun SC2015 warns about.
+          # shellcheck disable=SC2015
           test -n "$corpus_id" && test "$corpus_id" != "null" \
             || { echo "FAIL: corpus ensure returned no id"; exit 1; }
           jq -e '.data.created == true' /tmp/ensure.json >/dev/null \
