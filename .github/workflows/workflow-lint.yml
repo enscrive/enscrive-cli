@@ -35,19 +35,27 @@ env:
   # published checksums file for this release:
   # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
   ACTIONLINT_SHA256_LINUX_AMD64: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
-  # Pinned so workflow-lint-prepare-copy.py's YAML-structure parsing is
-  # reproducible. actions/runner-images' ubuntu-latest does NOT ship
+  # Needed so workflow-lint-prepare-copy.py's YAML-structure parsing
+  # works at all. actions/runner-images' ubuntu-latest does NOT ship
   # PyYAML by default (verified against the image's own software list --
   # it ships yamllint and libyaml-dev, neither of which is `import
-  # yaml`-able), so it's installed explicitly below from the official
-  # PyPI index over TLS. Unlike the actionlint binary, this isn't also
-  # sha256-pinned: PyPI releases are immutable once published, and pip's
-  # own index metadata already carries a per-file hash it verifies against
-  # on download, so pinning the version gives the same reproducibility
-  # actionlint's sha256 pin gives, without hard-coding a wheel filename
-  # that would break the moment the runner's default Python minor version
-  # changes.
+  # yaml`-able), so it's installed explicitly below, pinned the same way
+  # actionlint is: an exact artifact with an independently verified
+  # sha256, not a bare version number trusting pip's own index-supplied
+  # hash. ubuntu-latest's default Python is CPython 3.12 (cp312 ABI);
+  # this is the manylinux2014/2_17/2_28 x86_64 wheel for that ABI.
+  # sha256 cross-checked two ways before pinning, both giving the same
+  # value: (1) https://pypi.org/pypi/pyyaml/6.0.3/json -> urls[] entry
+  # for this exact filename -> digests.sha256, and (2) downloading the
+  # file from PYYAML_WHEEL_URL ourselves and running sha256sum on it
+  # independently. If the runner's Python ABI ever differs from
+  # PYYAML_EXPECTED_ABI, the install step below fails closed instead of
+  # falling back to an unpinned `pip install pyyaml==...` -- pin a new
+  # wheel+hash for the new ABI first.
   PYYAML_VERSION: "6.0.3"
+  PYYAML_EXPECTED_ABI: "cp312"
+  PYYAML_WHEEL_URL: "https://files.pythonhosted.org/packages/8b/9d/b3589d3877982d4f2329302ef98a8026e7f4443c765c46cfecc8858c6b4b/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+  PYYAML_WHEEL_SHA256: "ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc"
 
 jobs:
   workflow-lint:
@@ -69,10 +77,23 @@ jobs:
           chmod +x actionlint
           ./actionlint -version
 
-      - name: Install PyYAML
+      - name: Install PyYAML (pinned artifact, hash-verified)
         run: |
           set -euo pipefail
-          python3 -m pip install --user --no-input --disable-pip-version-check "pyyaml==${PYYAML_VERSION}"
+
+          actual_abi="cp$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
+          if [ "$actual_abi" != "$PYYAML_EXPECTED_ABI" ]; then
+            echo "::error::runner Python ABI is $actual_abi, but the only verified PyYAML wheel pinned here is for $PYYAML_EXPECTED_ABI (linux x86_64). Refusing to fall back to an unpinned install -- pin a new wheel + independently verified sha256 for $actual_abi first." >&2
+            exit 1
+          fi
+
+          curl -sSfLo pyyaml.whl "$PYYAML_WHEEL_URL"
+          echo "${PYYAML_WHEEL_SHA256}  pyyaml.whl" | sha256sum -c -
+
+          # --no-index --no-deps: install exactly this verified local
+          # file, with no further trust placed in pip's live index
+          # resolution (PyYAML has no runtime dependencies).
+          python3 -m pip install --user --no-input --disable-pip-version-check --no-index --no-deps pyyaml.whl
           python3 -c "import yaml; assert yaml.__version__ == '${PYYAML_VERSION}', yaml.__version__; print('PyYAML', yaml.__version__, 'OK')"
 
       - name: Probe for shellcheck on the runner image
