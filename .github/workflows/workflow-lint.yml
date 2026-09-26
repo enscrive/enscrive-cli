@@ -32,6 +32,17 @@ env:
   # published checksums file for this release:
   # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
   ACTIONLINT_SHA256_LINUX_AMD64: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+  # Known false positive: GitHub shipped the `queue:` sub-key of
+  # `concurrency` on 2026-05-07
+  # (https://github.blog/changelog/2026-05-07-github-actions-concurrency-groups-now-allow-larger-queues/),
+  # after actionlint v1.7.12 was released (2026-03-30), so actionlint does
+  # not yet recognize it and flags release-orchestrator.yml's
+  # `queue: max` as an unexpected key. `queue: max` is real, documented
+  # GitHub Actions syntax; do not "fix" it by deleting the key. Narrow
+  # this to the exact message so any other, real "unexpected key" finding
+  # still fails the gate. Remove this once actionlint ships support and
+  # ACTIONLINT_VERSION is bumped past that release.
+  ACTIONLINT_IGNORE_KNOWN_FALSE_POSITIVES: 'unexpected key "queue" for "concurrency" section'
 
 jobs:
   workflow-lint:
@@ -86,13 +97,14 @@ jobs:
           set -euo pipefail
           # The primary goal of this gate is expression/YAML syntax
           # validity (the cli#90 shape), not shell style. shellcheck only
-          # runs when the runner image actually has it, and is left
-          # disabled here if it would otherwise surface a large pile of
-          # pre-existing findings unrelated to this gate -- see the PR
-          # description for the current disposition and any follow-up.
+          # runs when the runner image actually has it; if it starts
+          # surfacing a large pile of pre-existing findings unrelated to
+          # this gate, switch to -shellcheck= (disabled) here and list the
+          # findings in the PR that changes it, rather than letting shell
+          # style noise block merges on syntax/expression validity.
           if [ "$SHELLCHECK_PRESENT" = "true" ]; then
-            ./actionlint -color .github/workflows/*.yml
+            ./actionlint -color -ignore "$ACTIONLINT_IGNORE_KNOWN_FALSE_POSITIVES" .github/workflows/*.yml
           else
             echo "::warning::shellcheck not found on this runner image; running actionlint with shellcheck disabled (-shellcheck=)"
-            ./actionlint -color -shellcheck= .github/workflows/*.yml
+            ./actionlint -color -shellcheck= -ignore "$ACTIONLINT_IGNORE_KNOWN_FALSE_POSITIVES" .github/workflows/*.yml
           fi

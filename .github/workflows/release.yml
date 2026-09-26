@@ -324,6 +324,9 @@ jobs:
           for LINE in "${LINES[@]}"; do
             [[ "${LINE}" =~ ^[0-9a-f]{64}\ \ ${BINARY_NAME}-[a-z0-9_]+(-[a-z0-9_]+)+$ ]] || { echo "::error::invalid verified SHA256 record: ${LINE}"; exit 1; }
             NAME="${LINE:66}"
+            # shellcheck disable=SC2015 -- both sides of && are plain `test`
+            # conditions with no side effects, so this is `if ! (A && B); then
+            # C; fi`, not the A-succeeds-but-B-fails footgun SC2015 warns about.
             [ -f "artifacts/${NAME}" ] && [ ! -L "artifacts/${NAME}" ] || { echo "::error::verified file missing from the download: ${NAME}"; exit 1; }
             cp "artifacts/${NAME}" "dist/${NAME}"
           done
@@ -627,6 +630,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2015 -- both sides of && are plain `test`
+          # conditions with no side effects, so this is `if ! (A && B); then
+          # C; fi`, not the A-succeeds-but-B-fails footgun SC2015 warns about.
           [ -f installer/install.sh ] && [ ! -L installer/install.sh ] || {
             echo "::error::installer/install.sh is missing or not a regular file"
             exit 1

@@ -447,9 +447,11 @@ jobs:
           fi
           echo "OK: marker present, references profile by name, carries no key material"
 
-          echo "project=$project"     >> "$GITHUB_OUTPUT"
-          echo "root=$root"           >> "$GITHUB_OUTPUT"
-          echo "tenant_id=$tenant_id" >> "$GITHUB_OUTPUT"
+          {
+            echo "project=$project"
+            echo "root=$root"
+            echo "tenant_id=$tenant_id"
+          } >> "$GITHUB_OUTPUT"
 
       # ADR §7 item 2 (remember). Run from INSIDE the project with zero
       # global config — no --api-key, no --profile, no --endpoint. If cwd
@@ -467,6 +469,10 @@ jobs:
             --description "Wave 4a clean-room memory loop" \
             --output json | tee /tmp/ensure.json
           corpus_id="$(jq -r '.data.id // .data.corpus_id' /tmp/ensure.json)"
+          # shellcheck disable=SC2015 -- both sides of && are plain `test`
+          # conditions with no side effects, so `A && B || C` here is exactly
+          # `if ! (A && B); then C; fi`, not the A-succeeds-but-B-fails footgun
+          # SC2015 warns about.
           test -n "$corpus_id" && test "$corpus_id" != "null" \
             || { echo "FAIL: corpus ensure returned no id"; exit 1; }
           jq -e '.data.created == true' /tmp/ensure.json >/dev/null \
