@@ -204,7 +204,10 @@ jobs:
   # live qualification evidence; this routing change does not weaken the test.
   clean-room-onboard:
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_paid_onboarding == true }}
-    name: clean-room-onboard (${{ matrix.runtime }})
+    # No explicit `name:`: GitHub appends the matrix value when the job runs
+    # ("clean-room-onboard (docker)"). An explicit `(${{ matrix.runtime }})`
+    # name is left unexpanded on every PR, where this job is skipped, and the
+    # review-receipt publisher rejects a check name containing `${{`.
     runs-on: ubuntu-latest
     # ONBOARD_TEST_OPENAI_API_KEY lives only in the paid-onboarding environment
     # (deployment policy: branch main only; required reviewer: the Founder), so
