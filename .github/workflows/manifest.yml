@@ -62,8 +62,70 @@ env:
   CF_DISTRIBUTION_ID: EWE9BH1POOS0A
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # L35 actions-secrets containment: ENSCRIVE_ORCHESTRATOR_PAT lives only in the
+  # release-orchestrator environment (deployment policy: branch main only), so
+  # a workflow on any other ref cannot resolve it. The PAT read of
+  # enscrive-deploy runs in this separate job, not in generate-manifest,
+  # because declaring an environment changes a job's OIDC `sub` claim to
+  # `...:environment:<name>`, which the enscrive-releases-publisher trust
+  # policy does not accept. This job cannot mint an OIDC token
+  # (permissions: contents: read) and hands generate-manifest only the two
+  # channel TOML files, base64-encoded in job outputs (not a run artifact:
+  # this repo is public and artifacts are downloadable).
+  # ---------------------------------------------------------------------------
+  read-deploy-channels:
+    name: read enscrive-deploy channel pins
+    runs-on: ubuntu-latest
+    environment: release-orchestrator
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      roster_b64: ${{ steps.encode.outputs.roster_b64 }}
+      channel_b64: ${{ steps.encode.outputs.channel_b64 }}
+    steps:
+      - name: Require main
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF}" == "refs/heads/main" ]]
+          [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]
+
+      # ENS-507: enscrive-deploy is the source of truth for channel topology
+      # (PRD §0.3 / §5.8). Pinned at main — promotion-ceremony PRs are the
+      # gating mechanism.
+      - name: Checkout enscrive-deploy (channel source of truth)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: enscrive/enscrive-deploy
+          ref: main
+          path: _deploy
+          persist-credentials: false
+          # ENS-538: PAT with `Contents: read` on enscrive-deploy. Default GITHUB_TOKEN
+          # cannot read this private cross-repo. Workflow falls back to GITHUB_TOKEN
+          # if secret is absent (which will 403, matching today's behavior — surfaces
+          # the missing-secret state loudly rather than silently).
+          token: ${{ secrets.ENSCRIVE_ORCHESTRATOR_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Encode roster + channel toml for generate-manifest
+        id: encode
+        shell: bash
+        env:
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          case "${CHANNEL}" in dev|stage|prod) ;; *) echo "::error::bad channel '${CHANNEL}'"; exit 1 ;; esac
+          for f in roster.toml "${CHANNEL}.toml"; do
+            test -s "_deploy/channels/${f}" || { echo "::error::missing _deploy/channels/${f}"; exit 1; }
+            sha256sum "_deploy/channels/${f}"
+          done
+          echo "roster_b64=$(base64 -w0 _deploy/channels/roster.toml)" >> "${GITHUB_OUTPUT}"
+          echo "channel_b64=$(base64 -w0 "_deploy/channels/${CHANNEL}.toml")" >> "${GITHUB_OUTPUT}"
+
   generate-manifest:
     name: generate and publish manifest
+    needs: read-deploy-channels
     runs-on: ubuntu-latest
     env:
       # ENS Step-2: channel is now dispatch-selected (default dev) instead of
@@ -102,18 +164,23 @@ jobs:
       # four bash associative arrays (SOURCE_VERSIONS, BINARIES, ARTIFACT_KIND,
       # PLATFORMS) that were duplicated across the three downstream steps.
       # Pinned at main for now — promotion-ceremony PRs are the gating mechanism.
+      # The files are read by the read-deploy-channels job (L35: the PAT stays
+      # out of this OIDC-holding job) and materialized here at the same paths.
       # ---------------------------------------------------------------------------
-      - name: Checkout enscrive-deploy (channel source of truth)
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: enscrive/enscrive-deploy
-          ref: main
-          path: _deploy
-          # ENS-538: PAT with `Contents: read` on enscrive-deploy. Default GITHUB_TOKEN
-          # cannot read this private cross-repo. Workflow falls back to GITHUB_TOKEN
-          # if secret is absent (which will 403, matching today's behavior — surfaces
-          # the missing-secret state loudly rather than silently).
-          token: ${{ secrets.ENSCRIVE_ORCHESTRATOR_PAT || secrets.GITHUB_TOKEN }}
+      - name: Materialize enscrive-deploy channel toml (from read-deploy-channels)
+        shell: bash
+        env:
+          ROSTER_B64: ${{ needs.read-deploy-channels.outputs.roster_b64 }}
+          CHANNEL_B64: ${{ needs.read-deploy-channels.outputs.channel_b64 }}
+        run: |
+          set -euo pipefail
+          mkdir -p _deploy/channels
+          printf '%s' "${ROSTER_B64}" | base64 -d > _deploy/channels/roster.toml
+          printf '%s' "${CHANNEL_B64}" | base64 -d > "_deploy/channels/${CHANNEL}.toml"
+          for f in roster.toml "${CHANNEL}.toml"; do
+            test -s "_deploy/channels/${f}" || { echo "::error::empty _deploy/channels/${f}"; exit 1; }
+            sha256sum "_deploy/channels/${f}"
+          done
 
       # VENDORED from enscrive-runners/.github/actions/install-cosign-verified
       # (2026-07-18): enscrive-cli is a PUBLIC repo and GitHub never resolves

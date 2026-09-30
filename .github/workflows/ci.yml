@@ -206,6 +206,10 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.run_paid_onboarding == true }}
     name: clean-room-onboard (${{ matrix.runtime }})
     runs-on: ubuntu-latest
+    # ONBOARD_TEST_OPENAI_API_KEY lives only in the paid-onboarding environment
+    # (deployment policy: branch main only; required reviewer: the Founder), so
+    # no other ref resolves it and each paid run waits for approval (L35).
+    environment: paid-onboarding
     needs: [build, test, clippy]
     timeout-minutes: 20
     strategy:
