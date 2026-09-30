@@ -418,6 +418,10 @@ jobs:
           for LINE in "${LINES[@]}"; do
             [[ "${LINE}" =~ ^[0-9a-f]{64}\ \ ${BINARY_NAME}-[a-z0-9_]+(-[a-z0-9_]+)+$ ]] || { echo "::error::invalid verified SHA256 record: ${LINE}"; exit 1; }
             NAME="${LINE:66}"
+            # Both sides of && are plain `test` conditions with no side
+            # effects, so this is `if ! (A && B); then C; fi`, not the
+            # A-succeeds-but-B-fails footgun SC2015 warns about.
+            # shellcheck disable=SC2015
             [ -f "artifacts/${NAME}" ] && [ ! -L "artifacts/${NAME}" ] || { echo "::error::verified file missing from the download: ${NAME}"; exit 1; }
             cp "artifacts/${NAME}" "dist/${NAME}"
           done
@@ -803,6 +807,10 @@ jobs:
           # releases/<tag>/... objects, this key is not append-only, so
           # conditional-create would make every release after the first
           # fail here permanently.
+          # Both sides of && are plain `test` conditions with no side
+          # effects, so this is `if ! (A && B); then C; fi`, not the
+          # A-succeeds-but-B-fails footgun SC2015 warns about.
+          # shellcheck disable=SC2015
           [ -f installer/install.sh ] && [ ! -L installer/install.sh ] || {
             echo "::error::installer/install.sh is missing or not a regular file"
             exit 1
@@ -894,6 +902,10 @@ jobs:
   # ---------------------------------------------------------------------------
   notify-orchestrator:
     name: notify release orchestrator (ENS-538)
+    # ENSCRIVE_ORCHESTRATOR_PAT lives only in the release-notify environment
+    # (deployment policy: tags v* only), so a workflow on any other ref cannot
+    # resolve it (L35 actions-secrets containment).
+    environment: release-notify
     needs: [build, publish, aggregate, sign, publish-installer]
     runs-on: ubuntu-latest
     if: success()

@@ -1,0 +1,271 @@
+name: workflow-lint
+
+# Regression gate for the cli#90 outage: a `run:` block held an empty
+# ${{ }} expression inside release-orchestrator.yml, GitHub rejected the
+# whole workflow file as invalid, and every repository_dispatch
+# release-published event from the component repos silently failed for
+# about 11 hours before cli#94 fixed it. Nothing in CI caught it at the
+# time. actionlint validates GitHub Actions expression/YAML syntax and
+# would have caught this before merge.
+#
+# tests/fixtures/workflow-lint/bad-empty-expression.yml reproduces that
+# exact shape so this job proves actionlint actually rejects it, rather
+# than trusting the tool blindly. tests/fixtures/workflow-lint/
+# bad-queue-value.yml and bad-queue-max-placement.yml are two more
+# regression tests -- see .github/scripts/workflow-lint-prepare-copy.py
+# for what they guard.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ACTIONLINT_VERSION: "1.7.12"
+  # sha256 of actionlint_1.7.12_linux_amd64.tar.gz, taken from the
+  # published checksums file for this release:
+  # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+  ACTIONLINT_SHA256_LINUX_AMD64: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+  # Needed so workflow-lint-prepare-copy.py's YAML-structure parsing
+  # works at all. actions/runner-images' ubuntu-latest does NOT ship
+  # PyYAML by default (verified against the image's own software list --
+  # it ships yamllint and libyaml-dev, neither of which is `import
+  # yaml`-able), so it's installed explicitly below, pinned the same way
+  # actionlint is: an exact artifact with an independently verified
+  # sha256, not a bare version number trusting pip's own index-supplied
+  # hash. ubuntu-latest's default Python is CPython 3.12 (cp312 ABI);
+  # this is the manylinux2014/2_17/2_28 x86_64 wheel for that ABI.
+  # sha256 cross-checked two ways before pinning, both giving the same
+  # value: (1) https://pypi.org/pypi/pyyaml/6.0.3/json -> urls[] entry
+  # for this exact filename -> digests.sha256, and (2) downloading the
+  # file from PYYAML_WHEEL_URL ourselves and running sha256sum on it
+  # independently. If the runner's Python ABI ever differs from
+  # PYYAML_EXPECTED_ABI, the install step below fails closed instead of
+  # falling back to an unpinned `pip install pyyaml==...` -- pin a new
+  # wheel+hash for the new ABI first.
+  PYYAML_VERSION: "6.0.3"
+  PYYAML_EXPECTED_ABI: "cp312"
+  PYYAML_WHEEL_URL: "https://files.pythonhosted.org/packages/8b/9d/b3589d3877982d4f2329302ef98a8026e7f4443c765c46cfecc8858c6b4b/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl"
+  PYYAML_WHEEL_SHA256: "ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc"
+
+jobs:
+  workflow-lint:
+    name: workflow-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download and verify actionlint
+        run: |
+          set -euo pipefail
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -sSfLo actionlint.tar.gz "$url"
+          echo "${ACTIONLINT_SHA256_LINUX_AMD64}  actionlint.tar.gz" | sha256sum -c -
+          tar -xzf actionlint.tar.gz actionlint
+          chmod +x actionlint
+          ./actionlint -version
+
+      - name: Install PyYAML (pinned artifact, hash-verified)
+        run: |
+          set -euo pipefail
+
+          actual_abi="cp$(python3 -c 'import sys; print(f"{sys.version_info.major}{sys.version_info.minor}")')"
+          if [ "$actual_abi" != "$PYYAML_EXPECTED_ABI" ]; then
+            echo "::error::runner Python ABI is $actual_abi, but the only verified PyYAML wheel pinned here is for $PYYAML_EXPECTED_ABI (linux x86_64). Refusing to fall back to an unpinned install -- pin a new wheel + independently verified sha256 for $actual_abi first." >&2
+            exit 1
+          fi
+
+          # pip validates that a wheel's filename matches the packaging
+          # spec (distribution-version-pytag-abitag-platformtag.whl)
+          # before it will install it, so the downloaded file must keep
+          # its real name -- a generic name like "pyyaml.whl" is rejected
+          # even once its sha256 has been verified.
+          wheel_file="$(basename "$PYYAML_WHEEL_URL")"
+          curl -sSfLo "$wheel_file" "$PYYAML_WHEEL_URL"
+          echo "${PYYAML_WHEEL_SHA256}  ${wheel_file}" | sha256sum -c -
+
+          # --no-index --no-deps: install exactly this verified local
+          # file, with no further trust placed in pip's live index
+          # resolution (PyYAML has no runtime dependencies).
+          python3 -m pip install --user --no-input --disable-pip-version-check --no-index --no-deps "$wheel_file"
+          python3 -c "import yaml; assert yaml.__version__ == '${PYYAML_VERSION}', yaml.__version__; print('PyYAML', yaml.__version__, 'OK')"
+
+      - name: Probe for shellcheck on the runner image
+        id: shellcheck_probe
+        run: |
+          set -euo pipefail
+          if command -v shellcheck >/dev/null 2>&1; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            shellcheck --version | head -2
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Proves actionlint, invoked the same way as the real lint step
+      # below, actually rejects the cli#90 failure shape before we trust
+      # it to guard the real workflow files. Without this, a broken
+      # invocation (wrong flags, wrong path, tool silently no-op'ing)
+      # could make the gate pass vacuously. Also asserts the fixture file
+      # itself exists (a missing file must not be mistaken for "rejected
+      # as expected" just because some unrelated error also exits
+      # nonzero) and that actionlint's failure is actually the expected
+      # expression-syntax error, not some other unrelated failure.
+      - name: Fixture self-test - actionlint must reject the known-bad workflow
+        run: |
+          set -euo pipefail
+          fixture="tests/fixtures/workflow-lint/bad-empty-expression.yml"
+          test -f "$fixture" || { echo "::error::missing fixture $fixture" >&2; exit 1; }
+
+          set +e
+          output="$(./actionlint -shellcheck= "$fixture" 2>&1)"
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "::error::actionlint did not flag $fixture; the workflow-lint gate would pass vacuously" >&2
+            echo "$output"
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -qF 'unexpected end of input'; then
+            echo "::error::actionlint rejected $fixture but not with the expected expression-syntax error; got:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -qF '[expression]'; then
+            echo "::error::actionlint rejected $fixture but the [expression] rule tag is missing from its output; got:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+          echo "Fixture self-test OK: actionlint rejected $fixture with the expected expression-syntax error."
+
+      # Proves the queue:max stripping in workflow-lint-prepare-copy.py
+      # (used below to work around actionlint v1.7.12 not yet recognizing
+      # GitHub's concurrency.queue key) is narrowly scoped: a queue value
+      # that is NOT "max" must reach actionlint completely untouched by
+      # the copy step and must still fail. Without this, a too-broad
+      # stripping rule could silently hide a genuinely invalid queue
+      # value in any workflow file.
+      - name: Fixture self-test - an invalid queue value must still be rejected
+        run: |
+          set -euo pipefail
+          fixture="tests/fixtures/workflow-lint/bad-queue-value.yml"
+          test -f "$fixture" || { echo "::error::missing fixture $fixture" >&2; exit 1; }
+
+          src_dir="$(mktemp -d)"
+          cp "$fixture" "$src_dir/bad-queue-value.yml"
+          dst_dir="$(mktemp -d)"
+          python3 .github/scripts/workflow-lint-prepare-copy.py "$src_dir" "$dst_dir"
+
+          if ! diff -u "$fixture" "$dst_dir/bad-queue-value.yml"; then
+            echo "::error::workflow-lint-prepare-copy.py modified a queue value other than 'max'; that must never happen" >&2
+            exit 1
+          fi
+
+          set +e
+          output="$(./actionlint -shellcheck= "$dst_dir/bad-queue-value.yml" 2>&1)"
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "::error::actionlint did not flag $fixture (queue: bogus); an invalid queue value must not pass" >&2
+            echo "$output"
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -qF 'unexpected key "queue" for "concurrency" section'; then
+            echo "::error::actionlint rejected $fixture but not with the expected queue/concurrency message; got:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+          echo "Fixture self-test OK: queue: bogus was left untouched by the copy step and still rejected by actionlint."
+
+      # Proves workflow-lint-prepare-copy.py refuses to blank a `queue:
+      # max` that is NOT a legitimate top-level or job-level
+      # concurrency.queue -- here it's a stray key directly under a job,
+      # which GitHub rejects outright. Without this, a PR that
+      # accidentally (or maliciously) added `queue: max` in the wrong
+      # place would have it silently commented out of the lint copy and
+      # the gate would pass on an actually-invalid workflow.
+      - name: Fixture self-test - a misplaced queue:max must not be blanked
+        run: |
+          set -euo pipefail
+          fixture="tests/fixtures/workflow-lint/bad-queue-max-placement.yml"
+          fixture_basename="$(basename "$fixture")"
+          test -f "$fixture" || { echo "::error::missing fixture $fixture" >&2; exit 1; }
+
+          src_dir="$(mktemp -d)"
+          cp "$fixture" "$src_dir/$fixture_basename"
+          dst_dir="$(mktemp -d)"
+
+          set +e
+          output="$(python3 .github/scripts/workflow-lint-prepare-copy.py "$src_dir" "$dst_dir" 2>&1)"
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "::error::workflow-lint-prepare-copy.py accepted $fixture (queue: max under a job, not concurrency); it must refuse to blank a misplaced queue: max" >&2
+            echo "$output"
+            exit 1
+          fi
+          if ! printf '%s\n' "$output" | grep -qF "$fixture_basename"; then
+            echo "::error::workflow-lint-prepare-copy.py failed on $fixture but its error didn't name the file; got:" >&2
+            echo "$output" >&2
+            exit 1
+          fi
+          if [ -e "$dst_dir/$fixture_basename" ]; then
+            echo "::error::workflow-lint-prepare-copy.py wrote a copy of $fixture despite failing validation on it" >&2
+            exit 1
+          fi
+          echo "Fixture self-test OK: a misplaced queue: max made workflow-lint-prepare-copy.py fail, and no copy was written."
+
+      - name: Lint workflow files
+        env:
+          SHELLCHECK_PRESENT: ${{ steps.shellcheck_probe.outputs.present }}
+        run: |
+          set -euo pipefail
+          actionlint_bin="$PWD/actionlint"
+
+          # Lint a throwaway copy, not .github/workflows itself: the copy
+          # has the one known actionlint false positive (queue: max)
+          # commented out line-for-line, ONLY where
+          # workflow-lint-prepare-copy.py's YAML-structure check confirms
+          # it's a legitimate top-level or job-level concurrency.queue
+          # (see that script and the three fixtures above). No -ignore
+          # flag is used anywhere, so any other "unexpected key" finding
+          # -- including a bad or misplaced queue value -- still fails
+          # the gate.
+          lint_dir="$(mktemp -d)"
+          python3 .github/scripts/workflow-lint-prepare-copy.py .github/workflows "$lint_dir"
+
+          cd "$lint_dir"
+          shopt -s nullglob
+          copies=(*.yml *.yaml)
+          if [ "${#copies[@]}" -eq 0 ]; then
+            echo "::error::no workflow files found to lint (checked *.yml and *.yaml)" >&2
+            exit 1
+          fi
+
+          # The primary goal of this gate is expression/YAML syntax
+          # validity (the cli#90 shape), not shell style. shellcheck only
+          # runs when the runner image actually has it; if it starts
+          # surfacing a large pile of pre-existing findings unrelated to
+          # this gate, switch to -shellcheck= (disabled) here and list the
+          # findings in the PR that changes it, rather than letting shell
+          # style noise block merges on syntax/expression validity.
+          if [ "$SHELLCHECK_PRESENT" = "true" ]; then
+            "$actionlint_bin" -color "${copies[@]}"
+          else
+            echo "::warning::shellcheck not found on this runner image; running actionlint with shellcheck disabled (-shellcheck=)"
+            "$actionlint_bin" -color -shellcheck= "${copies[@]}"
+          fi

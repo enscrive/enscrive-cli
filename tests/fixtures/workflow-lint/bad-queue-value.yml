@@ -1,0 +1,26 @@
+name: bad-queue-value-fixture
+
+# Second known-bad fixture for the workflow-lint gate's self-test
+# (.github/workflows/workflow-lint.yml). release-orchestrator.yml uses
+# `queue: max` under `concurrency`, which actionlint v1.7.12 doesn't yet
+# recognize (see .github/scripts/workflow-lint-prepare-copy.sh), so the
+# gate comments that one exact line out of a throwaway copy before
+# linting. This fixture proves that stripping is narrowly scoped: a
+# queue value that is NOT "max" must reach actionlint completely
+# untouched and must still fail. Kept outside .github/workflows/ so it
+# is never treated as a real workflow, and never wired into any real
+# trigger.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: bad-queue-value-fixture
+  cancel-in-progress: false
+  queue: bogus
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "this workflow exists only to be linted, never executed"

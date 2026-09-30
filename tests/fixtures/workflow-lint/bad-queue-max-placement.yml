@@ -1,0 +1,22 @@
+name: bad-queue-max-placement-fixture
+
+# Third known-bad fixture for the workflow-lint gate's self-test
+# (.github/workflows/workflow-lint.yml). Proves
+# workflow-lint-prepare-copy.py refuses to blank a `queue: max` line that
+# is NOT a legitimate top-level or job-level `concurrency.queue`: here it
+# sits directly under a job, which is not a real GitHub Actions key at
+# all -- GitHub rejects it. The script must fail loudly on this file
+# instead of treating the stray `queue: max` as the known actionlint
+# false positive (see workflow-lint-prepare-copy.py) and hiding it from
+# the real lint step. Kept outside .github/workflows/ so it is never
+# treated as a real workflow, and never wired into any real trigger.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    queue: max
+    steps:
+      - run: echo "this workflow exists only to be linted, never executed"
