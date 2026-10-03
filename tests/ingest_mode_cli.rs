@@ -151,7 +151,6 @@ fn document_modes_preserve_request_fields_and_omission() {
                 "--voice-id",
                 "voice-fixture",
                 "--dry-run",
-                "--no-batch",
                 "--sync",
             ];
             let expected_documents = match source {
@@ -193,7 +192,7 @@ fn document_modes_preserve_request_fields_and_omission() {
                 String::from_utf8_lossy(&out.stderr)
             );
             assert_eq!(requests.len(), 1);
-            let mut expected = json!({"corpus_id":"corpus-fixture","documents":expected_documents,"voice_id":"voice-fixture","dry_run":true,"sync":true,"no_batch":true});
+            let mut expected = json!({"corpus_id":"corpus-fixture","documents":expected_documents,"voice_id":"voice-fixture","dry_run":true,"sync":true});
             if let Some(mode) = mode {
                 expected["mode"] = json!(if mode == "upsert" { "replace" } else { mode });
             }
@@ -228,4 +227,54 @@ fn document_mode_help_explains_replacement() {
     ] {
         assert!(help.contains(expected), "missing {expected}: {help}");
     }
+    assert!(!help.contains("--no-batch"), "hidden flag leaked: {help}");
+}
+
+#[test]
+fn no_batch_is_refused_before_any_http() {
+    let (out, requests) = invoke(&["--content", "fixture", "--no-batch"]);
+    assert!(!out.status.success());
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all.contains("--no-batch is no longer supported"), "{all}");
+    assert!(requests.is_empty());
+}
+
+#[test]
+fn ingest_body_never_contains_no_batch() {
+    let (out, requests) = invoke(&["--content", "fixture"]);
+    assert!(out.status.success());
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].get("no_batch").is_none());
+}
+
+#[test]
+fn force_sync_is_refused_before_any_http() {
+    let home = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let out = Command::new(env!("CARGO_BIN_EXE_enscrive"))
+        .args(["--output", "json", "corpus", "commit", "--id", "c1", "--force-sync"])
+        .env_clear()
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("XDG_DATA_HOME", home.path().join(".local/share"))
+        .env("ENSCRIVE_API_KEY", "fixture-only-key")
+        .env("ENSCRIVE_BASE_URL", endpoint)
+        .current_dir(home.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(all.contains("--force-sync is no longer supported"), "{all}");
+    assert!(listener.accept().is_err(), "request was made");
 }
