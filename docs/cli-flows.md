@@ -119,7 +119,7 @@ mutations, synchronous neural search" stance.
 ## Flow 2 — `ingest documents` (async mutation)
 
 `enscrive ingest documents --corpus-id … (--content | --content-file |
---documents-json | --documents-file) [--voice-id] [--sync] [--no-batch]
+--documents-json | --documents-file) [--voice-id] [--sync]
 [--dry-run] [--async] [--timeout-secs 1800]` (`IngestDocumentsArgs:508`).
 
 1. Exactly one content source (the four are mutually `conflicts_with`).

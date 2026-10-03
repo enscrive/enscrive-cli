@@ -992,8 +992,9 @@ struct IngestDocumentsArgs {
     #[arg(long)]
     sync: bool,
 
-    /// Disable batch embedding (force synchronous embedding)
-    #[arg(long = "no-batch")]
+    /// Removed: documents are always embedded through the provider's
+    /// native batch API. Parsed only to give a clear error.
+    #[arg(long = "no-batch", hide = true)]
     no_batch: bool,
 
     /// Preview without actually ingesting
@@ -1198,9 +1199,9 @@ struct CorpusCommitArgs {
     #[arg(long)]
     id: String,
 
-    /// DEPRECATED: the server always processes commits
-    /// asynchronously and ignores this flag; accepted for compatibility
-    #[arg(long = "force-sync")]
+    /// Removed: documents are always embedded through the provider's
+    /// native batch API. Parsed only to give a clear error.
+    #[arg(long = "force-sync", hide = true)]
     force_sync: bool,
 }
 
@@ -5207,6 +5208,15 @@ async fn main() {
                     }
                 },
                 IngestSubcommand::Documents(args) => {
+                    if args.no_batch {
+                        CliResponse::fail(
+                            "ingest documents",
+                            "error: --no-batch is no longer supported: documents are always embedded through the provider's native batch API.".to_string(),
+                            FailureClass::Bug,
+                            EXIT_CONFIG,
+                        )
+                        .emit(fmt)
+                    }
                     let documents = if let Some(ref content) = args.content {
                         let doc_id = resolve_single_doc_id(&args.document_id, content);
                         json!([{ "id": doc_id, "content": content, "metadata": {}, "fingerprint": "" }])
@@ -5259,7 +5269,6 @@ async fn main() {
                         "voice_id": args.voice_id,
                         "dry_run": args.dry_run,
                         "sync": if args.sync { Some(true) } else { None::<bool> },
-                        "no_batch": if args.no_batch { Some(true) } else { None::<bool> },
                     });
                     // Preserve omission: null is not equivalent to the API's default.
                     if let Some(mode) = args.mode {
@@ -5571,21 +5580,16 @@ async fn main() {
                     }
                 }
                 CorpusSubcommand::Commit(args) => {
-                    // ENS-638: staging commit is always-async server-side;
-                    // `force_sync` is accepted-and-ignored (since
-                    // enscrive-developer PR #67). Warn, but keep sending it
-                    // so older self-managed servers behave unchanged.
                     if args.force_sync {
-                        eprintln!(
-                            "warning: --force-sync is deprecated (ENS-638); the server now \
-                             always processes commits asynchronously and ignores this flag"
-                        );
+                        CliResponse::fail(
+                            "corpus commit",
+                            "error: --force-sync is no longer supported: documents are always embedded through the provider's native batch API.".to_string(),
+                            FailureClass::Bug,
+                            EXIT_CONFIG,
+                        )
+                        .emit(fmt)
                     }
-                    let body = if args.force_sync {
-                        json!({ "force_sync": true })
-                    } else {
-                        json!({})
-                    };
+                    let body = json!({});
                     let path = format!("/v1/corpora/{}/commit", args.id);
                     match client.post_json(&path, body).await {
                         Ok(data) => CliResponse::success("corpus commit", data).emit(fmt),
