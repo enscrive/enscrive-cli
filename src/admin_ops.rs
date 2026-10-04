@@ -52,10 +52,11 @@ pub struct AdminWalletCreditArgs {
     #[arg(long, required = true)]
     reason: String,
 
-    /// Optional idempotency key. When supplied, a retried call with the
-    /// same key collapses to a single credit instead of double-crediting.
-    #[arg(long = "idempotency-key")]
-    idempotency_key: Option<String>,
+    /// Idempotency key (required). A retried call with the same key
+    /// collapses to a single credit instead of double-crediting; the server
+    /// refuses a credit that carries none (`idempotency_key_required`).
+    #[arg(long = "idempotency-key", required = true)]
+    idempotency_key: String,
 }
 
 /// Pure validation: `--amount-micros` must be positive. Extracted (rather
@@ -768,7 +769,7 @@ mod tests {
             tenant: "t-1".to_string(),
             amount_micros: 5_000_000,
             reason: "seed docs sidecar".to_string(),
-            idempotency_key: Some("deploy-run-42".to_string()),
+            idempotency_key: "deploy-run-42".to_string(),
         };
         let body = build_wallet_credit_body(&args);
         assert_eq!(
@@ -783,15 +784,20 @@ mod tests {
     }
 
     #[test]
-    fn wallet_credit_body_omits_nothing_when_idempotency_key_absent() {
-        let args = AdminWalletCreditArgs {
-            tenant: "t-1".to_string(),
-            amount_micros: 1,
-            reason: "r".to_string(),
-            idempotency_key: None,
-        };
-        let body = build_wallet_credit_body(&args);
-        assert_eq!(body["idempotency_key"], Value::Null);
+    fn parse_admin_wallet_credit_refuses_missing_idempotency_key() {
+        let parsed = <crate::Cli as clap::Parser>::try_parse_from([
+            "enscrive",
+            "admin",
+            "wallet",
+            "credit",
+            "--tenant",
+            "11111111-1111-1111-1111-111111111111",
+            "--amount-micros",
+            "5000000",
+            "--reason",
+            "seed docs sidecar",
+        ]);
+        assert!(parsed.is_err(), "a keyless credit must not parse");
     }
 
     // -- tenants erase: wire-body shape (irreversible GDPR erasure) --------
@@ -981,7 +987,7 @@ mod tests {
                 assert_eq!(tenant, "11111111-1111-1111-1111-111111111111");
                 assert_eq!(amount_micros, 5_000_000);
                 assert_eq!(reason, "seed docs sidecar");
-                assert_eq!(idempotency_key.as_deref(), Some("deploy-run-42"));
+                assert_eq!(idempotency_key, "deploy-run-42");
             }
             _ => panic!("expected admin wallet credit"),
         }
