@@ -86,6 +86,17 @@ fn validate_wallet_credit_reason(reason: &str) -> Result<(), String> {
     }
 }
 
+fn validate_wallet_credit_idempotency_key(key: &str) -> Result<(), String> {
+    if key.trim().is_empty() {
+        Err(
+            "--idempotency-key cannot be empty — the server needs a stable key so a retry never credits twice"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
 /// Exact `POST /v1/admin/wallets/credit` request body. Extracted so the
 /// wire shape (field names, `idempotency_key` presence) is asserted by a
 /// test instead of only ever being exercised by a live network call.
@@ -106,6 +117,10 @@ pub async fn run_wallet_credit(client: &EnscriveClient, fmt: OutputFormat, args:
     }
 
     if let Err(e) = validate_wallet_credit_reason(&args.reason) {
+        CliResponse::fail(command, e, FailureClass::Bug, EXIT_CONFIG).emit(fmt);
+    }
+
+    if let Err(e) = validate_wallet_credit_idempotency_key(&args.idempotency_key) {
         CliResponse::fail(command, e, FailureClass::Bug, EXIT_CONFIG).emit(fmt);
     }
 
@@ -764,6 +779,14 @@ mod tests {
     }
 
     #[test]
+    fn wallet_credit_idempotency_key_refuses_empty_and_whitespace() {
+        assert!(validate_wallet_credit_idempotency_key("").is_err());
+        assert!(validate_wallet_credit_idempotency_key("   ").is_err());
+        assert!(validate_wallet_credit_idempotency_key("\t\n").is_err());
+        assert!(validate_wallet_credit_idempotency_key("deploy-run-42").is_ok());
+    }
+
+    #[test]
     fn wallet_credit_body_matches_server_wire_shape() {
         let args = AdminWalletCreditArgs {
             tenant: "t-1".to_string(),
@@ -797,7 +820,9 @@ mod tests {
             "--reason",
             "seed docs sidecar",
         ]);
-        assert!(parsed.is_err(), "a keyless credit must not parse");
+        let err = parsed.err().expect("a keyless credit must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(err.to_string().contains("--idempotency-key"));
     }
 
     // -- tenants erase: wire-body shape (irreversible GDPR erasure) --------
