@@ -6,13 +6,15 @@ name: release-orchestrator
 #   2. Bumps the corresponding `[overrides]` entry in channels/dev.toml
 #   3. Commits + pushes to enscrive-deploy main
 #   4. Dispatches manifest.yml to regenerate latest.json on CloudFront, ONLY
-#      when the repository variable DEV_AUTO_MANIFEST is exactly 'true'
+#      when the repository variable DEV_AUTO_MANIFEST is 'true' (any case)
 #
 # TRAIN GATE (Founder release trains, 2026-10-13): merges only rally pins.
 # Dev autodeploy watches releases/dev/latest.json, so that file must move only
 # when the CI Coordinator cuts a train. Step 4 is therefore held unless the
 # repository variable DEV_AUTO_MANIFEST is set to 'true' (the pre-train
-# behaviour: every pin bump publishes). Unset, or any other value, means HELD:
+# behaviour: every pin bump publishes). Actions expression comparisons are
+# case-insensitive, so 'TRUE' and 'True' also enable it. Unset, or any other
+# value, means HELD:
 # the pin bump in steps 1-3 still happens unchanged, the manifest dispatch is
 # skipped, and the run summary says so. To cut a train, run:
 #   gh workflow run manifest.yml -R enscrive/enscrive-cli -f channel=dev -f version=<train tag>
