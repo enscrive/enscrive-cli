@@ -1,0 +1,12 @@
+{
+  "comment": "Shape-recorded gh api responses (compare commits -> commits/<sha>/pulls) for a changed tag with squash and multi-commit PRs.",
+  "shas": ["c1", "c2", "c3", "c4"],
+  "pulls": {
+    "c1": [{"number": 101, "base": {"ref": "main"}, "merged_at": "2026-10-13T10:00:00Z"}],
+    "c2": [{"number": 99, "base": {"ref": "main"}, "merged_at": "2026-10-13T11:00:00Z"}],
+    "c3": [{"number": 99, "base": {"ref": "main"}, "merged_at": "2026-10-13T11:00:00Z"}],
+    "c4": [{"number": 102, "base": {"ref": "main"}, "merged_at": "2026-10-13T12:00:00Z"},
+           {"number": 150, "base": {"ref": "main"}, "merged_at": null}]
+  },
+  "expect": ["enscrive-cli#99", "enscrive-cli#101", "enscrive-cli#102"]
+}
