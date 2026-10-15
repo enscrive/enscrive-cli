@@ -403,7 +403,8 @@ pub enum AdminTenantsSubcommand {
     Create(AdminTenantsCreateArgs),
 
     /// PERMANENTLY erase a tenant's backups and live vectors: revokes its
-    /// keys, cancels its jobs, purges its live vectors, commits a backup
+    /// keys, requests cancellation of its jobs, purges its live vectors
+    /// (late-arriving writes are not yet verified absent), commits a backup
     /// tombstone, then deletes its catalog exports (and their ledger rows)
     /// and substrate-side backups. Irreversible. HTTP 202 means a step is
     /// still pending. Documents, chunks, records and other account data
