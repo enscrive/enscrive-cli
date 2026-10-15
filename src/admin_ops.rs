@@ -402,10 +402,13 @@ pub enum AdminTenantsSubcommand {
     /// `POST /v1/admin/tenants`.
     Create(AdminTenantsCreateArgs),
 
-    /// PERMANENTLY erase a tenant's backups and live vectors: tombstones
-    /// the tenant, deletes catalog artifacts + ledger rows, and erases
-    /// substrate-side backups. Irreversible. One part of a GDPR Article 17
-    /// erasure, not all of it. `POST /v1/admin/tenants/erase`.
+    /// PERMANENTLY erase a tenant's backups and live vectors: revokes its
+    /// keys, cancels its jobs, purges its live vectors, commits a backup
+    /// tombstone, then deletes its catalog exports (and their ledger rows)
+    /// and substrate-side backups. Irreversible. HTTP 202 means a step is
+    /// still pending. Documents, chunks, records and other account data
+    /// remain; this alone does not complete a GDPR Article 17 erasure.
+    /// `POST /v1/admin/tenants/erase`.
     Erase(AdminTenantsEraseArgs),
 }
 
