@@ -402,9 +402,10 @@ pub enum AdminTenantsSubcommand {
     /// `POST /v1/admin/tenants`.
     Create(AdminTenantsCreateArgs),
 
-    /// PERMANENTLY erase a tenant's backups (GDPR Article 17): tombstones
+    /// PERMANENTLY erase a tenant's backups and live vectors: tombstones
     /// the tenant, deletes catalog artifacts + ledger rows, and erases
-    /// substrate-side backups. Irreversible. `POST /v1/admin/tenants/erase`.
+    /// substrate-side backups. Irreversible. One part of a GDPR Article 17
+    /// erasure, not all of it. `POST /v1/admin/tenants/erase`.
     Erase(AdminTenantsEraseArgs),
 }
 
