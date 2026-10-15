@@ -407,7 +407,7 @@ pub enum AdminTenantsSubcommand {
     /// (late-arriving writes are not yet verified absent), commits a backup
     /// tombstone, then deletes its catalog exports (and their ledger rows)
     /// and substrate-side backups. Irreversible. HTTP 202 means a step is
-    /// still pending. Documents, chunks, records and other account data
+    /// still pending. Documents, chunks, records and most other account data
     /// remain; this alone does not complete a GDPR Article 17 erasure.
     /// `POST /v1/admin/tenants/erase`.
     Erase(AdminTenantsEraseArgs),
