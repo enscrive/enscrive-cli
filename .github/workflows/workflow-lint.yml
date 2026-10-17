@@ -102,6 +102,11 @@ jobs:
           python3 -m pip install --user --no-input --disable-pip-version-check --no-index --no-deps "$wheel_file"
           python3 -c "import yaml; assert yaml.__version__ == '${PYYAML_VERSION}', yaml.__version__; print('PyYAML', yaml.__version__, 'OK')"
 
+      # ENS-7414: runs the real "Validate version grammar" step of
+      # manifest.yml against accept/reject cases.
+      - name: Manifest version-grammar self-test
+        run: python3 .github/scripts/manifest-version-grammar-test.py
+
       - name: Probe for shellcheck on the runner image
         id: shellcheck_probe
         run: |

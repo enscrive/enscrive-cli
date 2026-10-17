@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Unified Enscrive release version tag (e.g. v0.1.0-beta.3)"
+        description: "Release version: train cut vYYYYMMDD-tN[fM][letter] (e.g. v20261016-t5, v20261017-t5f1b) or orchestrator vYYYYMMDD-HHMM[-sha7]"
         required: true
         type: string
       channel:
@@ -85,6 +85,26 @@ jobs:
       roster_b64: ${{ steps.encode.outputs.roster_b64 }}
       channel_b64: ${{ steps.encode.outputs.channel_b64 }}
     steps:
+      # ENS-7414: refuse any version outside the ruled grammar before any
+      # checkout, signing, upload or publish step runs. Train cut:
+      # vYYYYMMDD-tN[fM][letter]. Component/timestamp form (the shape
+      # release-orchestrator.yml dispatches): vYYYYMMDD-HHMM[-<hex sha>].
+      # The input arrives via env, never spliced into the script body.
+      - name: Validate version grammar
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # ASCII-only ranges: under a UTF-8 locale [0-9]/[a-z] match non-ASCII.
+          export LC_ALL=C
+          re='^v[0-9]{8}-t[0-9]{1,3}(f[0-9]{1,2})?[a-z]?$|^v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7,12})?$'
+          if ! [[ "$VERSION" =~ $re ]]; then
+            echo "::error::version '$VERSION' does not match the train-cut grammar"
+            exit 1
+          fi
+          echo "version '$VERSION' matches the release grammar"
+
       - name: Require main
         shell: bash
         run: |
