@@ -96,6 +96,8 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          # ASCII-only ranges: under a UTF-8 locale [0-9]/[a-z] match non-ASCII.
+          export LC_ALL=C
           re='^v[0-9]{8}-t[0-9]{1,3}(f[0-9]{1,2})?[a-z]?$|^v[0-9]{8}-[0-9]{4}(-[0-9a-f]{7,12})?$'
           if ! [[ "$VERSION" =~ $re ]]; then
             echo "::error::version '$VERSION' does not match the train-cut grammar"

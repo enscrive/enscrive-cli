@@ -35,7 +35,16 @@ REJECT = [
     "v20261016-t5ff1",
     "",
     "v20261016-t5;rm",
+    # ENS-7414 locale finding: non-ASCII must be rejected under a UTF-8 locale.
+    "v20261016-t5é",
+    "v２０２６１０１６-t5",
+    "v20261016-1234-abcé123",
+    "v2０261016-t5",
 ]
+
+# Locale used for the inherited-environment pass. The pass fails if this
+# locale is not installed, so it can never be vacuous.
+UTF8_LOCALE = "en_US.UTF-8"
 
 FAILS = 0
 
@@ -77,30 +86,48 @@ def main():
     else:
         print("ok   - step run script has no GitHub expression interpolation")
 
+    # Pass 1: stripped environment (no locale variables inherited).
+    # Pass 2: inherited UTF-8 locale, as on a developer or runner shell.
+    # The step must hold in both; pass 2 is where the non-ASCII cases bite.
+    locale_ok = subprocess.run(
+        ["locale", "-a"], capture_output=True, text=True
+    ).stdout.lower()
+    if "en_us.utf8" not in locale_ok.replace("-", ""):
+        print(f"FAIL - locale {UTF8_LOCALE} is not installed; the UTF-8 pass would be vacuous")
+        FAILS += 1
+    passes = [
+        ("stripped-env", {"PATH": os.environ.get("PATH", "")}),
+        ("inherited-utf8", {
+            "PATH": os.environ.get("PATH", ""),
+            "LANG": UTF8_LOCALE,
+            "LC_ALL": UTF8_LOCALE,
+        }),
+    ]
     cases = [(v, True) for v in ACCEPT] + [(v, False) for v in REJECT]
-    for version, should_accept in cases:
-        env = {"PATH": os.environ.get("PATH", ""), "VERSION": version}
-        proc = subprocess.run(
-            ["bash", "-c", script],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        accepted = proc.returncode == 0
-        label = repr(version)
-        if accepted != should_accept:
-            print(f"FAIL - {label}: expected {'accept' if should_accept else 'reject'}, "
-                  f"exit={proc.returncode}")
-            print(f"       stdout: {proc.stdout!r}")
-            print(f"       stderr: {proc.stderr!r}")
-            FAILS += 1
-        elif not should_accept and "does not match the train-cut grammar" not in proc.stdout:
-            print(f"FAIL - {label}: rejected without the expected ::error:: message")
-            print(f"       stdout: {proc.stdout!r}")
-            FAILS += 1
-        else:
-            print(f"ok   - {label}: {'accept' if should_accept else 'reject'}")
+    for pass_name, base_env in passes:
+        for version, should_accept in cases:
+            env = dict(base_env, VERSION=version)
+            proc = subprocess.run(
+                ["bash", "-c", script],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            accepted = proc.returncode == 0
+            label = f"[{pass_name}] {version!r}"
+            if accepted != should_accept:
+                print(f"FAIL - {label}: expected {'accept' if should_accept else 'reject'}, "
+                      f"exit={proc.returncode}")
+                print(f"       stdout: {proc.stdout!r}")
+                print(f"       stderr: {proc.stderr!r}")
+                FAILS += 1
+            elif not should_accept and "does not match the train-cut grammar" not in proc.stdout:
+                print(f"FAIL - {label}: rejected without the expected ::error:: message")
+                print(f"       stdout: {proc.stdout!r}")
+                FAILS += 1
+            else:
+                print(f"ok   - {label}: {'accept' if should_accept else 'reject'}")
 
     print()
     if FAILS == 0:
