@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Unified Enscrive release version tag (e.g. v0.1.0-beta.3)"
+        description: "Release version: train cut vYYYYMMDD-tN[fM][letter] (e.g. v20261016-t5, v20261017-t5f1b) or orchestrator vYYYYMMDD-HHMM[-sha7]"
         required: true
         type: string
       channel:
